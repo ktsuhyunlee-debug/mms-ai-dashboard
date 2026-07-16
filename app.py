@@ -901,13 +901,60 @@ def product_history_summary(row: pd.Series, history: pd.DataFrame) -> dict:
     }
 
 
+def product_history_including_current(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
+    """현재 발송 건을 포함해 동일 상품의 누적 이력을 찾습니다."""
+    cumulative = history[history["_date"] <= row["_date"]].copy()
+
+    for key in ["쇼라코드", "알파코드"]:
+        current = clean_identifier_value(row.get(key, ""))
+        if current and key in cumulative.columns:
+            candidates = cumulative[cumulative[key].map(clean_identifier_value).eq(current)]
+            if not candidates.empty:
+                return candidates.sort_values(["_date", "주문금액"])
+
+    name = str(row.get("상품명", "")).strip()
+    if name and "상품명" in cumulative.columns:
+        return cumulative[
+            cumulative["상품명"].astype(str).str.strip().eq(name)
+        ].sort_values(["_date", "주문금액"])
+
+    return cumulative.iloc[0:0].copy()
+
+
 def add_history_columns(current_df: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    """일일 상품표용 최고 실적 정보는 현재 발송일을 포함해 계산합니다."""
     out = current_df.copy()
-    summaries = [product_history_summary(row, history) for _, row in out.iterrows()]
-    out["운영횟수"] = [x["운영횟수"] for x in summaries]
-    out["평균매출"] = [x["평균매출"] for x in summaries]
-    out["최고매출"] = [x["최고매출"] for x in summaries]
-    out["최고타겟"] = [x["최고타겟"] for x in summaries]
+
+    highest_amounts = []
+    highest_dates = []
+    highest_targets = []
+
+    for _, row in out.iterrows():
+        cumulative = product_history_including_current(row, history)
+
+        if cumulative.empty:
+            highest_amounts.append(float(row.get("주문금액", 0)))
+            highest_dates.append(row.get("_date"))
+            highest_targets.append(target_label(row))
+            continue
+
+        max_amount = float(cumulative["주문금액"].max())
+        # 동일 최고매출이 여러 건이면 가장 최근 발송 건을 사용
+        best_rows = cumulative[cumulative["주문금액"].eq(max_amount)].sort_values("_date")
+        best_row = best_rows.iloc[-1]
+
+        highest_amounts.append(max_amount)
+        highest_dates.append(best_row.get("_date"))
+        highest_targets.append(target_label(best_row))
+
+    out["최고매출"] = highest_amounts
+    out["최고일자"] = [
+        pd.to_datetime(value).strftime("%Y-%m-%d")
+        if pd.notna(pd.to_datetime(value, errors="coerce"))
+        else ""
+        for value in highest_dates
+    ]
+    out["최고타겟"] = highest_targets
     return out
 
 
@@ -1820,7 +1867,7 @@ def format_integer_price(x):
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 연결
 # ─────────────────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## 📊 MMS AI Dashboard V4.0")
+st.sidebar.markdown("## 📊 MMS AI Dashboard V4.2")
 
 DEFAULT_GOOGLE_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -2224,19 +2271,19 @@ elif menu == "일일실적":
             "전시순서", "MD", "알파코드", "쇼라코드", "상품명",
             "정상가", "멤버십혜택가", "할인율", "추가노출",
             "주문건수", "주문수량", "주문금액",
-            "운영횟수", "평균매출", "최고매출", "최고타겟"
+            "재편성", "발송일 최저가", "최저가 확보",
+            "최고매출", "최고일자", "최고타겟"
         ]
         product_view = matched[[c for c in display_cols if c in matched.columns]].copy()
 
         if "할인율" in product_view.columns:
             product_view["할인율"] = product_view["할인율"].map(format_discount_percent)
-        for price_col in ["정상가", "멤버십혜택가", "주문금액", "평균매출", "최고매출"]:
+        for price_col in ["정상가", "멤버십혜택가", "주문금액", "최고매출", "발송일 최저가"]:
             if price_col in product_view.columns:
                 product_view[price_col] = product_view[price_col].map(format_integer_price)
-        if "운영횟수" in product_view.columns:
-            product_view["운영횟수"] = product_view["운영횟수"].map(
-                lambda x: f"{int(float(x)):,}" if str(x).strip() not in ["", "nan", "None"] else ""
-            )
+
+        if "최저가 확보" in product_view.columns:
+            product_view = product_view.rename(columns={"최저가 확보": "최저가 여부"})
 
         # 합계행
         total_row = {c: "" for c in product_view.columns}
