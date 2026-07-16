@@ -418,6 +418,26 @@ def normalize_send(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def normalize_message(df: pd.DataFrame | None) -> pd.DataFrame:
+    """선택적인 '문구' 시트를 정규화합니다."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["캠페인명", "MMS문구"])
+
+    d = df.copy()
+    campaign_col = first_col(d, ["캠페인명", "캠페인", "Campaign", "campaign"])
+    message_col = first_col(d, ["MMS문구", "MMS 문구", "발송문구", "문구"])
+
+    if campaign_col is None or message_col is None:
+        return pd.DataFrame(columns=["캠페인명", "MMS문구"])
+
+    d = d[[campaign_col, message_col]].copy()
+    d.columns = ["캠페인명", "MMS문구"]
+    d["캠페인명"] = d["캠페인명"].fillna("").astype(str).str.strip()
+    d["MMS문구"] = d["MMS문구"].apply(clean_mms_message if "clean_mms_message" in globals() else lambda x: str(x))
+    d = d[d["캠페인명"].ne("")].drop_duplicates("캠페인명", keep="last")
+    return d.reset_index(drop=True)
+
+
 def normalize_lowest(df: pd.DataFrame | None) -> pd.DataFrame:
     """선택적인 '최저가' 시트를 정규화합니다."""
     if df is None or df.empty:
@@ -456,7 +476,17 @@ def load_excel_bytes(file_bytes: bytes):
         if "최저가" in workbook.sheet_names
         else pd.DataFrame()
     )
-    return normalize_product(product), normalize_send(send), normalize_lowest(lowest)
+    messages = (
+        pd.read_excel(workbook, sheet_name="문구")
+        if "문구" in workbook.sheet_names
+        else pd.DataFrame()
+    )
+    return (
+        normalize_product(product),
+        normalize_send(send),
+        normalize_lowest(lowest),
+        normalize_message(messages),
+    )
 
 
 def extract_google_sheet_id(url: str) -> str:
@@ -529,7 +559,16 @@ def load_google_sheet(url: str):
             lowest = read_google_csv(sheet_id, "최저가")
         except Exception:
             lowest = pd.DataFrame()
-        return normalize_product(product), normalize_send(send), normalize_lowest(lowest)
+        try:
+            messages = read_google_csv(sheet_id, "문구")
+        except Exception:
+            messages = pd.DataFrame()
+        return (
+            normalize_product(product),
+            normalize_send(send),
+            normalize_lowest(lowest),
+            normalize_message(messages),
+        )
     except Exception as exc:
         errors.append(f"상품·소재 CSV 불러오기 실패: {exc}")
 
@@ -541,10 +580,11 @@ def sync_google_sheet(url: str, force: bool = False):
     if force:
         load_google_sheet.clear()
 
-    products, sends, lowest = load_google_sheet(url)
+    products, sends, lowest, messages = load_google_sheet(url)
     st.session_state.products = products
     st.session_state.sends = sends
     st.session_state.lowest = lowest
+    st.session_state.messages = messages
     st.session_state.source_name = "구글시트 자동연동"
     st.session_state.synced_at = datetime.now()
     st.session_state.google_sync_error = None
@@ -792,40 +832,160 @@ def classify_cases(row: pd.Series, history: pd.DataFrame) -> list[str]:
     return list(dict.fromkeys(cases))
 
 
+def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
+    """현재 행보다 이전의 동일 상품 이력을 코드 우선순위로 찾습니다."""
+    prior = history[history["_date"] < row["_date"]].copy()
+
+    for key in ["쇼라코드", "알파코드"]:
+        current = clean_identifier_value(row.get(key, ""))
+        if current and key in prior.columns:
+            candidates = prior[prior[key].map(clean_identifier_value).eq(current)]
+            if not candidates.empty:
+                return candidates.sort_values("_date")
+
+    name = str(row.get("상품명", "")).strip()
+    if name and "상품명" in prior.columns:
+        return prior[prior["상품명"].astype(str).str.strip().eq(name)].sort_values("_date")
+
+    return prior.iloc[0:0].copy()
+
+
+def target_label(row: pd.Series, include_seg: bool = True) -> str:
+    values = []
+    for col in ["성별", "연령"]:
+        value = str(row.get(col, "")).strip()
+        if value not in ["", "nan", "None"]:
+            values.append(value)
+    if include_seg:
+        seg = clean_identifier_value(row.get("SEG", ""))
+        if seg:
+            values.append(f"SEG{seg}")
+    return " ".join(values).strip()
+
+
+def product_history_summary(row: pd.Series, history: pd.DataFrame) -> dict:
+    prior = product_history_rows(row, history)
+    if prior.empty:
+        return {
+            "운영횟수": 0,
+            "평균매출": 0,
+            "최고매출": 0,
+            "최고타겟": "",
+            "최근이력": None,
+            "동일타겟이력": pd.DataFrame(),
+            "과거이력": prior,
+        }
+
+    prior = prior.copy()
+    prior["_target"] = prior.apply(target_label, axis=1)
+    target_stats = (
+        prior.groupby("_target", dropna=False)["주문금액"]
+        .agg(["mean", "max", "count"])
+        .sort_values(["mean", "max", "count"], ascending=False)
+    )
+    best_target = ""
+    if not target_stats.empty:
+        best_target = str(target_stats.index[0]).strip()
+
+    current_target = target_label(row)
+    same_target = prior[prior["_target"].eq(current_target)].copy()
+
+    return {
+        "운영횟수": int(len(prior)),
+        "평균매출": float(prior["주문금액"].mean()),
+        "최고매출": float(prior["주문금액"].max()),
+        "최고타겟": best_target,
+        "최근이력": prior.iloc[-1],
+        "동일타겟이력": same_target,
+        "과거이력": prior,
+    }
+
+
+def add_history_columns(current_df: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    out = current_df.copy()
+    summaries = [product_history_summary(row, history) for _, row in out.iterrows()]
+    out["운영횟수"] = [x["운영횟수"] for x in summaries]
+    out["평균매출"] = [x["평균매출"] for x in summaries]
+    out["최고매출"] = [x["최고매출"] for x in summaries]
+    out["최고타겟"] = [x["최고타겟"] for x in summaries]
+    return out
+
+
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
-    name = str(row["상품명"])
-    amount = float(row["주문금액"])
+    name = str(row.get("상품명", "")).strip()
+    amount = float(row.get("주문금액", 0))
     grade = product_grade(amount)
-    prior = history[(history["상품명"] == name) & (history["_date"] < row["_date"])].sort_values("_date")
+    summary = product_history_summary(row, history)
+    prior = summary["과거이력"]
+    same_target = summary["동일타겟이력"]
+    current_target = target_label(row)
     parts = []
 
-    if len(prior) == 0:
-        parts.append("MMS 첫 운영 상품으로 신규 TEST 진행")
-    elif len(prior) == 1:
-        parts.append(f"기존 운영 시 {compact_money(prior.iloc[-1]['주문금액'])} 기록")
+    raw_case = str(row.get("재편성", "")).strip()
+    if summary["운영횟수"] == 0:
+        if raw_case == "유사신규":
+            parts.append(f"{raw_case} 상품으로 {current_target or '신규 타겟'} TEST 진행")
+        else:
+            parts.append(f"MMS 첫 운영 상품으로 {current_target or '신규 타겟'} 신규 TEST 진행")
     else:
-        parts.append(
-            f"기존 운영 시 최소 {compact_money(prior['주문금액'].min())}에서 "
-            f"최대 {compact_money(prior['주문금액'].max())} 기록"
-        )
+        # 과거 이력을 실제 날짜·타겟·매출 중심으로 제시
+        recent_examples = prior.sort_values("_date", ascending=False).head(2).sort_values("_date")
+        example_texts = []
+        for _, hist_row in recent_examples.iterrows():
+            dt = hist_row["_date"]
+            dt_text = f"{dt.month}/{dt.day}" if pd.notna(dt) else ""
+            tgt = target_label(hist_row)
+            example_texts.append(
+                f"{dt_text} {tgt} 운영 시 {compact_money(hist_row['주문금액'])} 기록".strip()
+            )
+        if example_texts:
+            parts.append(" / ".join(example_texts))
+
+        if same_target.empty:
+            parts.append(f"금번 {current_target} 첫 TEST 진행")
+        else:
+            parts.append(
+                f"동일 타겟 과거 {len(same_target)}회 운영 시 "
+                f"평균 {compact_money(same_target['주문금액'].mean())} 기록"
+            )
+
+        if summary["최고타겟"] and summary["최고타겟"] != current_target:
+            target_avg = (
+                prior.assign(_target=prior.apply(target_label, axis=1))
+                .groupby("_target")["주문금액"].mean()
+                .get(summary["최고타겟"], 0)
+            )
+            parts.append(
+                f"과거 최고 효율 타겟은 {summary['최고타겟']}로 "
+                f"평균 {compact_money(target_avg)} 기록"
+            )
 
     exposure = row.get("추가노출")
-    if pd.notna(exposure) and str(exposure) not in ["", "-", "nan"]:
-        parts.append(f"{exposure} 추가 노출 운영")
+    if pd.notna(exposure) and str(exposure).strip() not in ["", "-", "nan", "None"]:
+        parts.append(f"{str(exposure).strip()} 추가 노출 운영")
 
     dt = row.get("_date")
     current_date = f"{dt.month}/{dt.day}" if pd.notna(dt) and hasattr(dt, "month") else ""
-    target_text = " ".join(
-        str(row.get(c, "")) for c in ["성별", "연령"] if str(row.get(c, "")) not in ["", "nan"]
-    ).strip()
-    context = f"{current_date} {target_text} 운영에서".strip()
-    parts.append(f"금번 {context} {compact_money(amount)} 기록")
-    cases = classify_cases(row, history)
+    parts.append(f"금번 {current_date} {current_target}에서 {compact_money(amount)} 기록".strip())
 
-    if "기네스 갱신 사례" in cases:
-        parts.append("기존 최고 주문금액을 상회하며 MMS 발송 기준 기네스 갱신")
-    elif grade == "핵심 상품":
-        parts.append("매우 우수한 판매 성과 확인")
+    # 과거 평균·최고 대비 비교
+    if summary["운영횟수"] > 0:
+        avg = summary["평균매출"]
+        max_amount = summary["최고매출"]
+        if avg > 0:
+            ratio = amount / avg
+            if ratio >= 1.25:
+                parts.append(f"과거 평균 대비 {abs(ratio-1)*100:.0f}% 높은 성과")
+            elif ratio <= 0.75:
+                parts.append(f"과거 평균 대비 {abs(ratio-1)*100:.0f}% 낮은 성과")
+            else:
+                parts.append("과거 평균과 유사한 수준의 성과")
+        if amount > max_amount and amount >= 3_000_000:
+            parts.append("기존 최고 주문금액을 상회하며 MMS 발송 기준 기네스 갱신")
+
+    cases = classify_cases(row, history)
+    if grade == "핵심 상품":
+        parts.append("핵심 판매 상품 수준의 매우 우수한 실적 확인")
     elif grade == "우수 상품":
         parts.append("우수한 판매 성과 확인")
     elif grade == "유망 상품":
@@ -833,20 +993,20 @@ def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
     elif grade == "관찰 상품":
         parts.append("기대 대비 다소 아쉬운 실적")
     else:
-        parts.append("매우 저조한 실적으로 MMS 메인 상품 적합도가 낮은 것으로 확인")
+        parts.append("1백만원 미만의 저조한 실적 기록")
 
-    if "타겟 확대 운영 사례" in cases:
-        parts.append("추가 운영 결과 비교를 통해 우수 타겟 확인 필요")
-    elif "운영 피로도 사례" in cases:
-        parts.append("단기간 동일 상품 재노출에 따른 운영 피로도 영향 가능성 존재")
+    if "운영 피로도 사례" in cases:
+        parts.append("단기간 동일 상품 재노출에 따른 운영 피로도 영향 가능성 확인 필요")
     elif "시즌 상품 사례" in cases and grade in ["핵심 상품", "우수 상품"]:
-        parts.append("시즌 종료 전까지 지속 운영 검토 필요")
+        parts.append("시즌 종료 전 추가 운영 검토 필요")
     elif grade in ["핵심 상품", "우수 상품"]:
-        parts.append("추가 운영 검토 필요")
+        parts.append(
+            f"{summary['최고타겟'] or current_target} 중심 추가 운영 검토 필요"
+        )
     elif grade == "유망 상품":
-        parts.append("타겟 및 전시순서 변경 후 추가 테스트 검토")
-    elif grade == "관찰 상품":
-        parts.append("가격 경쟁력·타겟 적합성 추가 확인 필요")
+        parts.append("타겟·가격·전시순서 비교 후 추가 테스트 검토")
+    else:
+        parts.append("가격 경쟁력과 타겟 적합성 재점검 필요")
 
     return f"[{name}] " + " > ".join(parts)
 
@@ -1564,16 +1724,27 @@ def daily_asset_key(date_value, time_value) -> str:
     return f"{dt:%Y%m%d}_{slot}"
 
 
-def find_daily_image(asset_key: str):
-    if not asset_key or not IMAGE_DIR.exists():
+def find_daily_image(asset_key: str, campaign_name: str = ""):
+    if not IMAGE_DIR.exists():
         return None
-    matches = [
-        p for p in IMAGE_DIR.iterdir()
-        if p.is_file()
-        and p.name.startswith(asset_key)
-        and p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]
-    ]
-    return sorted(matches, key=lambda p: p.name)[0] if matches else None
+
+    valid_suffixes = [".jpg", ".jpeg", ".png", ".webp"]
+    files = [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in valid_suffixes]
+
+    # 캠페인명과 동일한 파일명을 우선 사용
+    campaign_name = str(campaign_name).strip()
+    if campaign_name:
+        exact = [p for p in files if p.stem == campaign_name]
+        if exact:
+            return sorted(exact, key=lambda p: p.name)[0]
+
+    # 기존 날짜_01/02 방식도 계속 지원
+    if asset_key:
+        matches = [p for p in files if p.name.startswith(asset_key)]
+        if matches:
+            return sorted(matches, key=lambda p: p.name)[0]
+
+    return None
 
 
 def clean_mms_message(value) -> str:
@@ -1590,8 +1761,23 @@ def clean_mms_message(value) -> str:
     return stripped.strip("\r\n")
 
 
-def extract_mms_message(matched: pd.DataFrame, send_row: pd.Series) -> str:
-    """상품 RAW 또는 소재 RAW의 MMS문구 컬럼에서 발송 문구를 읽습니다."""
+def extract_mms_message(
+    matched: pd.DataFrame,
+    send_row: pd.Series,
+    messages_df: pd.DataFrame | None = None,
+) -> str:
+    """문구 시트의 캠페인명을 우선 매칭하고 기존 RAW 컬럼은 보조로 사용합니다."""
+    campaign_name = str(send_row.get("캠페인명", "")).strip()
+
+    if messages_df is not None and not messages_df.empty and campaign_name:
+        matched_message = messages_df[
+            messages_df["캠페인명"].astype(str).str.strip().eq(campaign_name)
+        ]
+        if not matched_message.empty:
+            cleaned = clean_mms_message(matched_message.iloc[-1]["MMS문구"])
+            if cleaned:
+                return cleaned
+
     candidate_cols = ["MMS문구", "MMS 문구", "발송문구", "문구"]
 
     for col in candidate_cols:
@@ -1634,7 +1820,7 @@ def format_integer_price(x):
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 연결
 # ─────────────────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## 📊 MMS AI Dashboard")
+st.sidebar.markdown("## 📊 MMS AI Dashboard V4.0")
 
 DEFAULT_GOOGLE_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -1648,6 +1834,7 @@ if "products" not in st.session_state:
     st.session_state.synced_at = None
     st.session_state.google_sync_error = None
     st.session_state.lowest = pd.DataFrame()
+    st.session_state.messages = pd.DataFrame(columns=["캠페인명", "MMS문구"])
     st.session_state.auto_sync_attempted = False
 
 source = st.sidebar.radio(
@@ -1694,10 +1881,11 @@ else:
     uploaded = st.sidebar.file_uploader("📁 MMS 파일 업로드", type=["xlsx", "xlsm"])
     if uploaded is not None:
         try:
-            products, sends, lowest = load_excel_bytes(uploaded.getvalue())
+            products, sends, lowest, messages = load_excel_bytes(uploaded.getvalue())
             st.session_state.products = products
             st.session_state.sends = sends
             st.session_state.lowest = lowest
+            st.session_state.messages = messages
             st.session_state.source_name = uploaded.name
             st.session_state.synced_at = datetime.now()
             st.session_state.google_sync_error = None
@@ -1714,6 +1902,7 @@ if st.session_state.products is None or st.session_state.sends is None:
 products = st.session_state.products
 sends = st.session_state.sends
 lowest = st.session_state.get("lowest", pd.DataFrame())
+messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명", "MMS문구"]))
 
 st.markdown(
     f"""
@@ -1942,8 +2131,9 @@ elif menu == "일일실적":
             continue
 
         asset_key = daily_asset_key(selected_date, time_value)
-        image_path = find_daily_image(asset_key)
-        message_text = extract_mms_message(matched, send_row)
+        campaign_name = str(send_row.get("캠페인명", "")).strip()
+        image_path = find_daily_image(asset_key, campaign_name)
+        message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
         asset_image_col, asset_text_col = st.columns([1, 1.35], gap="medium")
@@ -2025,6 +2215,7 @@ elif menu == "일일실적":
         )
 
         matched["상품등급"] = matched["주문금액"].apply(product_grade)
+        matched = add_history_columns(matched, products)
         sort_cols = [c for c in ["전시순서", "상품명"] if c in matched.columns]
         if sort_cols:
             matched = matched.sort_values(sort_cols)
@@ -2032,16 +2223,20 @@ elif menu == "일일실적":
         display_cols = [
             "전시순서", "MD", "알파코드", "쇼라코드", "상품명",
             "정상가", "멤버십혜택가", "할인율", "추가노출",
-            "주문건수", "주문수량", "주문금액", "최저가",
-            "가격차이", "최저가 확보"
+            "주문건수", "주문수량", "주문금액",
+            "운영횟수", "평균매출", "최고매출", "최고타겟"
         ]
         product_view = matched[[c for c in display_cols if c in matched.columns]].copy()
 
         if "할인율" in product_view.columns:
             product_view["할인율"] = product_view["할인율"].map(format_discount_percent)
-        for price_col in ["정상가", "멤버십혜택가", "최저가", "가격차이"]:
+        for price_col in ["정상가", "멤버십혜택가", "주문금액", "평균매출", "최고매출"]:
             if price_col in product_view.columns:
                 product_view[price_col] = product_view[price_col].map(format_integer_price)
+        if "운영횟수" in product_view.columns:
+            product_view["운영횟수"] = product_view["운영횟수"].map(
+                lambda x: f"{int(float(x)):,}" if str(x).strip() not in ["", "nan", "None"] else ""
+            )
 
         # 합계행
         total_row = {c: "" for c in product_view.columns}
@@ -2051,6 +2246,11 @@ elif menu == "일일실적":
             if c in product_view.columns:
                 total_row[c] = matched[c].sum()
         product_view = pd.concat([product_view, pd.DataFrame([total_row])], ignore_index=True)
+        for c in ["주문건수", "주문수량", "주문금액"]:
+            if c in product_view.columns:
+                product_view[c] = product_view[c].map(
+                    lambda x: format_integer_price(x) if str(x).strip() not in ["", "nan", "None"] else ""
+                )
 
         st.markdown('<div class="subsection-title">상품 실적</div>', unsafe_allow_html=True)
         st.dataframe(
@@ -2067,22 +2267,11 @@ elif menu == "일일실적":
             unsafe_allow_html=True,
         )
 
-    # 최저가 원본 탭 요약
-    with st.expander("최저가 분석"):
-        if lowest is None or lowest.empty:
-            st.info("상품 RAW의 '발송일 최저가' 컬럼을 입력하면 가격 비교가 자동 반영됩니다.")
-        else:
-            lowest_day = pday[[c for c in [
-                "일자", "쇼라코드", "알파코드", "상품명", "멤버십혜택가",
-                "최저가", "가격차이", "최저가 확보"
-            ] if c in pday.columns]]
-            st.dataframe(lowest_day, use_container_width=True, hide_index=True)
-
     all_insights = [make_insight(r, products) for _, r in pday.iterrows()]
     ppt = build_ppt(
         f"{selected_date} MMS 일일실적",
         all_insights,
-        pday[[c for c in ["상품명", "주문건수", "주문수량", "주문금액", "최저가"] if c in pday.columns]],
+        pday[[c for c in ["상품명", "주문건수", "주문수량", "주문금액"] if c in pday.columns]],
     )
     st.download_button(
         "📥 PPT 다운로드",
