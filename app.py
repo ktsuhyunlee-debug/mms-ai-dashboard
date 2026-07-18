@@ -282,23 +282,20 @@ hr {
     border-top: 1px solid var(--border);
 }
 
-/* 일일 상품 인사이트: 글자와 줄 간격을 충분히 확보 */
+/* 일일 상품 인사이트를 최대한 컴팩트하게 표시 */
 .compact-insight {
-    font-size: 16px !important;
-    line-height: 1.72 !important;
+    font-size: 14px;
+    line-height: 1.32;
     margin: 0;
-    padding: 2px 0;
+    padding: 0;
 }
 .compact-insight .insight-row {
-    font-size: 16px !important;
-    line-height: 1.72 !important;
-    margin: 0 0 9px 0 !important;
+    margin: 0 0 3px 0;
     padding: 0;
 }
 .compact-insight .evidence {
     color: var(--muted);
-    font-size: 13px !important;
-    line-height: 1.55 !important;
+    font-size: 11px;
 }
 [data-testid="stExpander"] details summary {
     padding-top: 0.55rem;
@@ -880,8 +877,8 @@ def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
 def target_label(row: pd.Series, include_seg: bool = True) -> str:
     values = []
     for col in ["성별", "연령"]:
-        value = clean_identifier_value(row.get(col, ""))
-        if value:
+        value = str(row.get(col, "")).strip()
+        if value not in ["", "nan", "None"]:
             values.append(value)
     if include_seg:
         seg = clean_identifier_value(row.get("SEG", ""))
@@ -1071,13 +1068,15 @@ def get_saved_issue(row: pd.Series) -> dict:
     return issues.get(issue_storage_key(row), {})
 
 
-def save_operation_issue(row: pd.Series, issue_types: list[str], memo: str) -> None:
+def save_operation_issue(row: pd.Series, issue_types: list[str], memo: str, action: str, status: str) -> None:
     issues = st.session_state.setdefault("daily_operation_issues", {})
     key = issue_storage_key(row)
-    if issue_types or memo.strip():
+    if issue_types or memo.strip() or action.strip():
         issues[key] = {
             "유형": issue_types,
             "메모": memo.strip(),
+            "조치": action.strip(),
+            "상태": status,
             "저장일시": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
     elif key in issues:
@@ -1100,7 +1099,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     risks: list[str] = []
     issue = issue or {}
     issue_types = set(issue.get("유형", []))
-    critical_issue = bool(issue_types.intersection({"판매중단", "가격오류"}))
+    critical_issue = bool(issue_types.intersection({"판매중단", "재고부족", "품절", "링크오류", "가격오류"}))
 
     def add(priority: int, category: str, sentence: str, evidence: str = "", confidence: str = "보통"):
         if sentence and sentence not in [item[2] for item in insights]:
@@ -1109,10 +1108,13 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     if issue_types:
         issue_text = "·".join(sorted(issue_types))
         detail = issue.get("메모", "")
+        action = issue.get("조치", "")
         sentence = f"금번 운영에서 {issue_text} 이슈가 등록되어 주문금액만으로 정상적인 상품 반응을 판단하기 어렵습니다."
         if detail:
             sentence += f" ({detail})"
-        add(120, "운영 이슈", sentence, "운영 이슈 등록", "높음")
+        if action:
+            sentence += f" 후속 조치: {action}."
+        add(120, "운영 이슈", sentence, f"상태 {issue.get('상태', '발생')}", "높음")
 
     # 현재 주문금액 등급에 따른 기본 평가
     if not critical_issue:
@@ -2354,6 +2356,8 @@ def schedule_target_summary(hist: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 연결
 # ─────────────────────────────────────────────────────────────────────────────
+st.sidebar.markdown("## 📊 MMS AI Dashboard V4.3")
+
 DEFAULT_GOOGLE_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1I8sAfs8kfMAFThHa_o-aeb2GLWLbFtxf3FxBhA8q-tQ/edit?gid=0#gid=0"
@@ -2436,7 +2440,6 @@ sends = st.session_state.sends
 lowest = st.session_state.get("lowest", pd.DataFrame())
 messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명", "MMS문구"]))
 
-# 화면 상단 헤더는 아래 app-header 한 곳에서만 표시합니다.
 st.markdown(
     f"""
     <div class="app-header">
@@ -2456,6 +2459,18 @@ st.markdown(
 menu = st.sidebar.radio(
     "메뉴",
     ["홈", "일일실적", "주간실적", "상품구분", "상품분석", "타겟분석", "편성 프로그램", "설정"],
+)
+
+st.markdown('<div class="app-title">MMS AI Dashboard</div>', unsafe_allow_html=True)
+sync_text = (
+    st.session_state.synced_at.strftime("%Y-%m-%d %H:%M:%S")
+    if st.session_state.synced_at
+    else "-"
+)
+st.markdown(
+    f'<div class="data-source">현재 데이터: {st.session_state.source_name} · '
+    f'마지막 동기화: {sync_text}</div>',
+    unsafe_allow_html=True,
 )
 
 
@@ -2781,66 +2796,8 @@ elif menu == "일일실적":
             height=280,
         )
 
-        st.markdown('<div class="subsection-title">운영 이슈</div>', unsafe_allow_html=True)
-        st.caption("운영 이슈가 발생한 경우에만 상품을 선택해 등록하세요. 등록된 내용은 해당 상품 인사이트에 반영됩니다.")
-
-        issue_rows = matched.reset_index(drop=True).copy()
-        issue_options = list(range(len(issue_rows)))
-        selected_issue_idx = st.selectbox(
-            "상품 선택",
-            issue_options,
-            format_func=lambda i: (
-                f"{issue_rows.iloc[i].get('상품명', '상품명 없음')} · "
-                f"{target_label(issue_rows.iloc[i]) or '타겟 정보 없음'} · "
-                f"{compact_money(float(issue_rows.iloc[i].get('주문금액', 0) or 0))}"
-            ),
-            key=f"daily_issue_product_{selected_date}",
-        )
-
-        selected_issue_row = issue_rows.iloc[selected_issue_idx]
-        selected_saved_issue = get_saved_issue(selected_issue_row)
-        selected_issue_key = issue_storage_key(selected_issue_row).replace("|", "_")
-
-        with st.expander("운영 이슈 등록/수정", expanded=False):
-            with st.form(key=f"top_issue_form_{selected_issue_key}"):
-                saved_types = selected_saved_issue.get("유형", [])
-                saved_type = saved_types[0] if saved_types else "선택 안 함"
-                issue_type_options = ["선택 안 함", "판매중단", "가격오류", "기타"]
-                issue_type = st.selectbox(
-                    "이슈 유형",
-                    issue_type_options,
-                    index=issue_type_options.index(saved_type) if saved_type in issue_type_options else 0,
-                )
-                issue_types = [] if issue_type == "선택 안 함" else [issue_type]
-                issue_memo = st.text_area(
-                    "상세 메모",
-                    value=selected_saved_issue.get("메모", ""),
-                    height=100,
-                    placeholder="예: 11시 30분 판매중단 발생",
-                )
-                save_col, delete_col = st.columns(2)
-                with save_col:
-                    save_issue = st.form_submit_button("운영 이슈 저장", use_container_width=True)
-                with delete_col:
-                    delete_issue = st.form_submit_button("등록 이슈 삭제", use_container_width=True)
-
-                if save_issue:
-                    save_operation_issue(
-                        selected_issue_row,
-                        issue_types,
-                        issue_memo,
-                    )
-                    st.success("선택한 상품의 운영 이슈를 저장했습니다.")
-                    st.rerun()
-
-                if delete_issue:
-                    issue_store = st.session_state.setdefault("daily_operation_issues", {})
-                    issue_store.pop(issue_storage_key(selected_issue_row), None)
-                    st.success("선택한 상품의 운영 이슈를 삭제했습니다.")
-                    st.rerun()
-
         st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
-        st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트와 최근 발송 이력을 확인할 수 있습니다.")
+        st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트·운영 이슈·최근 발송 이력을 확인할 수 있습니다.")
 
         for _, product_row in matched.iterrows():
             saved_issue = get_saved_issue(product_row)
@@ -2863,6 +2820,26 @@ elif menu == "일일실적":
 
                 if report["위험요인"]:
                     st.caption("주의: " + " · ".join(report["위험요인"]))
+
+                st.markdown("**운영 이슈 입력**")
+                issue_key = issue_storage_key(product_row).replace("|", "_")
+                default_types = saved_issue.get("유형", [])
+                with st.form(key=f"issue_form_{issue_key}"):
+                    issue_types = st.multiselect(
+                        "이슈 유형",
+                        ["판매중단", "재고부족", "품절", "링크오류", "가격오류", "구성변경", "앱푸시", "영역구좌", "기타"],
+                        default=default_types,
+                    )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        issue_status = st.selectbox("상태", ["발생", "조치 중", "해소"], index=["발생", "조치 중", "해소"].index(saved_issue.get("상태", "발생")))
+                    with c2:
+                        issue_action = st.text_input("후속 조치", value=saved_issue.get("조치", ""), placeholder="예: 재고 확보 후 재편성")
+                    issue_memo = st.text_area("상세 메모", value=saved_issue.get("메모", ""), height=70, placeholder="예: 11시 30분 재고 부족으로 판매중지")
+                    saved = st.form_submit_button("운영 이슈 저장", use_container_width=True)
+                    if saved:
+                        save_operation_issue(product_row, issue_types, issue_memo, issue_action, issue_status)
+                        st.success("운영 이슈를 저장했습니다. 현재 세션에서 인사이트에 즉시 반영됩니다.")
 
                 st.markdown("**최근 발송 이력**")
                 if report["발송이력"].empty:
