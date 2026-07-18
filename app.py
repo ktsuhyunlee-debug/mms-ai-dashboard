@@ -2446,7 +2446,9 @@ def build_schedule_recommendations(
         day_key = slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else f"slot-{slot_idx}"
         day_products.setdefault(day_key, set())
 
-        ranked = []
+        # 같은 슬롯 안에서는 동일 상품이 여러 행으로 입력되어도 1개 후보로만 사용합니다.
+        # 상품 식별 우선순위: 쇼라코드 → 알파코드 → 상품명
+        ranked_by_product = {}
         for cand_idx, candidate in candidates.iterrows():
             product_key = (
                 clean_identifier_value(candidate.get("쇼라코드", ""))
@@ -2467,9 +2469,30 @@ def build_schedule_recommendations(
                 if elapsed < cooldown_days:
                     continue
 
-            ranked.append((metrics["추천매출"], cand_idx, product_key, metrics))
+            candidate_rank = (
+                float(metrics.get("추천매출", 0) or 0),
+                float(candidate.get("할인율계산값", 0) or 0),
+            )
+            previous = ranked_by_product.get(product_key)
+            if previous is None or candidate_rank > previous[0]:
+                ranked_by_product[product_key] = (
+                    candidate_rank,
+                    cand_idx,
+                    product_key,
+                    metrics,
+                )
 
-        ranked.sort(key=lambda x: (x[0], candidates.loc[x[1], "할인율계산값"]), reverse=True)
+        ranked = [
+            (rank_key[0], cand_idx, product_key, metrics)
+            for rank_key, cand_idx, product_key, metrics in ranked_by_product.values()
+        ]
+        ranked.sort(
+            key=lambda x: (
+                x[0],
+                float(candidates.loc[x[1], "할인율계산값"] or 0),
+            ),
+            reverse=True,
+        )
         selected = ranked[:product_count]
 
         for order_no, (_, cand_idx, product_key, metrics) in enumerate(selected, start=1):
