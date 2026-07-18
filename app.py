@@ -1,4 +1,4 @@
-# VERIFIED BUILD: V4.2.7-20260719-UI-CLEANUP
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER
 
 from __future__ import annotations
 
@@ -2301,6 +2301,27 @@ def parse_target_text(target_text: str) -> dict:
     return {"성별": gender, "연령": age, "SEG": seg}
 
 
+def is_candidate_gender_compatible(candidate: pd.Series, target_text: str) -> bool:
+    """상품명 기준 성별 전용 상품을 타겟 후보에서 제외합니다."""
+    target = parse_target_text(target_text)
+    target_gender = target.get("성별", "")
+    name = str(candidate.get("상품명", "")).lower().replace(" ", "")
+
+    male_only_keywords = [
+        "면도기", "전기면도기", "남성그루밍", "그루밍풀세트", "코털제거기",
+        "남성드로즈", "남성언더웨어", "남성용", "남자용", "남성팬티",
+    ]
+    female_only_keywords = [
+        "여성언더웨어", "여성용", "여자용", "여성팬티", "여성브라", "브라팬티",
+    ]
+
+    if target_gender == "여성" and any(keyword in name for keyword in male_only_keywords):
+        return False
+    if target_gender == "남성" and any(keyword in name for keyword in female_only_keywords):
+        return False
+    return True
+
+
 def match_candidate_history(candidate: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
     """쇼라코드 → 알파코드 → 상품명 순으로 과거 이력을 찾습니다."""
     for key in ["쇼라코드", "알파코드"]:
@@ -2450,6 +2471,10 @@ def build_schedule_recommendations(
         # 상품 식별 우선순위: 쇼라코드 → 알파코드 → 상품명
         ranked_by_product = {}
         for cand_idx, candidate in candidates.iterrows():
+            # 성별 전용 상품은 타겟 부적합 시 점수 계산 전에 후보군에서 제외합니다.
+            if not is_candidate_gender_compatible(candidate, target):
+                continue
+
             product_key = (
                 clean_identifier_value(candidate.get("쇼라코드", ""))
                 or clean_identifier_value(candidate.get("알파코드", ""))
