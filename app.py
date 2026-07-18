@@ -1,4 +1,4 @@
-# VERIFIED BUILD: V4.2.5-20260719-SCHEDULE-NO-MATERIAL
+# VERIFIED BUILD: V4.2.7-20260719-UI-CLEANUP
 
 from __future__ import annotations
 
@@ -3032,7 +3032,7 @@ elif menu == "일일실적":
                 rows_html = []
                 for item in report["인사이트"]:
                     evidence = f" <span class='evidence'>({item['evidence']})</span>" if item.get("evidence") else ""
-                    rows_html.append(f"<div class='insight-row'>- {item['sentence']}{evidence}</div>")
+                    rows_html.append(f"<div class='insight-row'>• {item['sentence']}{evidence}</div>")
                 st.markdown("<div class='compact-insight'>" + "".join(rows_html) + "</div>", unsafe_allow_html=True)
 
                 if report["위험요인"]:
@@ -3339,7 +3339,13 @@ elif menu == "상품구분":
     st.markdown('<div class="subsection-title">상품 등급 기준</div>', unsafe_allow_html=True)
     st.caption("평균 주문금액 기준")
     grade_rule_df = pd.DataFrame({
-        "주문금액": ["100만원 미만", "100~200만원", "200~300만원", "300~500만원", "500만원 이상"],
+        "주문금액": [
+            "100만원 미만",
+            "100만원 이상 ~ 200만원 미만",
+            "200만원 이상 ~ 300만원 미만",
+            "300만원 이상 ~ 500만원 미만",
+            "500만원 이상",
+        ],
         "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 안정 상품", "🟢 우수 상품", "🔵 핵심 상품"],
     })
     st.dataframe(grade_rule_df, use_container_width=True, hide_index=True, height=212)
@@ -3871,7 +3877,7 @@ elif menu == "편성 프로그램":
         if result.empty:
             st.info("먼저 '① 편성 조건 입력'에서 자동 편성을 실행해주세요.")
         else:
-            st.markdown('<div class="subsection-title">실무 복붙용 전체 편성안</div>', unsafe_allow_html=True)
+            st.markdown('<div class="subsection-title">전체 편성안</div>', unsafe_allow_html=True)
             result_cols = [
                 "발송일", "시간대", "타겟", "전시순서",
                 "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
@@ -3918,7 +3924,7 @@ elif menu == "편성 프로그램":
                         str(row["알파코드"]), str(row["쇼라코드"]), str(row["상품명"]),
                     )
                     metrics = detail_map.get(detail_key, {})
-                    with st.expander(f"▼ {row['상품명']} · 추천 근거 및 발송 이력"):
+                    with st.expander(f"{row['상품명']} · 추천 근거 및 발송 이력"):
                         if not metrics:
                             st.info("상세 이력이 없습니다.")
                             continue
