@@ -1,3 +1,4 @@
+# VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
 # VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER
 
 from __future__ import annotations
@@ -2545,13 +2546,25 @@ def build_schedule_recommendations(
 
 def schedule_history_table(hist: pd.DataFrame, current_price: float) -> pd.DataFrame:
     if hist.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "발송일", "타겟", "소재", "멤버십혜택가", "현재가 대비", "주문금액", "프로모션"
+        ])
+
     view = hist.sort_values("_date", ascending=False).copy()
-    view["발송일"] = view["_date"].dt.strftime("%Y-%m-%d")
+    view["_date"] = pd.to_datetime(view.get("_date"), errors="coerce")
+    view["발송일"] = view["_date"].dt.strftime("%Y-%m-%d").fillna("-")
     view["타겟"] = view.apply(target_label, axis=1)
-    view["운영구분"] = view.apply(reward_period_label, axis=1)
+
+    promotions = st.session_state.get(
+        "promotions",
+        pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"]),
+    )
+    view["프로모션"] = view["_date"].map(
+        lambda value: promotion_name_for_date(value, promotions)
+    )
+
     view["현재가 대비"] = current_price - view["멤버십혜택가"]
-    cols = ["발송일", "타겟", "소재", "멤버십혜택가", "현재가 대비", "주문금액", "운영구분"]
+    cols = ["발송일", "타겟", "소재", "멤버십혜택가", "현재가 대비", "주문금액", "프로모션"]
     return view[[c for c in cols if c in view.columns]].head(20)
 
 
