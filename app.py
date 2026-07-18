@@ -1,4 +1,4 @@
-# VERIFIED BUILD: V4.1.4-20260718-DATE-PROMOTION-FIX
+# VERIFIED BUILD: V4.2.5-20260719-SCHEDULE-NO-MATERIAL
 
 from __future__ import annotations
 
@@ -2437,14 +2437,13 @@ def build_schedule_recommendations(
     plan_reference = planned_dates.min() if planned_dates.notna().any() else history["_date"].max()
 
     for slot_idx, slot in slots.iterrows():
-        material = str(slot.get("소재", "")).strip()
         target = str(slot.get("타겟", "")).strip()
         product_count = int(float(slot.get("상품수", 0) or 0))
-        if not material or not target or product_count <= 0:
+        if not target or product_count <= 0:
             continue
 
         slot_date = pd.to_datetime(slot.get("발송일"), errors="coerce")
-        day_key = slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else parse_slot_day(material)
+        day_key = slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else f"slot-{slot_idx}"
         day_products.setdefault(day_key, set())
 
         ranked = []
@@ -2478,7 +2477,6 @@ def build_schedule_recommendations(
             row = {
                 "발송일": slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else "",
                 "시간대": str(slot.get("시간대", "")).strip(),
-                "소재": material,
                 "타겟": target,
                 "전시순서": order_no,
                 "알파코드": clean_identifier_value(candidate.get("알파코드", "")),
@@ -2490,7 +2488,7 @@ def build_schedule_recommendations(
                 "예상매출": metrics["추천매출"],
             }
             result_rows.append(row)
-            detail_map[(material, target, row["알파코드"], row["쇼라코드"], row["상품명"])] = metrics
+            detail_map[(row["발송일"], row["시간대"], target, row["알파코드"], row["쇼라코드"], row["상품명"])] = metrics
             weekly_counts[product_key] = weekly_counts.get(product_key, 0) + 1
             day_products[day_key].add(product_key)
 
@@ -3727,25 +3725,6 @@ elif menu == "편성 프로그램":
         )
         st.session_state.schedule_slots = edited_slots
 
-        st.markdown('<div class="subsection-title">소재 입력</div>', unsafe_allow_html=True)
-        st.caption("위 발송 슬롯과 같은 행 순서로 소재명을 입력하세요.")
-        slot_count = len(edited_slots)
-        old_materials = st.session_state.get("schedule_materials", pd.DataFrame(columns=["소재"]))
-        material_values = old_materials.get("소재", pd.Series(dtype=str)).astype(str).tolist()
-        material_values = (material_values + [""] * slot_count)[:slot_count]
-        material_df = pd.DataFrame({"소재": material_values})
-        edited_materials = st.data_editor(
-            material_df,
-            num_rows="fixed",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "소재": st.column_config.TextColumn("소재", help="예: 0721_오전_멤특1", width="large"),
-            },
-            key="schedule_materials_editor_v2",
-        )
-        st.session_state.schedule_materials = edited_materials
-
         st.markdown('<div class="subsection-title">주력 상품 입력</div>', unsafe_allow_html=True)
         st.caption("알파코드·쇼라코드·상품명·정상가·행사가를 입력하세요. 할인율은 자동 편성 결과에서 자동 계산됩니다.")
 
@@ -3832,14 +3811,11 @@ elif menu == "편성 프로그램":
 
         if st.button("🤖 매출 우선 자동 편성 실행", type="primary", use_container_width=True):
             clean_slots = edited_slots.copy().reset_index(drop=True)
-            clean_materials = edited_materials.copy().reset_index(drop=True)
-            clean_slots["소재"] = clean_materials.get("소재", pd.Series([""] * len(clean_slots))).fillna("").astype(str)
             clean_slots["발송일"] = pd.to_datetime(clean_slots["발송일"], errors="coerce")
             clean_slots = clean_slots[
                 clean_slots["발송일"].notna()
                 & clean_slots["시간대"].astype(str).str.strip().ne("")
                 & clean_slots["타겟"].astype(str).str.strip().ne("")
-                & clean_slots["소재"].astype(str).str.strip().ne("")
             ].copy()
 
             clean_candidates = candidates_calc.copy()
@@ -3850,7 +3826,7 @@ elif menu == "편성 프로그램":
             ].copy()
 
             if clean_slots.empty:
-                st.error("발송일·시간대·타겟·소재가 입력된 슬롯을 1개 이상 등록해주세요.")
+                st.error("발송일·시간대·타겟이 입력된 슬롯을 1개 이상 등록해주세요.")
             elif clean_candidates.empty:
                 st.error("주력 상품을 1개 이상 입력해주세요.")
             else:
@@ -3874,7 +3850,7 @@ elif menu == "편성 프로그램":
         else:
             st.markdown('<div class="subsection-title">실무 복붙용 전체 편성안</div>', unsafe_allow_html=True)
             result_cols = [
-                "발송일", "시간대", "소재", "타겟", "전시순서",
+                "발송일", "시간대", "타겟", "전시순서",
                 "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
             ]
             copy_view = result[[c for c in result_cols if c in result.columns]].copy()
@@ -3902,7 +3878,7 @@ elif menu == "편성 프로그램":
                 )
 
             st.markdown('<div class="subsection-title">슬롯별 추천 결과 및 근거</div>', unsafe_allow_html=True)
-            group_cols = [c for c in ["발송일", "시간대", "소재", "타겟"] if c in result.columns]
+            group_cols = [c for c in ["발송일", "시간대", "타겟"] if c in result.columns]
             for group_key, group in result.groupby(group_cols, sort=False):
                 if not isinstance(group_key, tuple):
                     group_key = (group_key,)
@@ -3915,7 +3891,7 @@ elif menu == "편성 프로그램":
 
                 for _, row in group.iterrows():
                     detail_key = (
-                        str(row["소재"]), str(row["타겟"]),
+                        str(row["발송일"]), str(row["시간대"]), str(row["타겟"]),
                         str(row["알파코드"]), str(row["쇼라코드"]), str(row["상품명"]),
                     )
                     metrics = detail_map.get(detail_key, {})
@@ -3975,11 +3951,18 @@ elif menu == "편성 프로그램":
                     "최근발송일": hist["_date"].max().strftime("%Y-%m-%d") if not hist.empty else "-",
                     "평균주문금액": float(hist["주문금액"].mean()) if not hist.empty else 0,
                 })
-            history_status = pd.DataFrame(history_rows)
+            history_columns = [
+                "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
+                "발송이력", "운영횟수", "최근발송일", "평균주문금액",
+            ]
+            history_status = pd.DataFrame(history_rows, columns=history_columns)
             hist_tab, new_tab = st.tabs(["발송 이력 있는 상품", "발송 이력 없는 상품"])
             for target_tab, status in [(hist_tab, "있음"), (new_tab, "없음")]:
                 with target_tab:
-                    view = history_status[history_status["발송이력"].eq(status)].copy()
+                    if history_status.empty:
+                        view = pd.DataFrame(columns=history_columns)
+                    else:
+                        view = history_status[history_status["발송이력"].fillna("").eq(status)].copy()
                     if view.empty:
                         st.info(f"발송 이력 {status} 상품이 없습니다.")
                     else:
