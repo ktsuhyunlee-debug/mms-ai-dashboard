@@ -2629,6 +2629,75 @@ elif menu == "일일실적":
             unsafe_allow_html=True,
         )
 
+    # 당일 오전·오후 전체 상품을 하나로 묶은 공통 운영 이슈 입력 영역
+    st.markdown('<div class="subsection-title">운영 이슈</div>', unsafe_allow_html=True)
+    issue_rows = pday.reset_index(drop=True).copy()
+    if not issue_rows.empty:
+        issue_options = list(range(len(issue_rows)))
+        product_col, issue_type_col, memo_col, save_col, delete_col = st.columns(
+            [2.6, 1.05, 3.4, 0.72, 0.72],
+            gap="small",
+        )
+        with product_col:
+            selected_issue_idx = st.selectbox(
+                "상품 선택",
+                issue_options,
+                format_func=lambda i: (
+                    f"{issue_rows.iloc[i].get('상품명', '상품명 없음')} · "
+                    f"{target_label(issue_rows.iloc[i]) or '타겟 정보 없음'} · "
+                    f"{compact_money(float(issue_rows.iloc[i].get('주문금액', 0) or 0))}"
+                ),
+                key=f"daily_issue_product_{selected_date}",
+            )
+
+        selected_issue_row = issue_rows.iloc[selected_issue_idx]
+        selected_saved_issue = get_saved_issue(selected_issue_row)
+        selected_issue_key = issue_storage_key(selected_issue_row).replace("|", "_")
+        saved_types = selected_saved_issue.get("유형", [])
+        saved_type = saved_types[0] if saved_types else "선택 안 함"
+        issue_type_options = ["선택 안 함", "판매중단", "가격오류", "기타"]
+
+        with issue_type_col:
+            issue_type = st.selectbox(
+                "이슈 유형",
+                issue_type_options,
+                index=issue_type_options.index(saved_type) if saved_type in issue_type_options else 0,
+                key=f"daily_issue_type_{selected_date}_{selected_issue_key}",
+            )
+        with memo_col:
+            issue_memo = st.text_input(
+                "상세 메모",
+                value=selected_saved_issue.get("메모", ""),
+                placeholder="예: 11시 30분 판매중단 발생",
+                key=f"daily_issue_memo_{selected_date}_{selected_issue_key}",
+            )
+        with save_col:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            save_issue = st.button(
+                "저장",
+                use_container_width=True,
+                key=f"daily_issue_save_{selected_date}_{selected_issue_key}",
+            )
+        with delete_col:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            delete_issue = st.button(
+                "삭제",
+                use_container_width=True,
+                key=f"daily_issue_delete_{selected_date}_{selected_issue_key}",
+            )
+
+        if save_issue:
+            issue_types = [] if issue_type == "선택 안 함" else [issue_type]
+            save_operation_issue(selected_issue_row, issue_types, issue_memo)
+            st.success("선택한 상품의 운영 이슈를 저장했습니다.")
+            st.rerun()
+
+        if delete_issue:
+            issue_store = st.session_state.setdefault("daily_operation_issues", {})
+            issue_store.pop(issue_storage_key(selected_issue_row), None)
+            st.success("선택한 상품의 운영 이슈를 삭제했습니다.")
+            st.rerun()
+
     # 오전/오후 또는 소재 단위로 분리
     if "시간대" in sday.columns:
         sday["_sort_time"] = pd.to_datetime(sday["시간대"].astype(str), errors="coerce")
@@ -2781,66 +2850,6 @@ elif menu == "일일실적":
             hide_index=True,
             height=280,
         )
-
-        st.markdown('<div class="subsection-title">운영 이슈</div>', unsafe_allow_html=True)
-        st.caption("운영 이슈가 발생한 경우에만 상품을 선택해 등록하세요. 등록된 내용은 해당 상품 인사이트에 반영됩니다.")
-
-        issue_rows = matched.reset_index(drop=True).copy()
-        issue_options = list(range(len(issue_rows)))
-        selected_issue_idx = st.selectbox(
-            "상품 선택",
-            issue_options,
-            format_func=lambda i: (
-                f"{issue_rows.iloc[i].get('상품명', '상품명 없음')} · "
-                f"{target_label(issue_rows.iloc[i]) or '타겟 정보 없음'} · "
-                f"{compact_money(float(issue_rows.iloc[i].get('주문금액', 0) or 0))}"
-            ),
-            key=f"daily_issue_product_{selected_date}_{idx}_{render_idx}",
-        )
-
-        selected_issue_row = issue_rows.iloc[selected_issue_idx]
-        selected_saved_issue = get_saved_issue(selected_issue_row)
-        selected_issue_key = issue_storage_key(selected_issue_row).replace("|", "_")
-
-        with st.expander("운영 이슈 등록/수정", expanded=False):
-            with st.form(key=f"top_issue_form_{selected_issue_key}_{idx}_{render_idx}"):
-                saved_types = selected_saved_issue.get("유형", [])
-                saved_type = saved_types[0] if saved_types else "선택 안 함"
-                issue_type_options = ["선택 안 함", "판매중단", "가격오류", "기타"]
-                issue_type = st.selectbox(
-                    "이슈 유형",
-                    issue_type_options,
-                    index=issue_type_options.index(saved_type) if saved_type in issue_type_options else 0,
-                    key=f"issue_type_{selected_issue_key}_{idx}_{render_idx}",
-                )
-                issue_types = [] if issue_type == "선택 안 함" else [issue_type]
-                issue_memo = st.text_area(
-                    "상세 메모",
-                    value=selected_saved_issue.get("메모", ""),
-                    height=100,
-                    placeholder="예: 11시 30분 판매중단 발생",
-                    key=f"issue_memo_{selected_issue_key}_{idx}_{render_idx}",
-                )
-                save_col, delete_col = st.columns(2)
-                with save_col:
-                    save_issue = st.form_submit_button("운영 이슈 저장", use_container_width=True)
-                with delete_col:
-                    delete_issue = st.form_submit_button("등록 이슈 삭제", use_container_width=True)
-
-                if save_issue:
-                    save_operation_issue(
-                        selected_issue_row,
-                        issue_types,
-                        issue_memo,
-                    )
-                    st.success("선택한 상품의 운영 이슈를 저장했습니다.")
-                    st.rerun()
-
-                if delete_issue:
-                    issue_store = st.session_state.setdefault("daily_operation_issues", {})
-                    issue_store.pop(issue_storage_key(selected_issue_row), None)
-                    st.success("선택한 상품의 운영 이슈를 삭제했습니다.")
-                    st.rerun()
 
         st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
         st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트와 최근 발송 이력을 확인할 수 있습니다.")
