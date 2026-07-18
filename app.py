@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import io
@@ -2220,7 +2221,19 @@ st.markdown(
 
 menu = st.sidebar.radio(
     "메뉴",
-    ["홈", "일일실적", "주간실적", "상품구분", "상품분석", "타겟분석", "AI 편성추천", "설정"],
+    ["홈", "일일실적", "주간실적", "상품구분", "상품분석", "타겟분석", "편성 프로그램", "설정"],
+)
+
+st.markdown('<div class="app-title">MMS AI Dashboard</div>', unsafe_allow_html=True)
+sync_text = (
+    st.session_state.synced_at.strftime("%Y-%m-%d %H:%M:%S")
+    if st.session_state.synced_at
+    else "-"
+)
+st.markdown(
+    f'<div class="data-source">현재 데이터: {st.session_state.source_name} · '
+    f'마지막 동기화: {sync_text}</div>',
+    unsafe_allow_html=True,
 )
 
 
@@ -2935,14 +2948,14 @@ elif menu == "타겟분석":
     )
 
 
-elif menu == "AI 편성추천":
-    st.markdown('<div class="section-title">🗓️ AI 편성추천</div>', unsafe_allow_html=True)
+elif menu == "편성 프로그램":
+    st.markdown('<div class="section-title">🗓️ 편성 프로그램</div>', unsafe_allow_html=True)
     st.caption(
         "발송 슬롯과 주력 상품을 입력하면, 입력 상품 안에서 과거 주문금액을 최우선으로 편성합니다. "
         "같은 날짜 오전·오후 동일 상품은 자동 제외됩니다."
     )
 
-    tab_input, tab_result = st.tabs(["① 편성 조건 입력", "② 추천 편성안"])
+    tab_input, tab_result = st.tabs(["① 편성 조건 입력", "② 자동 편성 결과"])
 
     with tab_input:
         st.markdown('<div class="subsection-title">발송 슬롯 입력</div>', unsafe_allow_html=True)
@@ -3093,7 +3106,7 @@ elif menu == "AI 편성추천":
                 )
                 st.session_state.schedule_result = result
                 st.session_state.schedule_detail_map = detail_map
-                st.success("자동 편성이 완료되었습니다. '② 추천 편성안' 탭에서 확인해주세요.")
+                st.success("자동 편성이 완료되었습니다. '② 자동 편성 결과' 탭에서 확인해주세요.")
 
     with tab_result:
         result = st.session_state.get("schedule_result", pd.DataFrame())
@@ -3135,7 +3148,7 @@ elif menu == "AI 편성추천":
                     use_container_width=True,
                 )
 
-            st.markdown('<div class="subsection-title">슬롯별 추천 편성안 및 근거</div>', unsafe_allow_html=True)
+            st.markdown('<div class="subsection-title">슬롯별 추천 결과 및 근거</div>', unsafe_allow_html=True)
 
             for (material, target), group in result.groupby(["소재", "타겟"], sort=False):
                 st.markdown(f"### {material} · {target}")
