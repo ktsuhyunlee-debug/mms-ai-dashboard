@@ -960,10 +960,11 @@ def add_history_columns(current_df: pd.DataFrame, history: pd.DataFrame) -> pd.D
 
 
 def promotion_label(row: pd.Series) -> str:
-    """로우데이터에 존재하는 프로모션 관련 컬럼만 사용해 표시값을 만듭니다."""
+    """프로모션 관련 컬럼의 실제 운영값만 표시합니다."""
+    non_promo = {"", "-", "0", "x", "n", "no", "미진행", "일반", "일반기간", "해당없음", "없음", "nan", "none"}
     for col in ["프로모션명", "프로모션", "보답프로그램", "행사명", "기획전명"]:
         value = str(row.get(col, "")).strip()
-        if value not in ["", "-", "nan", "None"]:
+        if value.lower() not in non_promo:
             return value
     return "-"
 
@@ -979,39 +980,52 @@ def coefficient_of_variation(values: pd.Series) -> float:
     return float(values.std(ddof=0) / abs(values.mean()))
 
 
-def make_product_history_table(
-    row: pd.Series,
-    history: pd.DataFrame,
-    limit: int = 10,
-) -> pd.DataFrame:
+def linear_trend_rate(values: pd.Series) -> float:
+    """운영 순서 기준 단순 추세 기울기를 평균 대비 비율로 반환합니다."""
+    vals = pd.to_numeric(values, errors="coerce").dropna().astype(float)
+    if len(vals) < 3 or vals.mean() == 0:
+        return 0.0
+    x = pd.Series(range(len(vals)), dtype=float)
+    x_mean, y_mean = x.mean(), vals.mean()
+    denom = float(((x - x_mean) ** 2).sum())
+    if denom == 0:
+        return 0.0
+    slope = float(((x - x_mean) * (vals.reset_index(drop=True) - y_mean)).sum() / denom)
+    return slope / abs(y_mean)
+
+
+def insight_confidence(sample_size: int) -> str:
+    if sample_size >= 5:
+        return "높음"
+    if sample_size >= 3:
+        return "보통"
+    return "참고"
+
+
+def make_product_history_table(row: pd.Series, history: pd.DataFrame, limit: int = 10) -> pd.DataFrame:
     """현재 건을 포함한 동일 상품 최근 발송 이력을 화면 표시용으로 생성합니다."""
     hist = product_history_including_current(row, history).copy()
     if hist.empty:
         return pd.DataFrame()
-
     hist = hist.sort_values("_date", ascending=False).head(limit).copy()
     hist["발송일"] = hist["_date"].dt.strftime("%Y-%m-%d")
     hist["타겟"] = hist.apply(target_label, axis=1)
     hist["프로모션"] = hist.apply(promotion_label, axis=1)
-
     if "발송일 최저가" in hist.columns:
         hist["발송일 최저가 여부"] = hist.apply(
             lambda r: (
                 "O" if float(r.get("발송일 최저가", 0) or 0) > 0
                 and float(r.get("멤버십혜택가", 0) or 0) <= float(r.get("발송일 최저가", 0) or 0)
                 else ("X" if float(r.get("발송일 최저가", 0) or 0) > 0 else "-")
-            ),
-            axis=1,
+            ), axis=1,
         )
     else:
         hist["발송일 최저가 여부"] = "-"
-
     cols = ["발송일", "타겟", "주문금액"]
     if "멤버십혜택가" in hist.columns:
         cols.append("멤버십혜택가")
     cols += ["발송일 최저가 여부", "프로모션"]
     view = hist[[c for c in cols if c in hist.columns]].copy()
-
     for col in ["주문금액", "멤버십혜택가"]:
         if col in view.columns:
             view[col] = view[col].map(format_integer_price)
@@ -1019,172 +1033,213 @@ def make_product_history_table(
 
 
 def generate_insight_report(row: pd.Series, history: pd.DataFrame) -> dict:
-    """숫자로 검증 가능한 조건만 사용해 상품별 인사이트와 종합 의견을 생성합니다."""
+    """사실→해석→위험→추천 순서로 상품별 의사결정 인사이트를 생성합니다."""
     name = str(row.get("상품명", "")).strip()
     amount = float(row.get("주문금액", 0) or 0)
     current_target = target_label(row)
     current_date = pd.to_datetime(row.get("_date"), errors="coerce")
     current_price = float(row.get("멤버십혜택가", 0) or 0)
     grade = product_grade(amount)
-
     summary = product_history_summary(row, history)
-    prior = summary["과거이력"].copy()
+    prior = summary["과거이력"].copy().sort_values("_date")
     same_target = summary["동일타겟이력"].copy()
-    cumulative = product_history_including_current(row, history).copy()
-    cumulative = cumulative.sort_values("_date")
+    cumulative = product_history_including_current(row, history).copy().sort_values("_date")
+    insights: list[tuple[int, str, str, str, str]] = []
+    risks: list[str] = []
 
-    insights: list[tuple[int, str, str]] = []
-
-    def add(priority: int, category: str, sentence: str):
+    def add(priority: int, category: str, sentence: str, evidence: str = "", confidence: str = "보통"):
         if sentence and sentence not in [item[2] for item in insights]:
-            insights.append((priority, category, sentence))
+            insights.append((priority, category, sentence, evidence, confidence))
 
-    # 1. 성과 인사이트
+    # 성과 및 추세
     if not prior.empty:
-        past_max = float(prior["주문금액"].max())
-        past_avg = float(prior["주문금액"].mean())
+        past_max, past_avg = float(prior["주문금액"].max()), float(prior["주문금액"].mean())
         if amount > past_max and amount >= 3_000_000:
-            add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적을 경신했습니다.")
+            add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적을 경신했습니다.", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
-            add(88, "성과", f"과거 평균 {compact_money(past_avg)} 대비 주문금액이 {((amount / past_avg) - 1) * 100:.0f}% 증가해 거래액이 크게 성장했습니다.")
+            add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액이 크게 성장했습니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount <= past_avg * 0.7:
-            add(78, "성과", f"금번 주문금액은 과거 평균 {compact_money(past_avg)} 대비 {(1 - amount / past_avg) * 100:.0f}% 낮아 최근 성과 둔화가 확인됩니다.")
+            add(88, "성과", f"금번 주문금액이 과거 평균 대비 {(1-amount/past_avg)*100:.0f}% 낮아 성과 둔화가 확인됩니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
+            risks.append("최근 성과 둔화")
 
     recent3 = cumulative.tail(3)
     if len(recent3) == 3:
         vals = recent3["주문금액"].astype(float).tolist()
-        if vals[0] < vals[1] < vals[2]:
-            add(94, "성과", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장했습니다.")
-        elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.35:
-            add(75, "성과", "최근 3회 모두 300만원 이상의 주문금액을 기록해 안정적인 판매 흐름을 유지했습니다.")
+        growth = vals[2] / vals[0] - 1 if vals[0] > 0 else 0
+        if vals[0] < vals[1] < vals[2] and growth >= 0.15:
+            add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장했습니다.", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
+        elif vals[0] > vals[1] > vals[2] and vals[0] > 0 and vals[2] <= vals[0] * 0.8:
+            add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요합니다.", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
+            risks.append("최근 3회 연속 하락")
+        elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.25:
+            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인됩니다.", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
 
-    # 같은 주차 운영 결과
+    if len(cumulative) >= 5:
+        recent5 = cumulative.tail(5)
+        cv = coefficient_of_variation(recent5["주문금액"])
+        if float(recent5["주문금액"].mean()) >= 3_000_000 and cv <= 0.30:
+            add(87, "운영 안정성", f"최근 5회 평균 {compact_money(recent5['주문금액'].mean())}을 기록하고 변동성이 낮아 반복 검증된 안정형 상품입니다.", f"5회 변동계수 {cv:.2f}", "높음")
+        elif cv >= 0.75:
+            add(70, "운영 위험", "회차별 주문금액 편차가 커 편성 조건에 따른 성과 변동성이 높은 상품입니다.", f"5회 변동계수 {cv:.2f}", "높음")
+            risks.append("성과 변동성 높음")
+
+    # 동일 주차 중복 제거 후 편성 횟수
     if "주차" in cumulative.columns and "주차" in row.index:
         week_value = str(row.get("주차", "")).strip()
-        if week_value and week_value not in ["nan", "None"]:
-            week_rows = cumulative[cumulative["주차"].astype(str).eq(week_value)]
-            if len(week_rows) >= 2:
-                over3 = int((week_rows["주문금액"] >= 3_000_000).sum())
-                if over3 == len(week_rows):
-                    add(96, "성과", f"금주 총 {len(week_rows)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록했습니다.")
+        week_rows = cumulative[cumulative["주차"].astype(str).eq(week_value)].copy()
+        if not week_rows.empty:
+            unique_keys = [c for c in ["_date", "시간대", "캠페인명", "소재", "성별", "연령", "SEG"] if c in week_rows.columns]
+            week_unique = week_rows.drop_duplicates(unique_keys) if unique_keys else week_rows
+            if len(week_unique) >= 2 and (week_unique["주문금액"] >= 3_000_000).all():
+                add(96, "성과", f"금주 총 {len(week_unique)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록했습니다.", "주차 내 고유 발송 기준", "높음")
 
-    # 2. 타겟 인사이트
+    # 타겟 적합도 및 확장성
     if not prior.empty:
+        target_df = prior.assign(_target=prior.apply(target_label, axis=1))
+        target_stats = target_df.groupby("_target")["주문금액"].agg(["mean", "sum", "count"]).sort_values("mean", ascending=False)
         overall_avg = float(prior["주문금액"].mean())
-        if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= overall_avg * 1.1:
-            add(91, "타겟", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 과거 평균보다 높아 핵심 타겟 적합도가 확인됩니다.")
+        if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= overall_avg * 1.15:
+            add(93, "타겟 적합도", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 평균보다 높아 핵심 타겟 적합도가 확인됩니다.", f"동일 타겟 {len(same_target)}회", insight_confidence(len(same_target)))
         elif same_target.empty and amount >= 3_000_000:
-            add(84, "타겟", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.")
+            add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.", "신규 타겟 1회", "참고")
+        if len(target_stats) >= 2 and target_stats["sum"].sum() > 0:
+            top = target_stats.iloc[0]
+            second = target_stats.iloc[1]
+            if top["count"] >= 2 and second["count"] >= 2 and top["mean"] >= second["mean"] * 1.5:
+                add(92, "타겟 적합도", f"{target_stats.index[0]} 회당 평균이 {compact_money(top['mean'])}으로 차순위 타겟보다 압도적으로 높아 타겟 확장보다 핵심 타겟 집중 운영이 효율적입니다.", f"차순위 평균 {compact_money(second['mean'])}", "높음")
+            top_share = float(target_stats.iloc[0]["sum"] / target_stats["sum"].sum())
+            if top_share >= 0.7:
+                add(67, "타겟 위험", f"누적 주문금액의 {top_share*100:.0f}%가 {target_stats.index[0]}에 집중되어 타겟 편중 여부를 함께 관리해야 합니다.", f"운영횟수 {int(target_stats.iloc[0]['count'])}회", insight_confidence(int(target_stats.iloc[0]["count"])))
+                risks.append("특정 타겟 편중")
 
-        prior_targets = prior.assign(_target=prior.apply(target_label, axis=1))
-        target_sales = prior_targets.groupby("_target")["주문금액"].sum().sort_values(ascending=False)
-        if len(target_sales) >= 2 and target_sales.sum() > 0 and target_sales.iloc[0] / target_sales.sum() >= 0.7:
-            add(68, "타겟", f"과거 주문금액의 {target_sales.iloc[0] / target_sales.sum() * 100:.0f}%가 {target_sales.index[0]}에 집중되어 특정 타겟 의존도가 높습니다.")
-
-    # 3. 프로모션 인사이트: 프로모션 컬럼이 실제로 존재할 때만 판정
+    # 프로모션 의존도
     promo_cols = [c for c in ["프로모션명", "프로모션", "보답프로그램", "행사명", "기획전명"] if c in cumulative.columns]
     if promo_cols and len(cumulative) >= 4:
         promo_mask = cumulative.apply(is_promotional, axis=1)
-        promo_rows = cumulative[promo_mask]
-        normal_rows = cumulative[~promo_mask]
+        promo_rows, normal_rows = cumulative[promo_mask], cumulative[~promo_mask]
         if len(promo_rows) >= 2 and len(normal_rows) >= 2:
-            promo_avg = float(promo_rows["주문금액"].mean())
-            normal_avg = float(normal_rows["주문금액"].mean())
+            promo_avg, normal_avg = float(promo_rows["주문금액"].mean()), float(normal_rows["주문금액"].mean())
             if normal_avg > 0 and promo_avg >= normal_avg * 1.3:
-                add(72, "프로모션", f"프로모션 운영 평균 {compact_money(promo_avg)}이 일반 운영 평균 {compact_money(normal_avg)}보다 높아 프로모션 수혜가 확인됩니다.")
+                add(84, "프로모션", f"프로모션 평균 {compact_money(promo_avg)}이 일반 기간 평균 {compact_money(normal_avg)}보다 높아 프로모션 의존도가 확인됩니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "보통")
+                risks.append("프로모션 의존")
+            elif promo_avg > 0 and len(normal_rows) >= 3 and normal_avg >= promo_avg * 0.85 and coefficient_of_variation(normal_rows["주문금액"]) <= 0.4:
+                add(76, "프로모션", "프로모션과 일반 기간의 평균 차이가 제한적이고 일반 기간 변동성도 낮아 상시 운영 가능성이 확인됩니다.", f"일반 기간 {len(normal_rows)}회", "높음")
             elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
-                add(65, "프로모션", "프로모션 여부에 따른 주문금액 차이가 제한적이어서 일반 기간에도 안정적인 운영이 가능합니다.")
+                add(68, "프로모션", "프로모션과 일반 기간의 평균 주문금액 차이가 크지 않아 일반 기간 운영 가능성이 확인됩니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "보통")
 
-    # 4. 가격 인사이트
+    # 가격 경쟁력 및 탄력성
     lowest = float(row.get("발송일 최저가", 0) or 0)
     if lowest > 0 and current_price > 0:
         if current_price <= lowest:
-            add(86, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 이하의 가격 메리트를 확보했습니다.")
+            add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 이하의 가격 메리트를 확보했습니다.", "발송일 최저가 기준", "높음")
         elif amount < 2_000_000:
-            add(60, "가격", f"멤버십 혜택가가 발송일 비교 최저가보다 {fmt_num(current_price - lowest)}원 높아 추가 가격 메리트 확보가 필요합니다.")
-
+            add(73, "가격 위험", f"멤버십 혜택가가 발송일 비교 최저가보다 {fmt_num(current_price-lowest)}원 높고 성과도 제한적이어서 추가 가격 메리트 확보가 필요합니다.", "발송일 최저가 기준", "높음")
+            risks.append("가격 경쟁력 미확보")
     if not prior.empty and current_price > 0:
         last = prior.iloc[-1]
-        last_price = float(last.get("멤버십혜택가", 0) or 0)
-        last_amount = float(last.get("주문금액", 0) or 0)
-        if last_price > 0 and current_price > last_price and amount >= last_amount * 0.9:
-            add(82, "가격", f"직전 대비 혜택가가 {fmt_num(current_price - last_price)}원 상승했으나 주문금액은 {amount / last_amount * 100:.0f}% 수준을 유지해 가격 인상 방어에 성공했습니다.")
+        last_price, last_amount = float(last.get("멤버십혜택가", 0) or 0), float(last.get("주문금액", 0) or 0)
+        if last_price > 0 and last_amount > 0 and current_price > last_price and amount >= last_amount * 0.9:
+            add(85, "가격 탄력성", f"직전 대비 혜택가가 {fmt_num(current_price-last_price)}원 상승했으나 주문금액은 직전의 {amount/last_amount*100:.0f}% 수준을 유지해 가격 민감도가 낮은 흐름입니다.", "직전 운영 비교", "보통")
+        price_rows = cumulative[(pd.to_numeric(cumulative.get("멤버십혜택가", 0), errors="coerce") > 0) & (cumulative["주문금액"] > 0)] if "멤버십혜택가" in cumulative.columns else pd.DataFrame()
+        if len(price_rows) >= 4 and price_rows["멤버십혜택가"].nunique() >= 2:
+            corr = price_rows[["멤버십혜택가", "주문금액"]].corr().iloc[0,1]
+            if pd.notna(corr) and corr <= -0.6:
+                add(74, "가격 탄력성", "가격 상승 구간에서 주문금액이 함께 하락하는 경향이 뚜렷해 가격 민감형 상품으로 판단됩니다.", f"가격-매출 상관계수 {corr:.2f}", "보통")
+                risks.append("가격 민감형")
 
-    # 5. 운영 인사이트 / 8. 운영 희소성
+    # 피로도·희소성
     if not prior.empty and pd.notna(current_date):
         last = prior.iloc[-1]
-        gap = int((current_date - last["_date"]).days)
-        last_amount = float(last.get("주문금액", 0) or 0)
+        gap, last_amount = int((current_date-last["_date"]).days), float(last.get("주문금액", 0) or 0)
         if gap <= 21 and last_amount > 0:
             ratio = amount / last_amount
             if ratio >= 0.8:
-                add(79, "운영", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio * 100:.0f}% 수준을 유지해 반복 운영 피로도가 제한적입니다.")
+                add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 반복 운영 피로도가 제한적입니다.", "직전 운영 비교", "보통")
             elif ratio < 0.75:
-                add(74, "운영", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 휴지기 부여를 검토할 필요가 있습니다.")
+                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 휴지기 부여가 필요합니다.", "직전 운영 비교", "보통")
+                risks.append("단기 반복 피로도")
         elif gap >= 45 and amount >= 3_000_000:
-            add(80, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인됩니다.")
+            add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인됩니다.", "재편성 간격 기준", "보통")
+    recent90 = cumulative[cumulative["_date"] >= current_date-pd.Timedelta(days=90)] if pd.notna(current_date) else cumulative
+    if summary["운영횟수"] >= 1 and 2 <= len(recent90) <= 3 and float(recent90["주문금액"].mean()) >= 3_000_000:
+        add(78, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력이 있습니다.", "최근 90일 기준", "보통")
 
-    recent90 = cumulative
-    if pd.notna(current_date):
-        recent90 = cumulative[cumulative["_date"] >= current_date - pd.Timedelta(days=90)]
-    if 1 <= len(recent90) <= 2 and float(recent90["주문금액"].mean()) >= 3_000_000:
-        add(77, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력이 있습니다.")
-
-    # 6. 시즌 인사이트
+    # 시즌·생애주기·포지션
     season_words = ["선풍기", "에어컨", "서큘레이터", "우양산", "래쉬가드", "삼계탕", "장어", "아이스크림", "제습기", "냉감"]
     if any(word in name for word in season_words) and grade in ["핵심 상품", "우수 상품"]:
-        add(70, "시즌", "시즌 수요가 반영된 우수 성과로, 수요가 유지되는 기간 내 추가 운영을 검토할 수 있습니다.")
-
-    # 7. 상품 포지션 / 9. 편성 전략
+        add(71, "시즌", "시즌 수요가 반영된 우수 성과로 수요가 유지되는 기간 내 추가 운영을 검토할 수 있습니다.", "상품명 시즌 키워드 기준", "참고")
     avg_all = float(cumulative["주문금액"].mean()) if not cumulative.empty else amount
-    if len(cumulative) >= 3 and (avg_all >= 5_000_000 or amount >= 10_000_000):
-        add(90, "상품 포지션", f"누적 {len(cumulative)}회 운영 평균 {compact_money(avg_all)}을 기록한 대표 매출 견인 상품입니다.")
+    if len(cumulative) >= 5:
+        trend = linear_trend_rate(cumulative.tail(8)["주문금액"])
+        if trend >= 0.08:
+            add(79, "생애주기", "중기 추세가 상승하는 성장기 상품으로 운영 비중 확대 검토가 가능합니다.", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
+        elif trend <= -0.08:
+            add(77, "생애주기", "중기 추세가 하락하는 성숙·하락 전환 구간으로 운영 조건 재설계가 필요합니다.", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
+            risks.append("생애주기 하락 전환")
+    if len(cumulative) >= 5 and avg_all >= 5_000_000:
+        add(91, "상품 포지션", f"누적 {len(cumulative)}회 평균 {compact_money(avg_all)}을 기록한 반복 검증형 대표 매출 견인 상품입니다.", f"누적 {len(cumulative)}회", "높음")
     elif summary["운영횟수"] == 0 and amount >= 3_000_000:
-        add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요합니다.")
-    elif amount < 1_000_000:
-        add(55, "상품 포지션", "주문금액이 100만원 미만으로 가격·타겟 조건을 재점검한 뒤 운영 축소 여부를 검토해야 합니다.")
+        add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요합니다.", "신규 1회", "참고")
 
-    # 화면에는 우선순위가 높은 서로 다른 관점의 문장만 최대 8개 노출
+    # 추천 점수: 성과 35 + 안정성 20 + 타겟 20 + 가격/프로모션 15 + 위험 10
+    score = 50
+    score += 20 if amount >= 5_000_000 else 12 if amount >= 3_000_000 else 5 if amount >= 2_000_000 else -10 if amount < 1_000_000 else 0
+    if len(cumulative) >= 3:
+        cv = coefficient_of_variation(cumulative.tail(5)["주문금액"])
+        score += 10 if cv <= 0.30 else -8 if cv >= 0.75 else 3
+    if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= float(prior["주문금액"].mean() if not prior.empty else 0) * 1.1:
+        score += 10
+    if lowest > 0 and current_price > 0 and current_price <= lowest:
+        score += 7
+    score -= min(25, len(set(risks)) * 6)
+    score = max(0, min(100, int(round(score))))
+    recommendation = "매우 높음" if score >= 85 else "높음" if score >= 70 else "보통" if score >= 50 else "낮음" if score >= 30 else "매우 낮음"
+    stars = "★" * max(1, min(5, round(score / 20))) + "☆" * (5 - max(1, min(5, round(score / 20))))
+
+    # 중요도·중복 제어: 위험은 최소 1개 보존, 전체 6개
     insights = sorted(insights, key=lambda x: (-x[0], x[1]))
-    selected = []
-    category_count: dict[str, int] = {}
-    for _, category, sentence in insights:
-        if category_count.get(category, 0) >= 2:
+    selected, category_count = [], {}
+    risk_items = [x for x in insights if "위험" in x[1]]
+    if risk_items:
+        x = risk_items[0]
+        selected.append({"category": x[1], "sentence": x[2], "evidence": x[3], "confidence": x[4], "type": "risk"})
+        category_count[x[1]] = 1
+    for _, category, sentence, evidence, confidence in insights:
+        if any(item["sentence"] == sentence for item in selected) or category_count.get(category, 0) >= 1:
             continue
-        selected.append({"category": category, "sentence": sentence})
-        category_count[category] = category_count.get(category, 0) + 1
-        if len(selected) >= 8:
+        selected.append({"category": category, "sentence": sentence, "evidence": evidence, "confidence": confidence, "type": "fact"})
+        category_count[category] = 1
+        if len(selected) >= 6:
             break
-
     if not selected:
-        selected.append({
-            "category": "운영",
-            "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며, 추가 이력 축적 후 성과 추세 판단이 필요합니다.",
-        })
+        selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 추세 판단이 필요합니다.", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
 
-    # 종합 의견은 검증된 성과·타겟·운영 상태를 조합
-    if amount >= 5_000_000:
-        if len(same_target) >= 2:
-            summary_text = f"{current_target}에서 반복적으로 우수한 성과가 확인되어 차주 핵심 재편성 상품으로 지속 운영을 권장합니다."
-        elif same_target.empty and summary["운영횟수"] > 0:
-            summary_text = f"{current_target} 확장 운영에서 우수한 성과가 확인되어 동일 타겟 추가 TEST와 운영 비중 확대를 검토할 수 있습니다."
-        else:
-            summary_text = "높은 주문금액과 과거 실적을 기반으로 차주 주력 상품 편성을 검토할 수 있습니다."
-    elif amount >= 3_000_000:
-        summary_text = f"금번 {current_target or '운영 타겟'}에서 우수한 판매 성과가 확인되어 동일 조건 중심의 재편성을 검토할 수 있습니다."
-    elif amount >= 2_000_000:
-        summary_text = "재편성 검토가 가능한 수준으로, 타겟·가격·전시순서를 비교한 추가 TEST가 필요합니다."
-    elif amount >= 1_000_000:
-        summary_text = "성과가 제한적으로 확인되어 가격 경쟁력과 타겟 적합성을 보완한 선택적 재운영이 필요합니다."
+    # 부정 신호 우선 종합 의견
+    risk_set = set(risks)
+    if "최근 3회 연속 하락" in risk_set or "단기 반복 피로도" in risk_set:
+        summary_text = "현재 성과 수준과 별개로 최근 하락 또는 반복 운영 피로도가 확인되어 동일 조건 재편성보다 휴지기와 타겟·가격 조건 조정이 우선입니다."
+    elif "프로모션 의존" in risk_set:
+        summary_text = "프로모션 기간 성과 우위가 뚜렷해 일반 기간 상시 편성보다 프로모션 구간 중심의 선택적 운영이 효율적입니다."
+    elif "가격 경쟁력 미확보" in risk_set or "가격 민감형" in risk_set:
+        summary_text = "가격 조건에 따른 성과 변동 가능성이 있어 재편성 전 최저가 또는 추가 혜택 확보가 우선입니다."
+    elif score >= 85 and len(same_target) >= 2:
+        summary_text = f"{current_target} 타겟 적합도와 반복 운영 안정성이 함께 확인되어 차주 핵심 재편성 상품으로 지속 운영을 권장합니다."
+    elif score >= 70:
+        summary_text = "성과와 운영 근거가 충분해 차주 주력 상품 후보로 재편성하되, 우수 타겟 중심으로 운영 비중 확대를 검토할 수 있습니다."
+    elif score >= 50:
+        summary_text = "재편성 검토가 가능한 수준이나 타겟·가격·프로모션 조건을 비교한 추가 TEST가 필요합니다."
     else:
-        summary_text = "주문금액이 100만원 미만으로 가격·타겟·상품 경쟁력을 재점검한 뒤 운영 축소 여부를 검토해야 합니다."
+        summary_text = "현재 근거만으로 적극 재편성하기 어려워 가격·타겟·상품 경쟁력을 보완한 뒤 선택적으로 재검증해야 합니다."
 
-    return {
-        "상품명": name,
-        "인사이트": selected,
-        "종합의견": summary_text,
-        "발송이력": make_product_history_table(row, history),
-    }
+    reason_parts = []
+    if amount >= 5_000_000: reason_parts.append(f"금번 {compact_money(amount)} 기록")
+    if len(same_target) >= 2: reason_parts.append(f"{current_target} 반복 검증")
+    if len(cumulative) >= 5 and coefficient_of_variation(cumulative.tail(5)["주문금액"]) <= 0.30: reason_parts.append("최근 성과 안정성 확보")
+    if lowest > 0 and current_price > 0 and current_price <= lowest: reason_parts.append("발송일 최저가 메리트 확보")
+    if not risk_set: reason_parts.append("중대 위험 신호 없음")
+    why_text = ", ".join(reason_parts[:4]) + "을 근거로 편성 우선순위를 판단했습니다." if reason_parts else "현재 성과와 과거 운영 이력을 종합해 선택적 편성 여부를 판단해야 합니다."
+
+    return {"상품명": name, "인사이트": selected, "종합의견": summary_text, "편성이유": why_text, "추천점수": score, "추천등급": recommendation, "별점": stars, "위험요인": sorted(risk_set), "발송이력": make_product_history_table(row, history)}
 
 
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
@@ -2696,7 +2751,7 @@ elif menu == "일일실적":
         st.markdown('<div class="subsection-title">AI 상품 인사이트</div>', unsafe_allow_html=True)
         st.caption("로우데이터와 동일 상품 과거 이력을 기준으로 검증 가능한 인사이트만 표시합니다.")
 
-        for _, product_row in matched.iterrows():
+        for product_idx, (_, product_row) in enumerate(matched.iterrows()):
             report = generate_insight_report(product_row, products)
             product_name = report["상품명"] or "상품명 없음"
             amount_text = compact_money(float(product_row.get("주문금액", 0) or 0))
@@ -2704,14 +2759,35 @@ elif menu == "일일실적":
 
             with st.expander(
                 f"{product_name} · {target_text} · {amount_text}",
-                expanded=True,
+                expanded=(product_idx == 0),
             ):
+                score_cols = st.columns([1, 1, 2])
+                score_cols[0].metric("AI 추천도", f"{report['추천점수']}점")
+                score_cols[1].metric("재편성 추천", report["추천등급"])
+                score_cols[2].markdown(
+                    f"**추천 등급**  {report['별점']}  "
+                    f"<br><span style='color:#6b7280;font-size:13px;'>점수는 성과·안정성·타겟 적합도·가격 경쟁력·위험 요인을 합산한 운영 우선순위 지표입니다.</span>",
+                    unsafe_allow_html=True,
+                )
+
                 st.markdown("**주요 인사이트**")
                 for item in report["인사이트"]:
-                    st.markdown(f"- **[{item['category']}]** {item['sentence']}")
+                    icon = "🔴" if item.get("type") == "risk" else ("🟢" if item.get("confidence") == "높음" else "🟡")
+                    evidence = f"  <span style='color:#6b7280;font-size:12px;'>근거: {item['evidence']} · 신뢰도 {item['confidence']}</span>" if item.get("evidence") else ""
+                    st.markdown(
+                        f"{icon} **[{item['category']}]** {item['sentence']}{evidence}",
+                        unsafe_allow_html=True,
+                    )
+
+                if report["위험요인"]:
+                    st.warning("주의 요인: " + " · ".join(report["위험요인"]))
 
                 st.markdown(
                     f'''<div class="insight-box"><b>[AI 종합 의견]</b><br>{report["종합의견"]}</div>''',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'''<div class="insight-box"><b>[왜 편성해야 하는가]</b><br>{report["편성이유"]}</div>''',
                     unsafe_allow_html=True,
                 )
 
