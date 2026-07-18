@@ -3484,25 +3484,197 @@ elif menu == "상품구분":
 
 
 elif menu == "타겟분석":
-    send_col = first_col(sends, ["발송 성공 건수", "총 발송 건수"])
-    click_col = first_col(sends, ["클릭 수(uniq)", "클릭 수"])
-    group = sends.groupby(["성별", "연령", "SEG"], as_index=False).agg(
-        발송횟수=("소재", "size"),
-        발송건수=(send_col, "sum"),
-        클릭수=(click_col, "sum"),
-        주문건수=("주문건수", "sum"),
-        주문금액=("주문금액", "sum"),
-    )
-    group["CTR"] = safe_div(group["클릭수"], group["발송건수"])
-    group["CVR"] = safe_div(group["주문건수"], group["클릭수"])
-    group["SPM"] = safe_div(group["주문금액"], group["발송건수"])
-    group["발송당매출"] = safe_div(group["주문금액"], group["발송횟수"])
-    st.dataframe(
-        group.sort_values("발송당매출", ascending=False),
-        use_container_width=True,
-        hide_index=True,
+    st.markdown('<div class="section-title">타겟분석</div>', unsafe_allow_html=True)
+
+    target_date_range = st.date_input(
+        "기간 선택",
+        [sends["_date"].min().date(), sends["_date"].max().date()],
+        key="target_analysis_date_range",
     )
 
+    if len(target_date_range) == 2:
+        target_start, target_end = target_date_range
+        target_sends = sends[
+            (sends["_date"].dt.date >= target_start)
+            & (sends["_date"].dt.date <= target_end)
+        ].copy()
+        target_products = products[
+            (products["_date"].dt.date >= target_start)
+            & (products["_date"].dt.date <= target_end)
+        ].copy()
+    else:
+        target_sends = sends.copy()
+        target_products = products.copy()
+
+    if target_sends.empty:
+        st.info("선택한 기간에 해당하는 발송 데이터가 없습니다.")
+    else:
+        def target_analysis_raw(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
+            view = grouped_send_table(data, group_keys).copy()
+            view = view.rename(columns={
+                "CTR(uniq)": "CTR",
+                "CVR(클릭>구매)": "CVR",
+                "발송당매출(발송횟수)": "발송당매출",
+            })
+            if "SEG" in view.columns:
+                view["SEG"] = view["SEG"].map(clean_identifier_value)
+            if "객단가" not in view.columns:
+                view["객단가"] = view.apply(
+                    lambda r: float(r.get("주문금액", 0)) / float(r.get("주문건수", 0))
+                    if float(r.get("주문건수", 0)) else 0,
+                    axis=1,
+                )
+            view = view.sort_values("SPM", ascending=False).reset_index(drop=True)
+            view.insert(0, "순위", range(1, len(view) + 1))
+            return view
+
+        def format_target_view(view: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
+            out = view.copy()
+            column_order = ["순위"] + group_keys + [
+                "발송횟수", "발송건수", "클릭수", "주문건수", "주문금액",
+                "CTR", "CVR", "SPM", "객단가", "발송당매출",
+            ]
+            out = out[[c for c in column_order if c in out.columns]].copy()
+            for col in ["발송횟수", "발송건수", "클릭수", "주문건수", "주문금액", "객단가", "발송당매출"]:
+                if col in out.columns:
+                    out[col] = out[col].map(fmt_num)
+            for col in ["CTR", "CVR"]:
+                if col in out.columns:
+                    out[col] = out[col].map(fmt_pct)
+            if "SPM" in out.columns:
+                out["SPM"] = out["SPM"].map(lambda x: f"{float(x):.1f}")
+            return out
+
+        gender_age_raw = target_analysis_raw(target_sends, ["성별", "연령"])
+        gender_age_seg_raw = target_analysis_raw(target_sends, ["성별", "연령", "SEG"])
+
+        st.markdown('<div class="subsection-title">성별·연령별 SPM</div>', unsafe_allow_html=True)
+        chart_data = gender_age_raw.copy()
+        chart_data["타겟"] = chart_data.apply(
+            lambda r: f"{str(r.get('성별', '')).strip()} {clean_identifier_value(r.get('연령', ''))}".strip(),
+            axis=1,
+        )
+        fig_target_spm = go.Figure(
+            go.Bar(
+                x=chart_data["타겟"],
+                y=chart_data["SPM"],
+                text=chart_data["SPM"].map(lambda x: f"{float(x):.1f}"),
+                textposition="outside",
+                cliponaxis=False,
+            )
+        )
+        fig_target_spm.update_layout(
+            height=420,
+            margin=dict(l=45, r=25, t=35, b=60),
+            xaxis_title="",
+            yaxis_title="SPM",
+            showlegend=False,
+            plot_bgcolor="#ffffff",
+            yaxis=dict(gridcolor="#e5e7eb"),
+        )
+        st.plotly_chart(fig_target_spm, use_container_width=True, key="target_spm_chart")
+
+        st.markdown('<div class="subsection-title">성별·연령별 실적</div>', unsafe_allow_html=True)
+        gender_age_event = st.dataframe(
+            format_target_view(gender_age_raw, ["성별", "연령"]),
+            use_container_width=True,
+            hide_index=True,
+            height=min(520, 42 + len(gender_age_raw) * 35),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="target_gender_age_table",
+        )
+
+        st.markdown('<div class="subsection-title">성별·연령·SEG별 실적</div>', unsafe_allow_html=True)
+        gender_age_seg_event = st.dataframe(
+            format_target_view(gender_age_seg_raw, ["성별", "연령", "SEG"]),
+            use_container_width=True,
+            hide_index=True,
+            height=min(620, 42 + len(gender_age_seg_raw) * 35),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="target_gender_age_seg_table",
+        )
+
+        selected_target = None
+        selected_seg = None
+        seg_rows = list(getattr(getattr(gender_age_seg_event, "selection", None), "rows", []) or [])
+        age_rows = list(getattr(getattr(gender_age_event, "selection", None), "rows", []) or [])
+        if seg_rows:
+            selected_target = gender_age_seg_raw.iloc[int(seg_rows[0])]
+            selected_seg = clean_identifier_value(selected_target.get("SEG", ""))
+        elif age_rows:
+            selected_target = gender_age_raw.iloc[int(age_rows[0])]
+
+        if selected_target is not None:
+            selected_gender = str(selected_target.get("성별", "")).strip()
+            selected_age = clean_identifier_value(selected_target.get("연령", ""))
+            history = target_products.copy()
+            if "성별" in history.columns:
+                history = history[history["성별"].astype(str).str.strip().eq(selected_gender)]
+            if "연령" in history.columns:
+                history = history[history["연령"].map(clean_identifier_value).eq(selected_age)]
+            if selected_seg and "SEG" in history.columns:
+                history = history[history["SEG"].map(clean_identifier_value).eq(selected_seg)]
+
+            if history.empty:
+                st.info("선택한 타겟의 상품 발송 이력이 없습니다.")
+            else:
+                send_count_col = first_col(target_sends, ["발송 성공 건수", "총 발송 건수"])
+                campaign_col_send = first_col(target_sends, ["캠페인명", "캠페인", "소재"])
+                campaign_col_product = first_col(history, ["캠페인명", "캠페인", "소재"])
+
+                send_lookup = target_sends.copy()
+                send_lookup["_date_key"] = send_lookup["_date"].dt.strftime("%Y-%m-%d")
+                if send_count_col:
+                    send_lookup["_send_count"] = pd.to_numeric(send_lookup[send_count_col], errors="coerce").fillna(0)
+                else:
+                    send_lookup["_send_count"] = 0
+                if campaign_col_send:
+                    send_lookup["_campaign_key"] = send_lookup[campaign_col_send].fillna("").astype(str).str.strip()
+                    campaign_map = send_lookup.groupby(["_date_key", "_campaign_key"])["_send_count"].sum().to_dict()
+                else:
+                    campaign_map = {}
+                date_map = send_lookup.groupby("_date_key")["_send_count"].sum().to_dict()
+
+                history["발송일"] = history["_date"].dt.strftime("%Y-%m-%d")
+                history["SEG"] = history.get("SEG", "").map(clean_identifier_value) if "SEG" in history.columns else ""
+                history["행사가"] = pd.to_numeric(history.get("멤버십혜택가", 0), errors="coerce").fillna(0)
+                history["_campaign_key"] = history[campaign_col_product].fillna("").astype(str).str.strip() if campaign_col_product else ""
+                history["_send_count"] = history.apply(
+                    lambda r: campaign_map.get((r["발송일"], r["_campaign_key"]), date_map.get(r["발송일"], 0)),
+                    axis=1,
+                )
+                history["SPM"] = history.apply(
+                    lambda r: float(r.get("주문금액", 0)) / float(r.get("_send_count", 0)) * 1000
+                    if float(r.get("_send_count", 0)) else 0,
+                    axis=1,
+                )
+                history["할인율"] = history.apply(
+                    lambda r: floor_discount_rate(float(r.get("정상가", 0) or 0), float(r.get("행사가", 0) or 0)),
+                    axis=1,
+                )
+
+                target_name = f"{selected_gender} {selected_age}" + (f" SEG{selected_seg}" if selected_seg else "")
+                st.markdown(f'<div class="subsection-title">{target_name} 발송 이력</div>', unsafe_allow_html=True)
+                history_cols = [
+                    "발송일", "SEG", "쇼라코드", "알파코드", "상품명",
+                    "정상가", "행사가", "할인율", "주문금액", "SPM",
+                ]
+                history_view = history[[c for c in history_cols if c in history.columns]].sort_values("발송일", ascending=False).copy()
+                for col in ["정상가", "행사가", "주문금액"]:
+                    if col in history_view.columns:
+                        history_view[col] = history_view[col].map(format_integer_price)
+                if "할인율" in history_view.columns:
+                    history_view["할인율"] = history_view["할인율"].map(lambda x: f"{float(x) * 100:.0f}%")
+                if "SPM" in history_view.columns:
+                    history_view["SPM"] = history_view["SPM"].map(lambda x: f"{float(x):.1f}")
+                st.dataframe(
+                    history_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(620, 42 + len(history_view) * 35),
+                )
 
 elif menu == "편성 프로그램":
     st.markdown('<div class="section-title">🗓️ 편성 프로그램</div>', unsafe_allow_html=True)
