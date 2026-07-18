@@ -3646,7 +3646,7 @@ elif menu == "타겟분석":
                     axis=1,
                 )
                 history["SPM"] = history.apply(
-                    lambda r: float(r.get("주문금액", 0)) / float(r.get("_send_count", 0)) * 1000
+                    lambda r: float(r.get("주문금액", 0)) / float(r.get("_send_count", 0))
                     if float(r.get("_send_count", 0)) else 0,
                     axis=1,
                 )
