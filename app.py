@@ -959,105 +959,239 @@ def add_history_columns(current_df: pd.DataFrame, history: pd.DataFrame) -> pd.D
     return out
 
 
-def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
-    name = str(row.get("상품명", "")).strip()
-    amount = float(row.get("주문금액", 0))
-    grade = product_grade(amount)
-    summary = product_history_summary(row, history)
-    prior = summary["과거이력"]
-    same_target = summary["동일타겟이력"]
-    current_target = target_label(row)
-    parts = []
+def promotion_label(row: pd.Series) -> str:
+    """로우데이터에 존재하는 프로모션 관련 컬럼만 사용해 표시값을 만듭니다."""
+    for col in ["프로모션명", "프로모션", "보답프로그램", "행사명", "기획전명"]:
+        value = str(row.get(col, "")).strip()
+        if value not in ["", "-", "nan", "None"]:
+            return value
+    return "-"
 
-    raw_case = str(row.get("재편성", "")).strip()
-    if summary["운영횟수"] == 0:
-        if raw_case == "유사신규":
-            parts.append(f"{raw_case} 상품으로 {current_target or '신규 타겟'} TEST 진행")
-        else:
-            parts.append(f"MMS 첫 운영 상품으로 {current_target or '신규 타겟'} 신규 TEST 진행")
-    else:
-        # 과거 이력을 실제 날짜·타겟·매출 중심으로 제시
-        recent_examples = prior.sort_values("_date", ascending=False).head(2).sort_values("_date")
-        example_texts = []
-        for _, hist_row in recent_examples.iterrows():
-            dt = hist_row["_date"]
-            dt_text = f"{dt.month}/{dt.day}" if pd.notna(dt) else ""
-            tgt = target_label(hist_row)
-            example_texts.append(
-                f"{dt_text} {tgt} 운영 시 {compact_money(hist_row['주문금액'])} 기록".strip()
-            )
-        if example_texts:
-            parts.append(" / ".join(example_texts))
 
-        if same_target.empty:
-            parts.append(f"금번 {current_target} 첫 TEST 진행")
-        else:
-            parts.append(
-                f"동일 타겟 과거 {len(same_target)}회 운영 시 "
-                f"평균 {compact_money(same_target['주문금액'].mean())} 기록"
-            )
+def is_promotional(row: pd.Series) -> bool:
+    return promotion_label(row) != "-"
 
-        if summary["최고타겟"] and summary["최고타겟"] != current_target:
-            target_avg = (
-                prior.assign(_target=prior.apply(target_label, axis=1))
-                .groupby("_target")["주문금액"].mean()
-                .get(summary["최고타겟"], 0)
-            )
-            parts.append(
-                f"과거 최고 효율 타겟은 {summary['최고타겟']}로 "
-                f"평균 {compact_money(target_avg)} 기록"
-            )
 
-    exposure = row.get("추가노출")
-    if pd.notna(exposure) and str(exposure).strip() not in ["", "-", "nan", "None"]:
-        parts.append(f"{str(exposure).strip()} 추가 노출 운영")
+def coefficient_of_variation(values: pd.Series) -> float:
+    values = pd.to_numeric(values, errors="coerce").dropna()
+    if len(values) < 2 or values.mean() == 0:
+        return 0.0
+    return float(values.std(ddof=0) / abs(values.mean()))
 
-    dt = row.get("_date")
-    current_date = f"{dt.month}/{dt.day}" if pd.notna(dt) and hasattr(dt, "month") else ""
-    parts.append(f"금번 {current_date} {current_target}에서 {compact_money(amount)} 기록".strip())
 
-    # 과거 평균·최고 대비 비교
-    if summary["운영횟수"] > 0:
-        avg = summary["평균매출"]
-        max_amount = summary["최고매출"]
-        if avg > 0:
-            ratio = amount / avg
-            if ratio >= 1.25:
-                parts.append(f"과거 평균 대비 {abs(ratio-1)*100:.0f}% 높은 성과")
-            elif ratio <= 0.75:
-                parts.append(f"과거 평균 대비 {abs(ratio-1)*100:.0f}% 낮은 성과")
-            else:
-                parts.append("과거 평균과 유사한 수준의 성과")
-        if amount > max_amount and amount >= 3_000_000:
-            parts.append("기존 최고 주문금액을 상회하며 MMS 발송 기준 기네스 갱신")
+def make_product_history_table(
+    row: pd.Series,
+    history: pd.DataFrame,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """현재 건을 포함한 동일 상품 최근 발송 이력을 화면 표시용으로 생성합니다."""
+    hist = product_history_including_current(row, history).copy()
+    if hist.empty:
+        return pd.DataFrame()
 
-    cases = classify_cases(row, history)
-    if grade == "핵심 상품":
-        parts.append("핵심 판매 상품 수준의 매우 우수한 실적 확인")
-    elif grade == "우수 상품":
-        parts.append("우수한 판매 성과 확인")
-    elif grade == "유망 상품":
-        parts.append("추가 재편성 검토가 가능한 실적")
-    elif grade == "관찰 상품":
-        parts.append("기대 대비 다소 아쉬운 실적")
-    else:
-        parts.append("1백만원 미만의 저조한 실적 기록")
+    hist = hist.sort_values("_date", ascending=False).head(limit).copy()
+    hist["발송일"] = hist["_date"].dt.strftime("%Y-%m-%d")
+    hist["타겟"] = hist.apply(target_label, axis=1)
+    hist["프로모션"] = hist.apply(promotion_label, axis=1)
 
-    if "운영 피로도 사례" in cases:
-        parts.append("단기간 동일 상품 재노출에 따른 운영 피로도 영향 가능성 확인 필요")
-    elif "시즌 상품 사례" in cases and grade in ["핵심 상품", "우수 상품"]:
-        parts.append("시즌 종료 전 추가 운영 검토 필요")
-    elif grade in ["핵심 상품", "우수 상품"]:
-        parts.append(
-            f"{summary['최고타겟'] or current_target} 중심 추가 운영 검토 필요"
+    if "발송일 최저가" in hist.columns:
+        hist["발송일 최저가 여부"] = hist.apply(
+            lambda r: (
+                "O" if float(r.get("발송일 최저가", 0) or 0) > 0
+                and float(r.get("멤버십혜택가", 0) or 0) <= float(r.get("발송일 최저가", 0) or 0)
+                else ("X" if float(r.get("발송일 최저가", 0) or 0) > 0 else "-")
+            ),
+            axis=1,
         )
-    elif grade == "유망 상품":
-        parts.append("타겟·가격·전시순서 비교 후 추가 테스트 검토")
     else:
-        parts.append("가격 경쟁력과 타겟 적합성 재점검 필요")
+        hist["발송일 최저가 여부"] = "-"
 
-    return f"[{name}] " + " > ".join(parts)
+    cols = ["발송일", "타겟", "주문금액"]
+    if "멤버십혜택가" in hist.columns:
+        cols.append("멤버십혜택가")
+    cols += ["발송일 최저가 여부", "프로모션"]
+    view = hist[[c for c in cols if c in hist.columns]].copy()
 
+    for col in ["주문금액", "멤버십혜택가"]:
+        if col in view.columns:
+            view[col] = view[col].map(format_integer_price)
+    return view.reset_index(drop=True)
+
+
+def generate_insight_report(row: pd.Series, history: pd.DataFrame) -> dict:
+    """숫자로 검증 가능한 조건만 사용해 상품별 인사이트와 종합 의견을 생성합니다."""
+    name = str(row.get("상품명", "")).strip()
+    amount = float(row.get("주문금액", 0) or 0)
+    current_target = target_label(row)
+    current_date = pd.to_datetime(row.get("_date"), errors="coerce")
+    current_price = float(row.get("멤버십혜택가", 0) or 0)
+    grade = product_grade(amount)
+
+    summary = product_history_summary(row, history)
+    prior = summary["과거이력"].copy()
+    same_target = summary["동일타겟이력"].copy()
+    cumulative = product_history_including_current(row, history).copy()
+    cumulative = cumulative.sort_values("_date")
+
+    insights: list[tuple[int, str, str]] = []
+
+    def add(priority: int, category: str, sentence: str):
+        if sentence and sentence not in [item[2] for item in insights]:
+            insights.append((priority, category, sentence))
+
+    # 1. 성과 인사이트
+    if not prior.empty:
+        past_max = float(prior["주문금액"].max())
+        past_avg = float(prior["주문금액"].mean())
+        if amount > past_max and amount >= 3_000_000:
+            add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적을 경신했습니다.")
+        elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
+            add(88, "성과", f"과거 평균 {compact_money(past_avg)} 대비 주문금액이 {((amount / past_avg) - 1) * 100:.0f}% 증가해 거래액이 크게 성장했습니다.")
+        elif past_avg > 0 and amount <= past_avg * 0.7:
+            add(78, "성과", f"금번 주문금액은 과거 평균 {compact_money(past_avg)} 대비 {(1 - amount / past_avg) * 100:.0f}% 낮아 최근 성과 둔화가 확인됩니다.")
+
+    recent3 = cumulative.tail(3)
+    if len(recent3) == 3:
+        vals = recent3["주문금액"].astype(float).tolist()
+        if vals[0] < vals[1] < vals[2]:
+            add(94, "성과", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장했습니다.")
+        elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.35:
+            add(75, "성과", "최근 3회 모두 300만원 이상의 주문금액을 기록해 안정적인 판매 흐름을 유지했습니다.")
+
+    # 같은 주차 운영 결과
+    if "주차" in cumulative.columns and "주차" in row.index:
+        week_value = str(row.get("주차", "")).strip()
+        if week_value and week_value not in ["nan", "None"]:
+            week_rows = cumulative[cumulative["주차"].astype(str).eq(week_value)]
+            if len(week_rows) >= 2:
+                over3 = int((week_rows["주문금액"] >= 3_000_000).sum())
+                if over3 == len(week_rows):
+                    add(96, "성과", f"금주 총 {len(week_rows)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록했습니다.")
+
+    # 2. 타겟 인사이트
+    if not prior.empty:
+        overall_avg = float(prior["주문금액"].mean())
+        if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= overall_avg * 1.1:
+            add(91, "타겟", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 과거 평균보다 높아 핵심 타겟 적합도가 확인됩니다.")
+        elif same_target.empty and amount >= 3_000_000:
+            add(84, "타겟", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.")
+
+        prior_targets = prior.assign(_target=prior.apply(target_label, axis=1))
+        target_sales = prior_targets.groupby("_target")["주문금액"].sum().sort_values(ascending=False)
+        if len(target_sales) >= 2 and target_sales.sum() > 0 and target_sales.iloc[0] / target_sales.sum() >= 0.7:
+            add(68, "타겟", f"과거 주문금액의 {target_sales.iloc[0] / target_sales.sum() * 100:.0f}%가 {target_sales.index[0]}에 집중되어 특정 타겟 의존도가 높습니다.")
+
+    # 3. 프로모션 인사이트: 프로모션 컬럼이 실제로 존재할 때만 판정
+    promo_cols = [c for c in ["프로모션명", "프로모션", "보답프로그램", "행사명", "기획전명"] if c in cumulative.columns]
+    if promo_cols and len(cumulative) >= 4:
+        promo_mask = cumulative.apply(is_promotional, axis=1)
+        promo_rows = cumulative[promo_mask]
+        normal_rows = cumulative[~promo_mask]
+        if len(promo_rows) >= 2 and len(normal_rows) >= 2:
+            promo_avg = float(promo_rows["주문금액"].mean())
+            normal_avg = float(normal_rows["주문금액"].mean())
+            if normal_avg > 0 and promo_avg >= normal_avg * 1.3:
+                add(72, "프로모션", f"프로모션 운영 평균 {compact_money(promo_avg)}이 일반 운영 평균 {compact_money(normal_avg)}보다 높아 프로모션 수혜가 확인됩니다.")
+            elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
+                add(65, "프로모션", "프로모션 여부에 따른 주문금액 차이가 제한적이어서 일반 기간에도 안정적인 운영이 가능합니다.")
+
+    # 4. 가격 인사이트
+    lowest = float(row.get("발송일 최저가", 0) or 0)
+    if lowest > 0 and current_price > 0:
+        if current_price <= lowest:
+            add(86, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 이하의 가격 메리트를 확보했습니다.")
+        elif amount < 2_000_000:
+            add(60, "가격", f"멤버십 혜택가가 발송일 비교 최저가보다 {fmt_num(current_price - lowest)}원 높아 추가 가격 메리트 확보가 필요합니다.")
+
+    if not prior.empty and current_price > 0:
+        last = prior.iloc[-1]
+        last_price = float(last.get("멤버십혜택가", 0) or 0)
+        last_amount = float(last.get("주문금액", 0) or 0)
+        if last_price > 0 and current_price > last_price and amount >= last_amount * 0.9:
+            add(82, "가격", f"직전 대비 혜택가가 {fmt_num(current_price - last_price)}원 상승했으나 주문금액은 {amount / last_amount * 100:.0f}% 수준을 유지해 가격 인상 방어에 성공했습니다.")
+
+    # 5. 운영 인사이트 / 8. 운영 희소성
+    if not prior.empty and pd.notna(current_date):
+        last = prior.iloc[-1]
+        gap = int((current_date - last["_date"]).days)
+        last_amount = float(last.get("주문금액", 0) or 0)
+        if gap <= 21 and last_amount > 0:
+            ratio = amount / last_amount
+            if ratio >= 0.8:
+                add(79, "운영", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio * 100:.0f}% 수준을 유지해 반복 운영 피로도가 제한적입니다.")
+            elif ratio < 0.75:
+                add(74, "운영", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 휴지기 부여를 검토할 필요가 있습니다.")
+        elif gap >= 45 and amount >= 3_000_000:
+            add(80, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인됩니다.")
+
+    recent90 = cumulative
+    if pd.notna(current_date):
+        recent90 = cumulative[cumulative["_date"] >= current_date - pd.Timedelta(days=90)]
+    if 1 <= len(recent90) <= 2 and float(recent90["주문금액"].mean()) >= 3_000_000:
+        add(77, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력이 있습니다.")
+
+    # 6. 시즌 인사이트
+    season_words = ["선풍기", "에어컨", "서큘레이터", "우양산", "래쉬가드", "삼계탕", "장어", "아이스크림", "제습기", "냉감"]
+    if any(word in name for word in season_words) and grade in ["핵심 상품", "우수 상품"]:
+        add(70, "시즌", "시즌 수요가 반영된 우수 성과로, 수요가 유지되는 기간 내 추가 운영을 검토할 수 있습니다.")
+
+    # 7. 상품 포지션 / 9. 편성 전략
+    avg_all = float(cumulative["주문금액"].mean()) if not cumulative.empty else amount
+    if len(cumulative) >= 3 and (avg_all >= 5_000_000 or amount >= 10_000_000):
+        add(90, "상품 포지션", f"누적 {len(cumulative)}회 운영 평균 {compact_money(avg_all)}을 기록한 대표 매출 견인 상품입니다.")
+    elif summary["운영횟수"] == 0 and amount >= 3_000_000:
+        add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요합니다.")
+    elif amount < 1_000_000:
+        add(55, "상품 포지션", "주문금액이 100만원 미만으로 가격·타겟 조건을 재점검한 뒤 운영 축소 여부를 검토해야 합니다.")
+
+    # 화면에는 우선순위가 높은 서로 다른 관점의 문장만 최대 8개 노출
+    insights = sorted(insights, key=lambda x: (-x[0], x[1]))
+    selected = []
+    category_count: dict[str, int] = {}
+    for _, category, sentence in insights:
+        if category_count.get(category, 0) >= 2:
+            continue
+        selected.append({"category": category, "sentence": sentence})
+        category_count[category] = category_count.get(category, 0) + 1
+        if len(selected) >= 8:
+            break
+
+    if not selected:
+        selected.append({
+            "category": "운영",
+            "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며, 추가 이력 축적 후 성과 추세 판단이 필요합니다.",
+        })
+
+    # 종합 의견은 검증된 성과·타겟·운영 상태를 조합
+    if amount >= 5_000_000:
+        if len(same_target) >= 2:
+            summary_text = f"{current_target}에서 반복적으로 우수한 성과가 확인되어 차주 핵심 재편성 상품으로 지속 운영을 권장합니다."
+        elif same_target.empty and summary["운영횟수"] > 0:
+            summary_text = f"{current_target} 확장 운영에서 우수한 성과가 확인되어 동일 타겟 추가 TEST와 운영 비중 확대를 검토할 수 있습니다."
+        else:
+            summary_text = "높은 주문금액과 과거 실적을 기반으로 차주 주력 상품 편성을 검토할 수 있습니다."
+    elif amount >= 3_000_000:
+        summary_text = f"금번 {current_target or '운영 타겟'}에서 우수한 판매 성과가 확인되어 동일 조건 중심의 재편성을 검토할 수 있습니다."
+    elif amount >= 2_000_000:
+        summary_text = "재편성 검토가 가능한 수준으로, 타겟·가격·전시순서를 비교한 추가 TEST가 필요합니다."
+    elif amount >= 1_000_000:
+        summary_text = "성과가 제한적으로 확인되어 가격 경쟁력과 타겟 적합성을 보완한 선택적 재운영이 필요합니다."
+    else:
+        summary_text = "주문금액이 100만원 미만으로 가격·타겟·상품 경쟁력을 재점검한 뒤 운영 축소 여부를 검토해야 합니다."
+
+    return {
+        "상품명": name,
+        "인사이트": selected,
+        "종합의견": summary_text,
+        "발송이력": make_product_history_table(row, history),
+    }
+
+
+def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
+    """상품구분·상품분석·PPT에서 사용할 한 줄형 호환 함수입니다."""
+    report = generate_insight_report(row, history)
+    sentences = [item["sentence"] for item in report["인사이트"]]
+    return f"[{report['상품명']}] " + " > ".join(sentences + [f"AI 종합 의견: {report['종합의견']}"])
 
 def build_ppt(title: str, lines: list[str], table_df: pd.DataFrame | None = None) -> bytes:
     prs = Presentation()
@@ -2559,12 +2693,37 @@ elif menu == "일일실적":
             height=280,
         )
 
-        st.markdown('<div class="subsection-title">주요 인사이트</div>', unsafe_allow_html=True)
-        insight_lines = [make_insight(r, products) for _, r in matched.iterrows()]
-        st.markdown(
-            f'<div class="insight-box">{"<br>".join(insight_lines)}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="subsection-title">AI 상품 인사이트</div>', unsafe_allow_html=True)
+        st.caption("로우데이터와 동일 상품 과거 이력을 기준으로 검증 가능한 인사이트만 표시합니다.")
+
+        for _, product_row in matched.iterrows():
+            report = generate_insight_report(product_row, products)
+            product_name = report["상품명"] or "상품명 없음"
+            amount_text = compact_money(float(product_row.get("주문금액", 0) or 0))
+            target_text = target_label(product_row) or "타겟 정보 없음"
+
+            with st.expander(
+                f"{product_name} · {target_text} · {amount_text}",
+                expanded=True,
+            ):
+                st.markdown("**주요 인사이트**")
+                for item in report["인사이트"]:
+                    st.markdown(f"- **[{item['category']}]** {item['sentence']}")
+
+                st.markdown(
+                    f'''<div class="insight-box"><b>[AI 종합 의견]</b><br>{report["종합의견"]}</div>''',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("**발송 이력**")
+                if report["발송이력"].empty:
+                    st.info("동일 상품의 발송 이력이 없습니다.")
+                else:
+                    st.dataframe(
+                        clean_identifier_columns(report["발송이력"]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     all_insights = [make_insight(r, products) for _, r in pday.iterrows()]
     ppt = build_ppt(
