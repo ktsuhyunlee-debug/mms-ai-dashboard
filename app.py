@@ -282,6 +282,29 @@ hr {
     border-top: 1px solid var(--border);
 }
 
+/* 일일 상품 인사이트를 최대한 컴팩트하게 표시 */
+.compact-insight {
+    font-size: 14px;
+    line-height: 1.32;
+    margin: 0;
+    padding: 0;
+}
+.compact-insight .insight-row {
+    margin: 0 0 3px 0;
+    padding: 0;
+}
+.compact-insight .evidence {
+    color: var(--muted);
+    font-size: 11px;
+}
+[data-testid="stExpander"] details summary {
+    padding-top: 0.55rem;
+    padding-bottom: 0.55rem;
+}
+[data-testid="stExpander"] details > div {
+    padding-top: 0.25rem;
+}
+
 @media (max-width: 900px) {
     .block-container {
         padding: 1.6rem 0.75rem 2rem;
@@ -320,7 +343,7 @@ hr {
     unsafe_allow_html=True,
 )
 
-GRADE_ORDER = ["핵심 상품", "우수 상품", "유망 상품", "관찰 상품", "부진 상품"]
+GRADE_ORDER = ["핵심 상품", "우수 상품", "안정 상품", "관찰 상품", "부진 상품"]
 CASE_ORDER = [
     "가격 경쟁력 부족 사례",
     "기네스 갱신 사례",
@@ -378,7 +401,7 @@ def product_grade(amount: float) -> str:
     if amount < 2_000_000:
         return "관찰 상품"
     if amount < 3_000_000:
-        return "유망 상품"
+        return "안정 상품"
     if amount < 5_000_000:
         return "우수 상품"
     return "핵심 상품"
@@ -1032,8 +1055,36 @@ def make_product_history_table(row: pd.Series, history: pd.DataFrame, limit: int
     return view.reset_index(drop=True)
 
 
-def generate_insight_report(row: pd.Series, history: pd.DataFrame) -> dict:
-    """사실→해석→위험→추천 순서로 상품별 의사결정 인사이트를 생성합니다."""
+def issue_storage_key(row: pd.Series) -> str:
+    date_value = pd.to_datetime(row.get("_date"), errors="coerce")
+    date_text = date_value.strftime("%Y-%m-%d") if pd.notna(date_value) else "no-date"
+    product_key = clean_identifier_value(row.get("쇼라코드", "")) or clean_identifier_value(row.get("알파코드", "")) or str(row.get("상품명", "")).strip()
+    target = target_label(row)
+    return f"{date_text}|{product_key}|{target}"
+
+
+def get_saved_issue(row: pd.Series) -> dict:
+    issues = st.session_state.setdefault("daily_operation_issues", {})
+    return issues.get(issue_storage_key(row), {})
+
+
+def save_operation_issue(row: pd.Series, issue_types: list[str], memo: str, action: str, status: str) -> None:
+    issues = st.session_state.setdefault("daily_operation_issues", {})
+    key = issue_storage_key(row)
+    if issue_types or memo.strip() or action.strip():
+        issues[key] = {
+            "유형": issue_types,
+            "메모": memo.strip(),
+            "조치": action.strip(),
+            "상태": status,
+            "저장일시": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    elif key in issues:
+        del issues[key]
+
+
+def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
+    """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
     name = str(row.get("상품명", "")).strip()
     amount = float(row.get("주문금액", 0) or 0)
     current_target = target_label(row)
@@ -1046,10 +1097,37 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame) -> dict:
     cumulative = product_history_including_current(row, history).copy().sort_values("_date")
     insights: list[tuple[int, str, str, str, str]] = []
     risks: list[str] = []
+    issue = issue or {}
+    issue_types = set(issue.get("유형", []))
+    critical_issue = bool(issue_types.intersection({"판매중단", "재고부족", "품절", "링크오류", "가격오류"}))
 
     def add(priority: int, category: str, sentence: str, evidence: str = "", confidence: str = "보통"):
         if sentence and sentence not in [item[2] for item in insights]:
             insights.append((priority, category, sentence, evidence, confidence))
+
+    if issue_types:
+        issue_text = "·".join(sorted(issue_types))
+        detail = issue.get("메모", "")
+        action = issue.get("조치", "")
+        sentence = f"금번 운영에서 {issue_text} 이슈가 등록되어 주문금액만으로 정상적인 상품 반응을 판단하기 어렵습니다."
+        if detail:
+            sentence += f" ({detail})"
+        if action:
+            sentence += f" 후속 조치: {action}."
+        add(120, "운영 이슈", sentence, f"상태 {issue.get('상태', '발생')}", "높음")
+
+    # 현재 주문금액 등급에 따른 기본 평가
+    if not critical_issue:
+        if amount < 1_000_000:
+            add(97, "금번 성과", f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적입니다.", "현재 주문금액 기준", "높음")
+        elif amount < 2_000_000:
+            add(91, "금번 성과", f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.", "현재 주문금액 기준", "높음")
+        elif amount < 3_000_000:
+            add(75, "금번 성과", f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과입니다.", "현재 주문금액 기준", "높음")
+        elif amount < 5_000_000:
+            add(80, "금번 성과", f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보했습니다.", "현재 주문금액 기준", "높음")
+        else:
+            add(90, "금번 성과", f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록했습니다.", "현재 주문금액 기준", "높음")
 
     # 성과 및 추세
     if not prior.empty:
@@ -1181,72 +1259,42 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame) -> dict:
     elif summary["운영횟수"] == 0 and amount >= 3_000_000:
         add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요합니다.", "신규 1회", "참고")
 
-    # 추천 점수: 성과 35 + 안정성 20 + 타겟 20 + 가격/프로모션 15 + 위험 10
-    score = 50
-    score += 20 if amount >= 5_000_000 else 12 if amount >= 3_000_000 else 5 if amount >= 2_000_000 else -10 if amount < 1_000_000 else 0
-    if len(cumulative) >= 3:
-        cv = coefficient_of_variation(cumulative.tail(5)["주문금액"])
-        score += 10 if cv <= 0.30 else -8 if cv >= 0.75 else 3
-    if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= float(prior["주문금액"].mean() if not prior.empty else 0) * 1.1:
-        score += 10
-    if lowest > 0 and current_price > 0 and current_price <= lowest:
-        score += 7
-    score -= min(25, len(set(risks)) * 6)
-    score = max(0, min(100, int(round(score))))
-    recommendation = "매우 높음" if score >= 85 else "높음" if score >= 70 else "보통" if score >= 50 else "낮음" if score >= 30 else "매우 낮음"
-    stars = "★" * max(1, min(5, round(score / 20))) + "☆" * (5 - max(1, min(5, round(score / 20))))
+    # MMS 메인 상품 적합도는 반복 부진 근거가 충분할 때만 강하게 판단
+    if not critical_issue and len(cumulative) >= 3:
+        recent_normal = cumulative[~cumulative.apply(is_promotional, axis=1)].tail(3)
+        if len(recent_normal) >= 3 and float(recent_normal["주문금액"].mean()) < 1_000_000:
+            add(108, "상품 적합도", f"최근 일반기간 3회 평균이 {compact_money(recent_normal['주문금액'].mean())}으로 반복 운영에서도 성과 개선이 제한적이어서 MMS 메인 상품으로는 적합도가 낮은 것으로 판단됩니다.", "일반기간 최근 3회", "높음")
+            risks.append("MMS 메인 적합도 낮음")
 
-    # 중요도·중복 제어: 위험은 최소 1개 보존, 전체 6개
+    # 중요도·중복 제어: 위험 또는 부정 결론을 우선 보존하고 전체 6개 이내로 제한
     insights = sorted(insights, key=lambda x: (-x[0], x[1]))
     selected, category_count = [], {}
-    risk_items = [x for x in insights if "위험" in x[1]]
-    if risk_items:
-        x = risk_items[0]
-        selected.append({"category": x[1], "sentence": x[2], "evidence": x[3], "confidence": x[4], "type": "risk"})
-        category_count[x[1]] = 1
     for _, category, sentence, evidence, confidence in insights:
         if any(item["sentence"] == sentence for item in selected) or category_count.get(category, 0) >= 1:
             continue
-        selected.append({"category": category, "sentence": sentence, "evidence": evidence, "confidence": confidence, "type": "fact"})
+        item_type = "risk" if category in {"운영 위험", "가격 위험", "타겟 위험", "상품 적합도", "운영 이슈"} or "낮" in sentence or "저조" in sentence or "아쉬" in sentence else "fact"
+        selected.append({"category": category, "sentence": sentence, "evidence": evidence, "confidence": confidence, "type": item_type})
         category_count[category] = 1
         if len(selected) >= 6:
             break
     if not selected:
-        selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 추세 판단이 필요합니다.", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
+        selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 판단이 필요합니다.", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
 
-    # 부정 신호 우선 종합 의견
-    risk_set = set(risks)
-    if "최근 3회 연속 하락" in risk_set or "단기 반복 피로도" in risk_set:
-        summary_text = "현재 성과 수준과 별개로 최근 하락 또는 반복 운영 피로도가 확인되어 동일 조건 재편성보다 휴지기와 타겟·가격 조건 조정이 우선입니다."
-    elif "프로모션 의존" in risk_set:
-        summary_text = "프로모션 기간 성과 우위가 뚜렷해 일반 기간 상시 편성보다 프로모션 구간 중심의 선택적 운영이 효율적입니다."
-    elif "가격 경쟁력 미확보" in risk_set or "가격 민감형" in risk_set:
-        summary_text = "가격 조건에 따른 성과 변동 가능성이 있어 재편성 전 최저가 또는 추가 혜택 확보가 우선입니다."
-    elif score >= 85 and len(same_target) >= 2:
-        summary_text = f"{current_target} 타겟 적합도와 반복 운영 안정성이 함께 확인되어 차주 핵심 재편성 상품으로 지속 운영을 권장합니다."
-    elif score >= 70:
-        summary_text = "성과와 운영 근거가 충분해 차주 주력 상품 후보로 재편성하되, 우수 타겟 중심으로 운영 비중 확대를 검토할 수 있습니다."
-    elif score >= 50:
-        summary_text = "재편성 검토가 가능한 수준이나 타겟·가격·프로모션 조건을 비교한 추가 TEST가 필요합니다."
-    else:
-        summary_text = "현재 근거만으로 적극 재편성하기 어려워 가격·타겟·상품 경쟁력을 보완한 뒤 선택적으로 재검증해야 합니다."
-
-    reason_parts = []
-    if amount >= 5_000_000: reason_parts.append(f"금번 {compact_money(amount)} 기록")
-    if len(same_target) >= 2: reason_parts.append(f"{current_target} 반복 검증")
-    if len(cumulative) >= 5 and coefficient_of_variation(cumulative.tail(5)["주문금액"]) <= 0.30: reason_parts.append("최근 성과 안정성 확보")
-    if lowest > 0 and current_price > 0 and current_price <= lowest: reason_parts.append("발송일 최저가 메리트 확보")
-    if not risk_set: reason_parts.append("중대 위험 신호 없음")
-    why_text = ", ".join(reason_parts[:4]) + "을 근거로 편성 우선순위를 판단했습니다." if reason_parts else "현재 성과와 과거 운영 이력을 종합해 선택적 편성 여부를 판단해야 합니다."
-
-    return {"상품명": name, "인사이트": selected, "종합의견": summary_text, "편성이유": why_text, "추천점수": score, "추천등급": recommendation, "별점": stars, "위험요인": sorted(risk_set), "발송이력": make_product_history_table(row, history)}
+    return {
+        "상품명": name,
+        "상품등급": grade,
+        "인사이트": selected,
+        "위험요인": sorted(set(risks)),
+        "발송이력": make_product_history_table(row, history, limit=5),
+        "운영이슈": issue,
+    }
 
 
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
     """상품구분·상품분석·PPT에서 사용할 한 줄형 호환 함수입니다."""
-    report = generate_insight_report(row, history)
+    report = generate_insight_report(row, history, get_saved_issue(row))
     sentences = [item["sentence"] for item in report["인사이트"]]
-    return f"[{report['상품명']}] " + " > ".join(sentences + [f"AI 종합 의견: {report['종합의견']}"])
+    return f"[{report['상품명']}] " + " > ".join(sentences)
 
 def build_ppt(title: str, lines: list[str], table_df: pd.DataFrame | None = None) -> bytes:
     prs = Presentation()
@@ -2748,57 +2796,60 @@ elif menu == "일일실적":
             height=280,
         )
 
-        st.markdown('<div class="subsection-title">AI 상품 인사이트</div>', unsafe_allow_html=True)
-        st.caption("로우데이터와 동일 상품 과거 이력을 기준으로 검증 가능한 인사이트만 표시합니다.")
+        st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
+        st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트·운영 이슈·최근 발송 이력을 확인할 수 있습니다.")
 
-        for product_idx, (_, product_row) in enumerate(matched.iterrows()):
-            report = generate_insight_report(product_row, products)
+        for _, product_row in matched.iterrows():
+            saved_issue = get_saved_issue(product_row)
+            report = generate_insight_report(product_row, products, saved_issue)
             product_name = report["상품명"] or "상품명 없음"
             amount_text = compact_money(float(product_row.get("주문금액", 0) or 0))
+            grade_text = report["상품등급"]
             target_text = target_label(product_row) or "타겟 정보 없음"
 
             with st.expander(
-                f"{product_name} · {target_text} · {amount_text}",
-                expanded=(product_idx == 0),
+                f"{product_name} · {target_text} · {amount_text} · {grade_text}",
+                expanded=False,
             ):
-                score_cols = st.columns([1, 1, 2])
-                score_cols[0].metric("AI 추천도", f"{report['추천점수']}점")
-                score_cols[1].metric("재편성 추천", report["추천등급"])
-                score_cols[2].markdown(
-                    f"**추천 등급**  {report['별점']}  "
-                    f"<br><span style='color:#6b7280;font-size:13px;'>점수는 성과·안정성·타겟 적합도·가격 경쟁력·위험 요인을 합산한 운영 우선순위 지표입니다.</span>",
-                    unsafe_allow_html=True,
-                )
-
-                st.markdown("**주요 인사이트**")
+                rows_html = []
                 for item in report["인사이트"]:
-                    icon = "🔴" if item.get("type") == "risk" else ("🟢" if item.get("confidence") == "높음" else "🟡")
-                    evidence = f"  <span style='color:#6b7280;font-size:12px;'>근거: {item['evidence']} · 신뢰도 {item['confidence']}</span>" if item.get("evidence") else ""
-                    st.markdown(
-                        f"{icon} **[{item['category']}]** {item['sentence']}{evidence}",
-                        unsafe_allow_html=True,
-                    )
+                    marker = "●" if item.get("type") == "risk" else "•"
+                    evidence = f" <span class='evidence'>({item['evidence']})</span>" if item.get("evidence") else ""
+                    rows_html.append(f"<div class='insight-row'>{marker} {item['sentence']}{evidence}</div>")
+                st.markdown("<div class='compact-insight'>" + "".join(rows_html) + "</div>", unsafe_allow_html=True)
 
                 if report["위험요인"]:
-                    st.warning("주의 요인: " + " · ".join(report["위험요인"]))
+                    st.caption("주의: " + " · ".join(report["위험요인"]))
 
-                st.markdown(
-                    f'''<div class="insight-box"><b>[AI 종합 의견]</b><br>{report["종합의견"]}</div>''',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f'''<div class="insight-box"><b>[왜 편성해야 하는가]</b><br>{report["편성이유"]}</div>''',
-                    unsafe_allow_html=True,
-                )
+                st.markdown("**운영 이슈 입력**")
+                issue_key = issue_storage_key(product_row).replace("|", "_")
+                default_types = saved_issue.get("유형", [])
+                with st.form(key=f"issue_form_{issue_key}"):
+                    issue_types = st.multiselect(
+                        "이슈 유형",
+                        ["판매중단", "재고부족", "품절", "링크오류", "가격오류", "구성변경", "앱푸시", "영역구좌", "기타"],
+                        default=default_types,
+                    )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        issue_status = st.selectbox("상태", ["발생", "조치 중", "해소"], index=["발생", "조치 중", "해소"].index(saved_issue.get("상태", "발생")))
+                    with c2:
+                        issue_action = st.text_input("후속 조치", value=saved_issue.get("조치", ""), placeholder="예: 재고 확보 후 재편성")
+                    issue_memo = st.text_area("상세 메모", value=saved_issue.get("메모", ""), height=70, placeholder="예: 11시 30분 재고 부족으로 판매중지")
+                    saved = st.form_submit_button("운영 이슈 저장", use_container_width=True)
+                    if saved:
+                        save_operation_issue(product_row, issue_types, issue_memo, issue_action, issue_status)
+                        st.success("운영 이슈를 저장했습니다. 현재 세션에서 인사이트에 즉시 반영됩니다.")
 
-                st.markdown("**발송 이력**")
+                st.markdown("**최근 발송 이력**")
                 if report["발송이력"].empty:
-                    st.info("동일 상품의 발송 이력이 없습니다.")
+                    st.caption("동일 상품의 발송 이력이 없습니다.")
                 else:
                     st.dataframe(
                         clean_identifier_columns(report["발송이력"]),
                         use_container_width=True,
                         hide_index=True,
+                        height=min(210, 38 * (len(report["발송이력"]) + 1)),
                     )
 
     all_insights = [make_insight(r, products) for _, r in pday.iterrows()]
@@ -3464,6 +3515,6 @@ else:
     st.markdown('<div class="section-title">설정</div>', unsafe_allow_html=True)
     st.table(pd.DataFrame({
         "주문금액": ["100만원 미만", "100~200만원", "200~300만원", "300~500만원", "500만원 이상"],
-        "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 유망 상품", "🟢 우수 상품", "🔵 핵심 상품"],
+        "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 안정 상품", "🟢 우수 상품", "🔵 핵심 상품"],
     }))
     st.caption("구글시트는 '상품', '소재' 탭이 필수이며 상품 탭의 '발송일 최저가' 컬럼을 지원합니다. 링크 공유 권한이 필요합니다.")
