@@ -3311,10 +3311,21 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 elif menu == "상품구분":
     st.markdown('<div class="section-title">상품구분</div>', unsafe_allow_html=True)
-    date_range = st.date_input(
-        "기간 선택",
-        [products["_date"].min().date(), products["_date"].max().date()],
-    )
+
+    filter_col1, filter_col2 = st.columns([1.5, 1])
+    with filter_col1:
+        date_range = st.date_input(
+            "기간 선택",
+            [products["_date"].min().date(), products["_date"].max().date()],
+            key="product_group_date_range",
+        )
+    with filter_col2:
+        grade_filter = st.multiselect(
+            "상품등급 선택",
+            GRADE_ORDER,
+            default=GRADE_ORDER,
+            key="product_group_grade_filter",
+        )
 
     if len(date_range) == 2:
         start, end = date_range
@@ -3325,55 +3336,130 @@ elif menu == "상품구분":
     else:
         filt = products.copy()
 
-    grouped = filt.groupby(["쇼라코드", "상품명"], as_index=False).agg(
+    search_col1, search_col2 = st.columns(2)
+    with search_col1:
+        product_number_search = st.text_input(
+            "상품번호 검색",
+            placeholder="쇼라코드 또는 알파코드",
+            key="product_group_number_search",
+        )
+    with search_col2:
+        product_name_search = st.text_input(
+            "상품명 검색",
+            placeholder="상품명 일부 입력",
+            key="product_group_name_search",
+        )
+
+    group_keys = [c for c in ["쇼라코드", "알파코드", "상품명"] if c in filt.columns]
+    grouped = filt.groupby(group_keys, dropna=False, as_index=False).agg(
         운영횟수=("상품명", "size"),
-        주문건수=("주문건수", "sum"),
-        주문수량=("주문수량", "sum"),
-        주문금액=("주문금액", "sum"),
         최고실적=("주문금액", "max"),
+        최저실적=("주문금액", "min"),
         평균실적=("주문금액", "mean"),
     )
-    grouped["등급"] = grouped["주문금액"].apply(product_grade)
+    grouped["등급"] = grouped["평균실적"].apply(product_grade)
 
-    grade_filter = st.multiselect("상품 등급", GRADE_ORDER, default=GRADE_ORDER)
-    case_filter = st.multiselect("특수 사례", CASE_ORDER)
-
-    rows = []
+    case_rows = []
     for _, group_row in grouped.iterrows():
-        name = group_row["상품명"]
-        hist = filt[filt["상품명"] == name].sort_values("_date")
+        mask = pd.Series(True, index=filt.index)
+        for key in group_keys:
+            value = group_row.get(key)
+            if pd.isna(value):
+                mask &= filt[key].isna()
+            else:
+                mask &= filt[key].astype(str).eq(str(value))
+        hist = filt[mask].sort_values("_date")
         cases = []
-        insights = []
-        for _, row in hist.iterrows():
-            cases += classify_cases(row, products)
-            insights.append(make_insight(row, products))
-        cases = list(dict.fromkeys(cases))
-        rows.append({
-            **group_row.to_dict(),
-            "사례": ", ".join(cases),
-            "인사이트": "\n".join(insights),
-        })
+        for _, hist_row in hist.iterrows():
+            cases.extend(classify_cases(hist_row, products))
+        case_rows.append(", ".join(dict.fromkeys(cases)))
+    grouped["사례"] = case_rows
 
-    result = pd.DataFrame(rows)
-    result = result[result["등급"].isin(grade_filter)]
-    if case_filter:
-        result = result[result["사례"].apply(lambda x: any(case in x for case in case_filter))]
+    result = grouped[grouped["등급"].isin(grade_filter)].copy()
 
-    search = st.text_input("상품명 검색")
-    if search:
-        result = result[result["상품명"].astype(str).str.contains(search, case=False, na=False)]
+    if product_number_search.strip():
+        number_query = product_number_search.strip()
+        number_mask = pd.Series(False, index=result.index)
+        for code_col in ["쇼라코드", "알파코드"]:
+            if code_col in result.columns:
+                number_mask |= result[code_col].astype(str).str.contains(
+                    number_query, case=False, na=False, regex=False
+                )
+        result = result[number_mask]
 
-    st.dataframe(
-        result.drop(columns=["인사이트"]),
+    if product_name_search.strip():
+        result = result[result["상품명"].astype(str).str.contains(
+            product_name_search.strip(), case=False, na=False, regex=False
+        )]
+
+    display_cols = [
+        c for c in [
+            "쇼라코드", "알파코드", "상품명", "운영횟수",
+            "최고실적", "최저실적", "평균실적", "등급", "사례",
+        ] if c in result.columns
+    ]
+    display_df = result[display_cols].copy().reset_index(drop=True)
+
+    for money_col in ["최고실적", "최저실적", "평균실적"]:
+        if money_col in display_df.columns:
+            display_df[money_col] = display_df[money_col].map(format_integer_price)
+
+    st.caption(f"조회 상품 {len(display_df):,}개 · 행을 선택하면 아래에 발송 이력이 표시됩니다.")
+    selection_event = st.dataframe(
+        display_df,
         use_container_width=True,
         hide_index=True,
         height=500,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="product_group_summary_table",
     )
 
-    if not result.empty:
-        selected_product = st.selectbox("인사이트 확인 상품", result["상품명"].tolist())
-        insight = result.loc[result["상품명"] == selected_product, "인사이트"].iloc[0]
-        st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
+    selected_rows = getattr(getattr(selection_event, "selection", None), "rows", [])
+    if selected_rows:
+        selected_pos = selected_rows[0]
+        selected_record = result.reset_index(drop=True).iloc[selected_pos]
+
+        history_mask = pd.Series(True, index=products.index)
+        for key in group_keys:
+            value = selected_record.get(key)
+            if pd.isna(value):
+                history_mask &= products[key].isna()
+            else:
+                history_mask &= products[key].astype(str).eq(str(value))
+        history = products[history_mask].sort_values("_date", ascending=False).copy()
+
+        st.markdown(
+            f'<div class="subsection-title">발송 이력 · {selected_record.get("상품명", "")}</div>',
+            unsafe_allow_html=True,
+        )
+
+        history["발송일"] = history["_date"].dt.strftime("%Y-%m-%d")
+        history["타겟"] = history.apply(target_label, axis=1)
+        history["프로모션"] = history.apply(promotion_label, axis=1)
+
+        history_cols = [
+            c for c in [
+                "발송일", "타겟", "캠페인명", "소재", "정상가", "멤버십혜택가",
+                "할인율", "주문건수", "주문수량", "주문금액", "발송일 최저가", "프로모션",
+            ] if c in history.columns
+        ]
+        history_view = history[history_cols].copy()
+
+        for price_col in ["정상가", "멤버십혜택가", "주문금액", "발송일 최저가"]:
+            if price_col in history_view.columns:
+                history_view[price_col] = history_view[price_col].map(format_integer_price)
+        if "할인율" in history_view.columns:
+            history_view["할인율"] = history_view["할인율"].map(
+                lambda x: f"{float(x) * 100:.0f}%" if float(x) <= 1 else f"{float(x):.0f}%"
+            )
+
+        st.dataframe(
+            history_view,
+            use_container_width=True,
+            hide_index=True,
+            height=min(420, 42 + len(history_view) * 35),
+        )
 
 
 elif menu == "상품분석":
