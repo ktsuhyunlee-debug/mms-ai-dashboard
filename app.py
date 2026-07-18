@@ -2625,7 +2625,7 @@ promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모
 
 menu = st.sidebar.radio(
     "메뉴",
-    ["홈", "일일실적", "주간실적", "상품구분", "상품분석", "타겟분석", "편성 프로그램", "설정"],
+    ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"],
 )
 
 
@@ -3312,6 +3312,14 @@ elif menu == "주간실적":
 elif menu == "상품구분":
     st.markdown('<div class="section-title">상품구분</div>', unsafe_allow_html=True)
 
+    st.markdown('<div class="subsection-title">상품 등급 기준</div>', unsafe_allow_html=True)
+    st.caption("평균 주문금액 기준")
+    grade_rule_df = pd.DataFrame({
+        "주문금액": ["100만원 미만", "100~200만원", "200~300만원", "300~500만원", "500만원 이상"],
+        "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 안정 상품", "🟢 우수 상품", "🔵 핵심 상품"],
+    })
+    st.dataframe(grade_rule_df, use_container_width=True, hide_index=True, height=212)
+
     filter_col1, filter_col2 = st.columns([1.5, 1])
     with filter_col1:
         date_range = st.date_input(
@@ -3358,6 +3366,19 @@ elif menu == "상품구분":
         평균실적=("주문금액", "mean"),
     )
     grouped["등급"] = grouped["평균실적"].apply(product_grade)
+
+    kpi_cols = st.columns(6)
+    kpi_values = [
+        ("상품수", len(grouped)),
+        ("🔵 핵심", int((grouped["등급"] == "핵심 상품").sum())),
+        ("🟢 우수", int((grouped["등급"] == "우수 상품").sum())),
+        ("🟡 안정", int((grouped["등급"] == "안정 상품").sum())),
+        ("🟠 관찰", int((grouped["등급"] == "관찰 상품").sum())),
+        ("🔴 부진", int((grouped["등급"] == "부진 상품").sum())),
+    ]
+    for col, (label, value) in zip(kpi_cols, kpi_values):
+        with col:
+            st.metric(label, f"{value:,}개")
 
     case_rows = []
     for _, group_row in grouped.iterrows():
@@ -3460,16 +3481,6 @@ elif menu == "상품구분":
             hide_index=True,
             height=min(420, 42 + len(history_view) * 35),
         )
-
-
-elif menu == "상품분석":
-    names = sorted(products["상품명"].dropna().astype(str).unique())
-    name = st.selectbox("상품 선택", names)
-    hist = products[products["상품명"].astype(str) == name].sort_values("_date")
-    st.dataframe(hist, use_container_width=True, hide_index=True)
-    st.markdown('<div class="section-title">상품 이력 인사이트</div>', unsafe_allow_html=True)
-    insights = "\n".join(make_insight(row, products) for _, row in hist.iterrows())
-    st.markdown(f'<div class="insight-box">{insights}</div>', unsafe_allow_html=True)
 
 
 elif menu == "타겟분석":
@@ -3768,12 +3779,3 @@ elif menu == "편성 프로그램":
                             st.dataframe(history_view, use_container_width=True, hide_index=True)
 
                 st.divider()
-
-
-else:
-    st.markdown('<div class="section-title">설정</div>', unsafe_allow_html=True)
-    st.table(pd.DataFrame({
-        "주문금액": ["100만원 미만", "100~200만원", "200~300만원", "300~500만원", "500만원 이상"],
-        "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 안정 상품", "🟢 우수 상품", "🔵 핵심 상품"],
-    }))
-    st.caption("구글시트는 '상품', '소재' 탭이 필수이며 상품 탭의 '발송일 최저가' 컬럼을 지원합니다. 링크 공유 권한이 필요합니다.")
