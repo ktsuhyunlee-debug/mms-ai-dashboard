@@ -399,6 +399,15 @@ def compact_money(v: float) -> str:
     return f"{int(v):,}원"
 
 
+
+
+def stable_variant(key: str, options: list[str]) -> str:
+    """동일 상품·조건에서는 같은 문장을 유지하면서 표현 반복을 줄입니다."""
+    if not options:
+        return ""
+    score = sum((idx + 1) * ord(ch) for idx, ch in enumerate(str(key)))
+    return options[score % len(options)]
+
 def product_grade(amount: float) -> str:
     if amount < 1_000_000:
         return "부진 상품"
@@ -1188,17 +1197,46 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         add(120, "운영 이슈", sentence, "운영 이슈 등록", "높음")
 
     # 현재 주문금액 등급에 따른 기본 평가
+    # 같은 의미라도 상품·타겟 조건별로 표현을 달리해 문장 반복을 줄입니다.
+    sentence_key = f"{name}|{current_target}|{grade}|{int(amount)}"
     if not critical_issue:
         if amount < 1_000_000:
-            add(97, "금번 성과", f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적입니다.", "현재 주문금액 기준", "높음")
+            sentence = stable_variant(sentence_key, [
+                f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적입니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로, MMS 메인 상품으로 활용하기에는 반응이 제한적이었습니다.",
+                f"금번 {compact_money(amount)}에 그치며 가격·타겟 조건 대비 구매 반응이 충분히 확보되지 않았습니다.",
+                f"금번 주문금액이 {compact_money(amount)}으로 100만원 미만에 머물러 상품 적합도 재검토가 필요합니다.",
+            ])
+            add(97, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 2_000_000:
-            add(91, "금번 성과", f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.", "현재 주문금액 기준", "높음")
+            sentence = stable_variant(sentence_key, [
+                f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준에는 다소 미치지 못했습니다.",
+                f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한적이었습니다.",
+                f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요합니다.",
+            ])
+            add(91, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 3_000_000:
-            add(75, "금번 성과", f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과입니다.", "현재 주문금액 기준", "높음")
+            sentence = stable_variant(sentence_key, [
+                f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과입니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 전후의 안정적인 성과를 확보했습니다.",
+                f"금번 {compact_money(amount)}을 기록해 추가 운영 여부를 판단할 수 있는 기본 성과를 확보했습니다.",
+            ])
+            add(75, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 5_000_000:
-            add(80, "금번 성과", f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보했습니다.", "현재 주문금액 기준", "높음")
+            sentence = stable_variant(sentence_key, [
+                f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보했습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표를 상회하는 양호한 판매 성과를 기록했습니다.",
+                f"금번 {compact_money(amount)}을 기록해 재편성 검토가 가능한 우수 성과를 확인했습니다.",
+            ])
+            add(80, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         else:
-            add(90, "금번 성과", f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록했습니다.", "현재 주문금액 기준", "높음")
+            sentence = stable_variant(sentence_key, [
+                f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록했습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 핵심 매출 견인 상품 수준의 성과를 확보했습니다.",
+                f"금번 {compact_money(amount)}을 기록하며 차주 핵심 편성 후보로 검토할 수 있는 성과를 확인했습니다.",
+            ])
+            add(90, "금번 성과", sentence, "현재 주문금액 기준", "높음")
 
     # 성과 및 추세
     if not prior.empty:
@@ -1208,7 +1246,14 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
             add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액이 크게 성장했습니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount <= past_avg * 0.7:
-            add(88, "성과", f"금번 주문금액이 과거 평균 대비 {(1-amount/past_avg)*100:.0f}% 낮아 성과 둔화가 확인됩니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
+            decline_pct = (1 - amount / past_avg) * 100
+            decline_sentence = stable_variant(sentence_key + "|decline", [
+                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인됩니다.",
+                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화되었습니다.",
+                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한적이었습니다.",
+                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요합니다.",
+            ])
+            add(88, "성과", decline_sentence, f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
             risks.append("최근 성과 둔화")
 
     recent3 = cumulative.tail(3)
@@ -1337,7 +1382,51 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(108, "상품 적합도", f"최근 일반기간 3회 평균이 {compact_money(recent_normal['주문금액'].mean())}으로 반복 운영에서도 성과 개선이 제한적이어서 MMS 메인 상품으로는 적합도가 낮은 것으로 판단됩니다.", "일반기간 최근 3회", "높음")
             risks.append("MMS 메인 적합도 낮음")
 
-    # 중요도·중복 제어: 위험 또는 부정 결론을 우선 보존하고 전체 6개 이내로 제한
+    # 다음 운영 제안: 분석 결과를 실제 편성 액션으로 연결합니다.
+    current_promo_name = promotion_label(row)
+    recent_gap = None
+    if not prior.empty and pd.notna(current_date):
+        recent_gap = int((current_date - prior.iloc[-1]["_date"]).days)
+
+    if critical_issue:
+        action_sentence = "운영 이슈 해소 후 동일 상품·동일 타겟으로 재TEST하여 정상 성과를 다시 확인하는 것이 필요합니다."
+        action_evidence = "운영 이슈 영향으로 성과 판단 보류"
+    elif "MMS 메인 적합도 낮음" in risks:
+        action_sentence = "반복 부진이 확인된 만큼 MMS 메인 편성은 축소하고, 가격·구성 또는 타겟 조건이 개선된 경우에만 선택적으로 재TEST하는 것이 필요합니다."
+        action_evidence = "일반기간 최근 3회 반복 부진"
+    elif "가격 경쟁력 미확보" in risks:
+        action_sentence = "발송일 최저가 이하의 가격 경쟁력을 확보한 뒤 동일 타겟으로 재TEST하여 가격 개선 효과를 확인하는 것이 필요합니다."
+        action_evidence = "발송일 최저가 미확보"
+    elif "프로모션 의존" in risks:
+        action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요합니다."
+        action_evidence = "프로모션·일반기간 평균 비교"
+    elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
+        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 휴지기 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
+        action_evidence = "최근 운영 간격 및 성과 하락 기준"
+    elif amount >= 5_000_000:
+        if same_target.empty:
+            action_sentence = f"금번 {current_target or '신규 타겟'}의 우수 반응을 바탕으로 동일 타겟 1회 추가 검증 후 미발송 SEG 확대를 검토하는 것이 좋습니다."
+            action_evidence = "신규 타겟 핵심 상품 성과"
+        else:
+            action_sentence = f"{current_target or '현재 우수 타겟'} 중심의 핵심 재편성 상품으로 유지하고, 운영 간격을 관리하며 미발송 SEG 확대를 검토하는 것이 좋습니다."
+            action_evidence = "핵심 상품 및 타겟 실적 기준"
+    elif amount >= 3_000_000:
+        action_sentence = f"{current_target or '현재 타겟'}에 우선 재편성해 성과를 한 차례 더 확인하고, 유사 실적이 유지되면 운영 비중 확대를 검토하는 것이 좋습니다."
+        action_evidence = "우수 상품 기준"
+    elif amount >= 2_000_000:
+        action_sentence = "동일 조건으로 1회 추가 TEST한 뒤 250만원 이상 성과가 유지되는지 확인하고 확대 여부를 판단하는 것이 좋습니다."
+        action_evidence = "안정 상품 및 목표 250만원 기준"
+    elif amount >= 1_000_000:
+        action_sentence = "가격·타겟·전시순서 중 한 가지 조건을 조정해 선택적으로 재TEST하고, 200만원 이상 회복 여부를 확인하는 것이 필요합니다."
+        action_evidence = "관찰 상품 기준"
+    elif summary["운영횟수"] == 0:
+        action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격 또는 타겟 조건을 보완해 1회 추가 TEST 후 판단하는 것이 필요합니다."
+        action_evidence = "신규 운영 1회"
+    else:
+        action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 근거가 확보된 경우에만 재TEST하는 것이 필요합니다."
+        action_evidence = "부진 상품 기준"
+
+    # 중요도·중복 제어: 분석 5개 + 다음 운영 제안 1개로 최대 6개를 유지합니다.
     insights = sorted(insights, key=lambda x: (-x[0], x[1]))
     selected, category_count = [], {}
     for _, category, sentence, evidence, confidence in insights:
@@ -1346,10 +1435,18 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         item_type = "risk" if category in {"운영 위험", "가격 위험", "타겟 위험", "상품 적합도", "운영 이슈"} or "낮" in sentence or "저조" in sentence or "아쉬" in sentence else "fact"
         selected.append({"category": category, "sentence": sentence, "evidence": evidence, "confidence": confidence, "type": item_type})
         category_count[category] = 1
-        if len(selected) >= 6:
+        if len(selected) >= 5:
             break
     if not selected:
         selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 판단이 필요합니다.", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
+
+    selected.append({
+        "category": "다음 운영 제안",
+        "sentence": f"다음 운영 제안: {action_sentence}",
+        "evidence": action_evidence,
+        "confidence": "높음" if critical_issue or summary["운영횟수"] >= 3 else "참고",
+        "type": "action",
+    })
 
     return {
         "상품명": name,
@@ -2717,7 +2814,7 @@ elif menu == "일일실적":
             return str(option_row.get("상품명", "상품명 없음"))
         issue_cols = st.columns([2.4, 1.2, 3.2, 0.8, 0.8], gap="small")
         with issue_cols[0]:
-            selected_issue_idx = st.selectbox("상품 선택", issue_options, format_func=issue_option_label, key=f"daily_issue_product_{selected_date}")
+            selected_issue_idx = st.selectbox("상품 선택", issue_options, format_func=issue_option_label, key=f"daily_issue_product_top_{selected_date}")
         selected_issue_row = issue_rows[selected_issue_idx][1]
         saved_issue = get_saved_issue(selected_issue_row)
         saved_type = (saved_issue.get("유형") or ["선택 안 함"])[0]
