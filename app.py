@@ -2443,7 +2443,8 @@ def build_schedule_recommendations(
         if not material or not target or product_count <= 0:
             continue
 
-        day_key = parse_slot_day(material)
+        slot_date = pd.to_datetime(slot.get("발송일"), errors="coerce")
+        day_key = slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else parse_slot_day(material)
         day_products.setdefault(day_key, set())
 
         ranked = []
@@ -2475,6 +2476,8 @@ def build_schedule_recommendations(
         for order_no, (_, cand_idx, product_key, metrics) in enumerate(selected, start=1):
             candidate = candidates.loc[cand_idx]
             row = {
+                "발송일": slot_date.strftime("%Y-%m-%d") if pd.notna(slot_date) else "",
+                "시간대": str(slot.get("시간대", "")).strip(),
                 "소재": material,
                 "타겟": target,
                 "전시순서": order_no,
@@ -3679,21 +3682,32 @@ elif menu == "타겟분석":
 elif menu == "편성 프로그램":
     st.markdown('<div class="section-title">🗓️ 편성 프로그램</div>', unsafe_allow_html=True)
     st.caption(
-        "발송 슬롯과 주력 상품을 입력하면, 입력 상품 안에서 과거 주문금액을 최우선으로 편성합니다. "
-        "같은 날짜 오전·오후 동일 상품은 자동 제외됩니다."
+        "발송 슬롯과 소재를 각각 입력한 뒤, 주력 상품 안에서 과거 주문금액을 우선으로 자동 편성합니다. "
+        "같은 날짜의 동일 상품 중복 편성은 자동으로 제외됩니다."
     )
 
-    tab_input, tab_result = st.tabs(["① 편성 조건 입력", "② 자동 편성 결과"])
+    tab_input, tab_result, tab_history = st.tabs([
+        "① 편성 조건 입력",
+        "② 자동 편성 결과",
+        "③ 발송 이력 구분",
+    ])
+
+    time_options = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+    target_options = [
+        f"{age} {gender} SEG{seg}"
+        for age in ["3040", "5060"]
+        for gender in ["남성", "여성"]
+        for seg in [1, 2, 3]
+    ]
 
     with tab_input:
         st.markdown('<div class="subsection-title">발송 슬롯 입력</div>', unsafe_allow_html=True)
-        st.caption("소재·타겟·회차별 상품 수를 입력하세요. 공휴일은 슬롯에서 제외하면 됩니다.")
+        st.caption("발송일은 달력에서 선택하고, 시간대는 00:00~23:30 범위에서 30분 단위로 설정하세요.")
 
+        today_value = pd.Timestamp.today().normalize()
         default_slots = pd.DataFrame([
-            {"소재": "7/21(1)", "타겟": "5060 여성 SEG1", "상품수": 4},
-            {"소재": "7/21(2)", "타겟": "3040 남성 SEG1", "상품수": 4},
-            {"소재": "7/22(1)", "타겟": "5060 남성 SEG2", "상품수": 4},
-            {"소재": "7/22(2)", "타겟": "3040 여성 SEG2", "상품수": 4},
+            {"발송일": today_value, "시간대": "11:30", "타겟": "5060 여성 SEG1", "상품수": 4},
+            {"발송일": today_value, "시간대": "16:00", "타겟": "3040 남성 SEG1", "상품수": 4},
         ])
         if "schedule_slots" not in st.session_state:
             st.session_state.schedule_slots = default_slots
@@ -3704,16 +3718,36 @@ elif menu == "편성 프로그램":
             use_container_width=True,
             hide_index=True,
             column_config={
-                "소재": st.column_config.TextColumn("소재", help="예: 7/21(1), 7/21(2)"),
-                "타겟": st.column_config.TextColumn("타겟", help="예: 5060 여성 SEG1"),
-                "상품수": st.column_config.NumberColumn("상품수", min_value=1, max_value=20, step=1),
+                "발송일": st.column_config.DateColumn("발송일", format="YYYY-MM-DD", required=True),
+                "시간대": st.column_config.SelectboxColumn("시간대", options=time_options, required=True),
+                "타겟": st.column_config.SelectboxColumn("타겟", options=target_options, required=True),
+                "상품수": st.column_config.NumberColumn("상품수", min_value=1, max_value=20, step=1, required=True),
             },
-            key="schedule_slots_editor",
+            key="schedule_slots_editor_v2",
         )
         st.session_state.schedule_slots = edited_slots
 
+        st.markdown('<div class="subsection-title">소재 입력</div>', unsafe_allow_html=True)
+        st.caption("위 발송 슬롯과 같은 행 순서로 소재명을 입력하세요.")
+        slot_count = len(edited_slots)
+        old_materials = st.session_state.get("schedule_materials", pd.DataFrame(columns=["소재"]))
+        material_values = old_materials.get("소재", pd.Series(dtype=str)).astype(str).tolist()
+        material_values = (material_values + [""] * slot_count)[:slot_count]
+        material_df = pd.DataFrame({"소재": material_values})
+        edited_materials = st.data_editor(
+            material_df,
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "소재": st.column_config.TextColumn("소재", help="예: 0721_오전_멤특1", width="large"),
+            },
+            key="schedule_materials_editor_v2",
+        )
+        st.session_state.schedule_materials = edited_materials
+
         st.markdown('<div class="subsection-title">주력 상품 입력</div>', unsafe_allow_html=True)
-        st.caption("알파코드·쇼라코드·상품명·정상가·행사가만 입력하세요. 할인율은 자동 계산됩니다.")
+        st.caption("알파코드·쇼라코드·상품명·정상가·행사가를 입력하세요. 할인율은 자동 편성 결과에서 자동 계산됩니다.")
 
         upload_col, paste_col = st.columns([1, 1])
         uploaded_candidates = None
@@ -3731,7 +3765,6 @@ elif menu == "편성 프로그램":
                         uploaded_candidates = pd.read_excel(schedule_file)
                 except Exception as exc:
                     st.error(f"상품 파일을 읽지 못했습니다: {exc}")
-
         with paste_col:
             st.caption("파일이 없으면 아래 표에 직접 붙여넣어도 됩니다.")
 
@@ -3763,25 +3796,16 @@ elif menu == "편성 프로그램":
         )
         st.session_state.schedule_candidates = edited_candidates
 
-        candidates_preview = edited_candidates.copy()
+        candidates_calc = edited_candidates.copy()
         for col in ["정상가", "행사가"]:
-            candidates_preview[col] = num(candidates_preview[col])
-        candidates_preview["할인율계산값"] = candidates_preview.apply(
+            candidates_calc[col] = num(candidates_calc[col])
+        candidates_calc["할인율계산값"] = candidates_calc.apply(
             lambda r: floor_discount_rate(r["정상가"], r["행사가"]), axis=1
         )
-        candidates_preview["할인율"] = candidates_preview["할인율계산값"].map(
+        candidates_calc["할인율"] = candidates_calc["할인율계산값"].map(
             lambda x: f"{float(x):.0%}" if pd.notna(x) else "-"
         )
-
-        st.markdown('<div class="subsection-title">할인율 자동 계산 미리보기</div>', unsafe_allow_html=True)
-        preview_display = candidates_preview[
-            ["알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"]
-        ].copy()
-        for col in ["정상가", "행사가"]:
-            preview_display[col] = preview_display[col].map(
-                lambda x: format_integer_price(x) if float(x) > 0 else ""
-            )
-        st.dataframe(preview_display, use_container_width=True, hide_index=True)
+        st.session_state.schedule_candidates_calc = candidates_calc
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -3807,13 +3831,18 @@ elif menu == "편성 프로그램":
         st.session_state.schedule_max_weekly = max_weekly_count
 
         if st.button("🤖 매출 우선 자동 편성 실행", type="primary", use_container_width=True):
-            clean_slots = edited_slots.copy()
+            clean_slots = edited_slots.copy().reset_index(drop=True)
+            clean_materials = edited_materials.copy().reset_index(drop=True)
+            clean_slots["소재"] = clean_materials.get("소재", pd.Series([""] * len(clean_slots))).fillna("").astype(str)
+            clean_slots["발송일"] = pd.to_datetime(clean_slots["발송일"], errors="coerce")
             clean_slots = clean_slots[
-                clean_slots["소재"].astype(str).str.strip().ne("")
+                clean_slots["발송일"].notna()
+                & clean_slots["시간대"].astype(str).str.strip().ne("")
                 & clean_slots["타겟"].astype(str).str.strip().ne("")
+                & clean_slots["소재"].astype(str).str.strip().ne("")
             ].copy()
 
-            clean_candidates = candidates_preview.copy()
+            clean_candidates = candidates_calc.copy()
             clean_candidates = clean_candidates[
                 clean_candidates["상품명"].astype(str).str.strip().ne("")
                 & clean_candidates["정상가"].gt(0)
@@ -3821,7 +3850,7 @@ elif menu == "편성 프로그램":
             ].copy()
 
             if clean_slots.empty:
-                st.error("발송 슬롯을 1개 이상 입력해주세요.")
+                st.error("발송일·시간대·타겟·소재가 입력된 슬롯을 1개 이상 등록해주세요.")
             elif clean_candidates.empty:
                 st.error("주력 상품을 1개 이상 입력해주세요.")
             else:
@@ -3844,93 +3873,68 @@ elif menu == "편성 프로그램":
             st.info("먼저 '① 편성 조건 입력'에서 자동 편성을 실행해주세요.")
         else:
             st.markdown('<div class="subsection-title">실무 복붙용 전체 편성안</div>', unsafe_allow_html=True)
-
-            copy_view = result[
-                ["소재", "타겟", "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"]
-            ].copy()
+            result_cols = [
+                "발송일", "시간대", "소재", "타겟", "전시순서",
+                "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
+            ]
+            copy_view = result[[c for c in result_cols if c in result.columns]].copy()
             for col in ["정상가", "행사가"]:
-                copy_view[col] = copy_view[col].map(format_integer_price)
-
+                if col in copy_view.columns:
+                    copy_view[col] = copy_view[col].map(format_integer_price)
             st.dataframe(copy_view, use_container_width=True, hide_index=True)
 
             csv_bytes = copy_view.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                 copy_view.to_excel(writer, index=False, sheet_name="편성안")
-
             d1, d2 = st.columns(2)
             with d1:
                 st.download_button(
-                    "📥 편성안 CSV 다운로드",
-                    data=csv_bytes,
-                    file_name="MMS_자동편성안.csv",
-                    mime="text/csv",
-                    use_container_width=True,
+                    "📥 편성안 CSV 다운로드", data=csv_bytes,
+                    file_name="MMS_자동편성안.csv", mime="text/csv", use_container_width=True,
                 )
             with d2:
                 st.download_button(
-                    "📥 편성안 엑셀 다운로드",
-                    data=excel_buffer.getvalue(),
+                    "📥 편성안 엑셀 다운로드", data=excel_buffer.getvalue(),
                     file_name="MMS_자동편성안.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
 
             st.markdown('<div class="subsection-title">슬롯별 추천 결과 및 근거</div>', unsafe_allow_html=True)
-
-            for (material, target), group in result.groupby(["소재", "타겟"], sort=False):
-                st.markdown(f"### {material} · {target}")
-                main_view = group[
-                    ["알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"]
-                ].copy()
+            group_cols = [c for c in ["발송일", "시간대", "소재", "타겟"] if c in result.columns]
+            for group_key, group in result.groupby(group_cols, sort=False):
+                if not isinstance(group_key, tuple):
+                    group_key = (group_key,)
+                label = " · ".join(str(x) for x in group_key)
+                st.markdown(f"### {label}")
+                main_view = group[["전시순서", "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"]].copy()
                 for col in ["정상가", "행사가"]:
                     main_view[col] = main_view[col].map(format_integer_price)
                 st.dataframe(main_view, use_container_width=True, hide_index=True)
 
                 for _, row in group.iterrows():
                     detail_key = (
-                        material,
-                        target,
-                        str(row["알파코드"]),
-                        str(row["쇼라코드"]),
-                        str(row["상품명"]),
+                        str(row["소재"]), str(row["타겟"]),
+                        str(row["알파코드"]), str(row["쇼라코드"]), str(row["상품명"]),
                     )
                     metrics = detail_map.get(detail_key, {})
                     with st.expander(f"▼ {row['상품명']} · 추천 근거 및 발송 이력"):
                         if not metrics:
                             st.info("상세 이력이 없습니다.")
                             continue
-
                         if metrics.get("이력여부") == "신규":
                             st.warning("과거 동일 상품 이력이 없는 신규 TEST 후보입니다.")
                             st.write(metrics.get("근거", ""))
                             continue
-
                         m1, m2, m3, m4 = st.columns(4)
                         m1.metric("예상 기준매출", compact_money(metrics.get("추천매출", 0)))
                         m2.metric("역대 최고매출", compact_money(metrics.get("최고매출", 0)))
                         m3.metric("최고타겟", metrics.get("최고타겟", "-"))
                         recent = metrics.get("최근발송일")
-                        m4.metric(
-                            "최근 발송일",
-                            pd.Timestamp(recent).strftime("%Y-%m-%d") if pd.notna(recent) else "-",
-                        )
-
+                        m4.metric("최근 발송일", pd.Timestamp(recent).strftime("%Y-%m-%d") if pd.notna(recent) else "-")
                         st.markdown("**편성 근거**")
-                        st.write(
-                            f"- {metrics.get('근거', '')}\n"
-                            f"- 과거 주문금액을 최우선으로 정렬\n"
-                            f"- 같은 날짜 오전·오후 중복 및 주간 최대횟수 조건 반영"
-                        )
-
-                        price_change = metrics.get("가격증감")
-                        if price_change is not None:
-                            direction = "인상" if price_change > 0 else ("인하" if price_change < 0 else "동일")
-                            st.write(
-                                f"- 직전 행사가 {format_integer_price(metrics.get('직전행사가', 0))}원 대비 "
-                                f"{format_integer_price(abs(price_change))}원 {direction}"
-                            )
-
+                        st.write(f"- {metrics.get('근거', '')}\n- 과거 주문금액 우선 정렬\n- 동일 날짜 중복 및 주간 최대횟수 조건 반영")
                         st.markdown("**타겟별 성과**")
                         target_summary = schedule_target_summary(metrics.get("이력", pd.DataFrame()))
                         if not target_summary.empty:
@@ -3938,16 +3942,48 @@ elif menu == "편성 프로그램":
                             for c in ["평균매출", "최고매출"]:
                                 target_display[c] = target_display[c].map(format_integer_price)
                             st.dataframe(target_display, use_container_width=True, hide_index=True)
-
                         st.markdown("**발송 이력**")
-                        history_view = schedule_history_table(
-                            metrics.get("이력", pd.DataFrame()),
-                            float(row["행사가"]),
-                        )
+                        history_view = schedule_history_table(metrics.get("이력", pd.DataFrame()), float(row["행사가"]))
                         if not history_view.empty:
                             for c in ["멤버십혜택가", "현재가 대비", "주문금액"]:
                                 if c in history_view.columns:
                                     history_view[c] = history_view[c].map(format_integer_price)
                             st.dataframe(history_view, use_container_width=True, hide_index=True)
-
                 st.divider()
+
+    with tab_history:
+        st.markdown('<div class="subsection-title">입력 상품 발송 이력 구분</div>', unsafe_allow_html=True)
+        candidates_calc = st.session_state.get("schedule_candidates_calc", pd.DataFrame())
+        if candidates_calc.empty:
+            st.info("먼저 '① 편성 조건 입력'에서 주력 상품을 입력해주세요.")
+        else:
+            valid_candidates = candidates_calc[
+                candidates_calc["상품명"].astype(str).str.strip().ne("")
+            ].copy()
+            history_rows = []
+            for _, candidate in valid_candidates.iterrows():
+                hist = match_candidate_history(candidate, products)
+                history_rows.append({
+                    "알파코드": clean_identifier_value(candidate.get("알파코드", "")),
+                    "쇼라코드": clean_identifier_value(candidate.get("쇼라코드", "")),
+                    "상품명": str(candidate.get("상품명", "")).strip(),
+                    "정상가": float(candidate.get("정상가", 0) or 0),
+                    "행사가": float(candidate.get("행사가", 0) or 0),
+                    "할인율": candidate.get("할인율", "-"),
+                    "발송이력": "있음" if not hist.empty else "없음",
+                    "운영횟수": int(len(hist)),
+                    "최근발송일": hist["_date"].max().strftime("%Y-%m-%d") if not hist.empty else "-",
+                    "평균주문금액": float(hist["주문금액"].mean()) if not hist.empty else 0,
+                })
+            history_status = pd.DataFrame(history_rows)
+            hist_tab, new_tab = st.tabs(["발송 이력 있는 상품", "발송 이력 없는 상품"])
+            for target_tab, status in [(hist_tab, "있음"), (new_tab, "없음")]:
+                with target_tab:
+                    view = history_status[history_status["발송이력"].eq(status)].copy()
+                    if view.empty:
+                        st.info(f"발송 이력 {status} 상품이 없습니다.")
+                    else:
+                        for c in ["정상가", "행사가", "평균주문금액"]:
+                            view[c] = view[c].map(format_integer_price)
+                        st.dataframe(view, use_container_width=True, hide_index=True)
+
