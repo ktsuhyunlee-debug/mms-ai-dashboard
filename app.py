@@ -2757,7 +2757,7 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
     if df.empty:
         return []
 
-    price_col = first_col(df, ["멤버십 혜택가", "행사가", "판매가", "혜택가"])
+    price_col = first_col(df, ["멤버십 혜택가", "멤버십혜택가", "혜택가", "최종혜택가", "행사가", "판매가", "MMS혜택가", "MMS 혜택가", "실판매가"])
     df["_amt"] = pd.to_numeric(df["주문금액"], errors="coerce").fillna(0)
     df["_price"] = pd.to_numeric(df[price_col], errors="coerce") if price_col else pd.NA
 
@@ -2832,11 +2832,14 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
                         r0 = tg.iloc[0]
                         bits = []
                         if "성별" in target_cols:
-                            bits.append(str(r0["성별"]))
+                            v = _clean_text_value(r0["성별"])
+                            if v: bits.append(v)
                         if "연령" in target_cols:
-                            bits.append(clean_identifier_value(r0["연령"]))
+                            v = _clean_text_value(clean_identifier_value(r0["연령"]))
+                            if v: bits.append(v)
                         if "SEG" in target_cols:
-                            bits.append(str(r0["SEG"]))
+                            v = _clean_text_value(r0["SEG"])
+                            if v: bits.append(v)
                         target_text = " ".join(bits)
                         target_amt = float(r0["_amt"])
 
@@ -2862,8 +2865,68 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
     return []
 
 
+
+def _season_specific_action(group_name: str) -> str:
+    actions = {
+        "캐리어·여행용품": "기내용·경량·확장형 등 휴가 수요가 명확한 캐리어·여행용품",
+        "여행용 소형가전": "휴대성·소형·멀티전압 등 여행 편의성이 명확한 소형가전",
+        "선케어": "휴대성·간편 도포·높은 자외선 차단 지수를 갖춘 선스틱·선쿠션·선크림",
+        "냉감·기능성 의류": "냉감·흡습속건·통기성 기능이 명확한 여름 기능성 의류",
+        "냉방가전": "리모컨·저소음·공기순환·공간효율 등 사용 편의성이 강화된 선풍기·서큘레이터",
+        "보양식·간편식": "간편 조리·대중성·가격 경쟁력이 검증된 여름 보양식·간편식",
+    }
+    return actions.get(group_name, "동일 시즌 수요와 기능성이 명확한 상품")
+
+
+def _season_single_or_repeat_sentence(x: dict) -> str:
+    name = _safe_product_label(x["product"])
+    subject = _with_topic(name)
+    scope = x["scope"]
+    price_bits = []
+    if x.get("avg_price") is not None:
+        label = "전년 평균 혜택가" if scope.startswith("전년") else "과거 시즌 평균 혜택가"
+        price_bits.append(f"{label} {x['avg_price']:,.0f}원")
+    if x.get("hp5_price") is not None:
+        price_bits.append(f"500만원 이상 고성과 회차 평균 혜택가 {x['hp5_price']:,.0f}원")
+    elif x.get("hp3_price") is not None:
+        price_bits.append(f"300만원 이상 고성과 회차 평균 혜택가 {x['hp3_price']:,.0f}원")
+
+    target = _clean_text_value(x.get("target"))
+    target_part = ""
+    if target:
+        target_part = f", 주요 고성과 타겟 {target}"
+        if x.get("target_avg") is not None:
+            target_part += f" 평균 {compact_money(x['target_avg'])}"
+
+    price_part = f", {', '.join(price_bits)}" if price_bits else ""
+    action_product = _season_specific_action(x["group"])
+
+    if int(x["count"]) == 1:
+        # 1회 성과는 '검증'이 아니라 '고성과 사례'로만 표현
+        return (
+            f"{subject} {scope} 1회 운영에서 {compact_money(x['max_amt'])}을 기록한 고성과 사례로 확인됐습니다"
+            f"{target_part}{price_part}. 단일 운영 사례인 만큼 반복 검증된 상품으로 단정하지 않고, "
+            f"당시와 유사한 가격 조건을 확보할 수 있을 때 {action_product}의 신규·유사신규 TEST 후보로 검토하는 것이 적절합니다."
+        )
+
+    # 2회 이상: 반복 성과 수준을 수치로 구분
+    if x["ge5"] >= 2 or (x["ge3"] >= 2 and x["ge3"] / max(x["count"], 1) >= 0.5):
+        return (
+            f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회"
+            + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
+            + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과를 기록해 "
+              f"동시즌 반복 성과가 확인됐습니다. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영을 우선 검토하고, "
+              f"{action_product}으로 신규·유사신규 TEST를 확장하는 것이 적절합니다."
+        )
+
+    return (
+        f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회, 평균 {compact_money(x['avg_amt'])}, "
+        f"최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과가 확인됐습니다. 반복 고성과로 단정하기에는 표본이 제한적이므로 "
+        f"동일 상품 또는 {action_product}을 추가 TEST해 재현 여부를 확인하는 것이 적절합니다."
+    )
+
 def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
-    """실제 시즌 고성과 상품 근거가 있을 때 상품·타겟·매출·가격까지 포함해 제안."""
+    """실제 시즌 고성과 상품을 1회 성공 사례와 반복 검증 사례로 구분해 구체적 상품 조건까지 제안."""
     items = _seasonal_last_year_evidence(products_all, week_end)
     if not items:
         return None
@@ -2871,48 +2934,17 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     selected = []
     used_groups = set()
     for x in items:
-        if x["group"] in used_groups and selected:
+        if x["group"] in used_groups:
             continue
         selected.append(x)
         used_groups.add(x["group"])
         if len(selected) >= 2:
             break
 
-    chunks = []
-    for x in selected:
-        price_bits = []
-        if x["avg_price"] is not None:
-            label = "전년 평균 혜택가" if x["scope"].startswith("전년") else "과거 시즌 평균 혜택가"
-            price_bits.append(f"{label} {x['avg_price']:,.0f}원")
-        if x["hp5_price"] is not None:
-            price_bits.append(f"500만원 이상 고성과 회차 평균 {x['hp5_price']:,.0f}원")
-        elif x["hp3_price"] is not None:
-            price_bits.append(f"300만원 이상 고성과 회차 평균 {x['hp3_price']:,.0f}원")
-
-        target = ""
-        if x["target"]:
-            target = f", 주요 고성과 타겟 {x['target']}"
-            if x.get("target_avg") is not None:
-                target += f" 평균 {compact_money(x['target_avg'])}"
-
-        chunks.append(
-            f"{_short_weekly_product_name(x['product'])}은 {x['scope']} {x['count']}회 운영 중 "
-            f"300만원 이상 {x['ge3']}회"
-            + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
-            + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}"
-            + target
-            + (f", {', '.join(price_bits)}" if price_bits else "")
-        )
-
-    if not chunks:
+    if not selected:
         return None
 
-    return (
-        "• " + " / ".join(chunks)
-        + "의 성과가 확인됐습니다. 실제 과거 시즌 고성과 상품의 타겟과 가격대를 기준으로 "
-          "동일 상품 재운영 가능 여부를 우선 확인하고, 유사 가격대·구성의 신규·유사신규 상품을 "
-          "해당 고성과 타겟 중심으로 TEST하는 것이 적절합니다."
-    )
+    return "• " + " / ".join(_season_single_or_repeat_sentence(x) for x in selected)
 
 
 def _get_secret_value(*names):
@@ -3236,12 +3268,33 @@ def _subject_particle(text_value: str) -> str:
 
 def _with_topic(text_value: str) -> str:
     s = str(text_value or "").strip()
+    if not s:
+        return s
+    # 영문/숫자/모델명으로 끝나는 상품명은 조사를 직접 붙이지 않고 '상품은'으로 안전하게 처리
+    last = s[-1]
+    if not ("가" <= last <= "힣"):
+        return f"{s} 상품은"
     return f"{s}{_topic_particle(s)}"
 
 
 def _safe_product_label(name: str) -> str:
     """주간 화면용 축약명 + 조사 붙이기용 정리."""
     return _short_weekly_product_name(name).strip()
+
+
+def _clean_text_value(value) -> str:
+    """nan/None/NaT/빈 문자열을 화면에 노출하지 않음."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in {"nan", "none", "nat", "<na>"}:
+        return ""
+    return s
 
 
 def _season_keyword_match_mask(series: pd.Series, labels: pd.Series | None = None):
@@ -3393,7 +3446,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         short = _short_weekly_product_name(pname)
         if count >= 2:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 반복 운영에서도 성과가 유지된 만큼 고성과 타겟 중심 재편성은 가능하되 회차별 실적 하락 여부를 확인하고, 하락이 반복될 경우 일정 기간 미편성 후 재운영하는 방식으로 조정하는 것이 좋습니다."
+                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 회차별 실제 실적 추이를 기준으로 재편성 여부를 판단하는 것이 적절합니다."
             )
         else:
             product_points.append(
@@ -3508,6 +3561,16 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f"• 대카테고리 매출은 {cats} 순으로 구성됐습니다. 카테고리 비중만으로 편성 우선순위를 정하기보다 카테고리 내 과거 300만원·500만원 이상 달성 횟수와 가격 경쟁력을 함께 비교해 검증 상품 중심으로 편성을 정교화할 필요가 있습니다."
         )
 
+
+    # 상품 운영 시사점 중복 제거: 동일 문장/동일 반복판정 중복 방지
+    _pp_seen = set()
+    _pp_dedup = []
+    for _s in product_points:
+        _key = re.sub(r"\s+", " ", str(_s)).strip()
+        if _key and _key not in _pp_seen:
+            _pp_seen.add(_key)
+            _pp_dedup.append(_s)
+    product_points = _pp_dedup
 
     # 차주 운영 제안: 개수 제한 없이 실제 근거가 있는 제안만 우선순위 순으로 노출
     nxt = []
