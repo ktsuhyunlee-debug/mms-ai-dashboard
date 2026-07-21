@@ -1351,7 +1351,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if ratio >= 0.8:
                 add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 반복 운영 피로도가 제한적입니다.", "직전 운영 비교", "보통")
             elif ratio < 0.75:
-                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 휴지기 부여가 필요합니다.", "직전 운영 비교", "보통")
+                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요합니다.", "직전 운영 비교", "보통")
                 risks.append("단기 반복 피로도")
         elif gap >= 45 and amount >= 3_000_000:
             add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인됩니다.", "재편성 간격 기준", "보통")
@@ -1402,7 +1402,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요합니다."
         action_evidence = "프로모션·일반기간 평균 비교"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
-        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 휴지기 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
+        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
         action_evidence = "최근 운영 간격 및 성과 하락 기준"
     elif amount >= 5_000_000:
         if same_target.empty:
@@ -2192,46 +2192,114 @@ def _season_recommendations(month: int, operated_text: str):
 
 
 def _short_weekly_product_name(name: str) -> str:
-    """주간 요약 화면용 상품명 축약. 원본 데이터/상세 분석에는 영향 없음."""
-    s = str(name or "").strip()
-    # 반복되는 운영 태그 제거
-    s = re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", s)
+    """주간 화면용 상품명 축약. 브랜드 + 핵심 상품 + 핵심 구성은 남기고 원본 데이터는 변경하지 않음."""
+    original = str(name or "").strip()
+    s = original
+
+    # 앞쪽 운영 태그/무료배송 태그 제거
+    s = re.sub(r"^\s*(?:\[(?:M|무료배송|쇼라 단독 특가|멤버스특가)[^\]]*\]\s*)+", "", s, flags=re.I)
     s = re.sub(r"^\s*\(M\)\s*", "", s, flags=re.I)
-    s = re.sub(r"^\s*M\]\s*", "", s, flags=re.I)
-    # 괄호 안의 배송/소비기한/증정 등 긴 부가정보 제거
-    s = re.sub(r"\s*\((?:무료배송|소비기한|재고부족|편성|추가|증정)[^)]*\)", "", s, flags=re.I)
-    # 구분자 뒤 긴 구성 설명은 화면에서 축약
-    s = re.split(r"\s*/\s*|\s+\+\s+", s)[0].strip()
-    # 지나치게 긴 경우 핵심 앞부분만 표시
-    if len(s) > 34:
-        s = s[:34].rstrip() + "…"
-    return s or str(name)
+
+    # 브랜드 대괄호는 텍스트로 살림
+    s = re.sub(r"\[([^\]]+)\]", r"\1", s)
+
+    # 불필요한 운영 메모만 제거
+    s = re.sub(r"\s*\((?:재고부족|편성\s*\d+회|추가\s*멤포\s*상품)[^)]*\)", "", s, flags=re.I)
+
+    # 샘플/쇼핑백/증정 부가구성 제거
+    s = re.sub(r"\s*\((?:샘플[^)]*|쇼핑백[^)]*|증정[^)]*)\)", "", s, flags=re.I)
+
+    # 슬래시 옵션은 무조건 자르지 않음. 제품 유형이 드러나도록 대표어 정리.
+    if "붕어싸만코" in s and "아이스크림" in s:
+        qty = re.search(r"(?:총\s*)?(\d+)\s*개", s)
+        s = "빙그레 붕어싸만코 아이스크림" + (f" {qty.group(1)}개" if qty else "")
+    elif "이지프로" in s and "면도기" in s:
+        s = re.sub(r"S\d+/\d+", "", s)
+        s = re.sub(r"\s+", " ", s).strip()
+    elif "디올" in s and "립" in s:
+        gram = re.search(r"(\d+(?:\.\d+)?)\s*g", s, re.I)
+        s = "디올 어딕트 립 글로우 립밤" + (f" {gram.group(1)}g" if gram else "")
+
+    # NEW/특별혜택가 등 수식어 정리
+    s = re.sub(r"\bNEW\b|\(NEW\)|특별혜택가|신형", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -/")
+
+    # 너무 길 때는 핵심 수량/유형을 훼손하지 않도록 마지막 괄호 부가설명부터 제거
+    if len(s) > 48:
+        s2 = re.sub(r"\s*\([^)]{8,}\)\s*$", "", s).strip()
+        if len(s2) >= 12:
+            s = s2
+    if len(s) > 58:
+        # 최후 수단: 단어 단위 절단. ellipsis는 사용하되 제품 유형이 이미 앞에 남는 경우만.
+        cut = s[:58]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        s = cut.rstrip() + "…"
+
+    return s or original
+
 
 
 
 def _extract_unit_count_from_name(name: str):
-    """상품명에서 총 수량/매수 후보 추출. 확실한 패턴이 있을 때만 반환."""
-    s = str(name or "")
+    """상품명에서 총 수량/매수 추출. 2+1, 3+3, 24롤×2팩, 본품+리필 등 복합 구성을 우선 해석."""
+    s = str(name or "").replace("×", "x").replace("X", "x")
+
+    # 1) 3+3, 2+1 등 합산형
+    m = re.search(r"(\d+)\s*\+\s*(\d+)", s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        total = a + b
+        if 1 <= total <= 500:
+            return total
+
+    # 2) 24롤 x 2팩 / 12개 x 2박스
+    m = re.search(r"(\d+)\s*(롤|개|매|봉|캔|팩)\s*x\s*(\d+)\s*(팩|박스|세트)?", s, re.I)
+    if m:
+        total = int(m.group(1)) * int(m.group(3))
+        if 1 <= total <= 1000:
+            return total
+
+    # 3) 본품 + 리필 N개
+    base = 0
+    if re.search(r"본품", s):
+        base = 1
+    refill = re.search(r"리필[^0-9]{0,10}(\d+)\s*개", s)
+    if refill:
+        total = base + int(refill.group(1))
+        if 1 <= total <= 500:
+            return total
+
+    # 4) 총 N개/매/봉 등 명시
+    m = re.search(r"(?:총\s*)?(\d+)\s*(개|매|봉|캔|팩|롤|병|포|입)", s)
+    if m:
+        v = int(m.group(1))
+        if 1 <= v <= 1000:
+            return v
+
+    # 5) 일반 패턴 중 최대값
     patterns = [
         r"(\d+)\s*매",
         r"(\d+)\s*개",
-        r"x\s*(\d+)\s*개",
-        r"[xX]\s*(\d+)",
         r"(\d+)\s*봉",
         r"(\d+)\s*캔",
         r"(\d+)\s*팩",
         r"(\d+)\s*롤",
+        r"(\d+)\s*병",
+        r"(\d+)\s*포",
+        r"(\d+)\s*입",
     ]
     vals = []
     for p in patterns:
-        for m in re.finditer(p, s):
+        for mm in re.finditer(p, s):
             try:
-                v = int(m.group(1))
-                if 1 <= v <= 500:
+                v = int(mm.group(1))
+                if 1 <= v <= 1000:
                     vals.append(v)
             except Exception:
                 pass
     return max(vals) if vals else None
+
 
 
 def _unit_price_phrase(name: str, sale_price: float):
@@ -2289,6 +2357,122 @@ def _weekly_food_underperformers(pw: pd.DataFrame):
         return []
     g = sub.groupby("상품명", as_index=False)["주문금액"].sum().sort_values("주문금액")
     return [_short_weekly_product_name(x) for x in g[g["주문금액"] < 1_000_000].head(4)["상품명"].astype(str)]
+
+
+
+def _recent_4week_time_pattern(current_week: str, year: int, sends_all: pd.DataFrame):
+    """최근 4주 요일/시간대 SPM 반복성. 3주 이상 동일 우위일 때만 인사이트 후보 반환."""
+    send_col = first_col(sends_all, ["발송 성공 건수", "총 발송 건수"])
+    if not send_col or sends_all.empty:
+        return None
+
+    wk_dates = (
+        sends_all[sends_all["_year"] == year]
+        .groupby("주차")["_date"].min()
+        .sort_values()
+    )
+    weeks = [str(x) for x in wk_dates.index]
+    if current_week not in weeks:
+        return None
+    idx = weeks.index(current_week)
+    selected = weeks[max(0, idx-3):idx+1]
+    if len(selected) < 3:
+        return None
+
+    time_winners = []
+    day_winners = []
+    for w in selected:
+        sub = sends_all[(sends_all["_year"] == year) & (sends_all["주차"].astype(str) == w)].copy()
+        if sub.empty:
+            continue
+        tg = grouped_send_table(sub, ["시간대"])
+        dg = grouped_send_table(sub, ["요일"])
+        if not tg.empty:
+            time_winners.append(str(tg.loc[tg["SPM"].idxmax(), "시간대"]))
+        if not dg.empty:
+            day_winners.append(str(dg.loc[dg["SPM"].idxmax(), "요일"]))
+
+    def winner_summary(vals):
+        if not vals:
+            return None
+        vc = pd.Series(vals).value_counts()
+        winner = str(vc.index[0])
+        cnt = int(vc.iloc[0])
+        return winner, cnt, len(vals)
+
+    return {
+        "time": winner_summary(time_winners),
+        "day": winner_summary(day_winners),
+        "weeks": selected,
+    }
+
+
+def _detect_current_product_status(product_name: str, all_products: pd.DataFrame):
+    """최신 행의 상품명/상태성 컬럼에서 판매 가능성 확인. 불명확하면 None."""
+    h = all_products[all_products["상품명"].astype(str) == str(product_name)].copy()
+    if h.empty:
+        return None
+    h["_date2"] = pd.to_datetime(h["_date"], errors="coerce")
+    h = h.sort_values("_date2")
+    row = h.iloc[-1]
+
+    status_cols = [c for c in ["상태","판매상태","상품상태","전시상태","재고상태"] if c in h.columns]
+    raw = " ".join(str(row.get(c, "")) for c in status_cols)
+    raw += " " + str(row.get("상품명",""))
+
+    negative = ["판매중지","판매종료","품절","재고부족","전시종료","중단"]
+    positive = ["판매중","판매가능","정상판매","재고있음"]
+
+    if any(k in raw for k in negative):
+        return False
+    if any(k in raw for k in positive):
+        return True
+    return None
+
+
+def _promotion_performance_stats(product_name: str, all_products: pd.DataFrame):
+    """프로모션 컬럼이 있으면 일반/프로모션 평균 분리."""
+    if "프로모션" not in all_products.columns:
+        return None
+    h = all_products[all_products["상품명"].astype(str) == str(product_name)].copy()
+    if h.empty:
+        return None
+    h["주문금액"] = pd.to_numeric(h["주문금액"], errors="coerce").fillna(0)
+    promo_mask = h["프로모션"].fillna("").astype(str).str.strip().replace("-", "").ne("")
+    promo = h[promo_mask]
+    normal = h[~promo_mask]
+    if promo.empty or normal.empty:
+        return None
+    return {
+        "promo_avg": float(promo["주문금액"].mean()),
+        "normal_avg": float(normal["주문금액"].mean()),
+        "promo_n": len(promo),
+        "normal_n": len(normal),
+    }
+
+
+def _latest_and_high_perf_price(product_name: str, all_products: pd.DataFrame):
+    """현재/최근 가격과 과거 고성과 운영 가격 비교."""
+    h = all_products[all_products["상품명"].astype(str) == str(product_name)].copy()
+    if h.empty:
+        return None
+    price_col = first_col(h, ["멤버십 혜택가","행사가","판매가","혜택가"])
+    if not price_col:
+        return None
+    h["_date2"] = pd.to_datetime(h["_date"], errors="coerce")
+    h["_price"] = pd.to_numeric(h[price_col], errors="coerce")
+    h["_amt"] = pd.to_numeric(h["주문금액"], errors="coerce").fillna(0)
+    h = h[h["_price"].notna()].sort_values("_date2")
+    if h.empty:
+        return None
+    latest = h.iloc[-1]
+    high = h[h["_amt"] >= 5_000_000]
+    hp = float(high["_price"].mean()) if not high.empty else None
+    return {
+        "latest_price": float(latest["_price"]),
+        "high_perf_avg_price": hp,
+        "latest_date": latest["_date2"],
+    }
 
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
@@ -2374,7 +2558,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         short = _short_weekly_product_name(pname)
         if count >= 2:
             product_points.append(
-                f"• {short}은 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 반복 운영에서도 성과가 유지된 만큼 고성과 타겟 중심 재편성은 가능하되 회차별 실적 하락 여부를 확인하며 휴지기 적용 시점을 판단하는 것이 좋습니다."
+                f"• {short}은 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 반복 운영에서도 성과가 유지된 만큼 고성과 타겟 중심 재편성은 가능하되 회차별 실적 하락 여부를 확인하고, 하락이 반복될 경우 일정 기간 미편성 후 재운영하는 방식으로 조정하는 것이 좋습니다."
             )
         else:
             product_points.append(
@@ -2411,10 +2595,32 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     if hist["sale_min"] is not None and hist["sale_max"] is not None:
                         if abs(hist["sale_max"] - hist["sale_min"]) / max(hist["sale_min"],1) <= 0.1:
                             price_text = f" 과거에도 유사한 가격대({hist['sale_min']:,.0f}~{hist['sale_max']:,.0f}원)로 운영됐습니다."
+                    hp = _latest_and_high_perf_price(pname, products_all)
+                    hp_text = ""
+                    if hp and hp["high_perf_avg_price"]:
+                        hp_text = f" 과거 500만원 이상 고성과 운영 당시 평균 혜택가는 {hp['high_perf_avg_price']:,.0f}원이었습니다."
                     product_points.append(
-                        f"• {_short_weekly_product_name(pname)}은 금번 {unit_phrase} 수준임에도 100만원 미만을 기록했습니다.{price_text} 가격 메리트가 반복적으로 성과로 이어지지 않았다면 추가 가격 인하보다 MMS 메인 상품 적합도를 낮게 보고 편성 우선순위를 조정할 필요가 있습니다."
+                        f"• {_short_weekly_product_name(pname)}은 금번 {unit_phrase} 수준임에도 100만원 미만을 기록했습니다.{price_text}{hp_text} 과거 유사 가격 조건에서도 반복적으로 100만원 미만이 확인된 경우에 한해 가격보다 MMS 메인 상품 적합도 이슈로 판단하고 편성 우선순위를 조정하는 것이 적절합니다."
                     )
                     break
+
+    # 프로모션 효과 분리: 일반기간에서도 성과가 유지되는지 확인
+    if not rank.empty:
+        for pname in rank.head(8)["상품명"].astype(str):
+            ps = _promotion_performance_stats(pname, products_all)
+            if not ps or ps["promo_n"] < 1 or ps["normal_n"] < 1:
+                continue
+            pa, na = ps["promo_avg"], ps["normal_avg"]
+            if na > 0 and pa / na >= 1.8:
+                product_points.append(
+                    f"• {_short_weekly_product_name(pname)}은 프로모션 기간 평균 {compact_money(pa)} 대비 일반기간 평균 {compact_money(na)}으로 성과 차이가 커 프로모션 의존도가 높은 상품입니다. 일반기간에는 동일 수준의 재편성을 지양하고 프로모션 연계 운영을 우선 검토하는 것이 적절합니다."
+                )
+                break
+            elif na >= 3_000_000:
+                product_points.append(
+                    f"• {_short_weekly_product_name(pname)}은 프로모션 기간 평균 {compact_money(pa)}, 일반기간 평균 {compact_money(na)}으로 일반 운영에서도 안정적인 성과가 확인됩니다. 프로모션 여부와 무관하게 고성과 타겟 중심의 재편성 후보로 활용할 수 있습니다."
+                )
+                break
 
     # 편성 운영 시사점
     seg = grouped_send_table(sw,["성별","연령"])
@@ -2429,16 +2635,23 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         top_products = _dominant_target_products(pw, g, a, 3)
         if top_products:
             op.append(
-                f"• {g}{a}은 {', '.join(top_products)} 등 고성과 상품 영향으로 SPM {s['SPM']:.1f}를 기록했습니다. 타겟 자체가 우수하다고 단정하기보다 해당 타겟에서 성과가 검증된 상품군과 SEG를 기준으로 유사 상품 재편성과 미발송 SEG 확대 TEST에 활용하는 것이 좋습니다."
+                f"• {g}{a}은 {', '.join(top_products)} 등 고성과 상품이 함께 편성된 가운데 SPM {s['SPM']:.1f}를 기록했습니다. 타겟 자체가 우수하다고 단정하기보다 해당 타겟에서 반복적으로 성과가 확인된 상품군과 SEG를 우선 확인하고, 동일 조건에서 재현 여부를 검증한 뒤 유사 상품 재편성과 미발송 SEG 확대 TEST에 활용하는 것이 좋습니다."
             )
 
-    # 요일/시간대는 1주 수치만으로 규칙화하지 않도록 보수적으로
-    if not weekday.empty and not time_df.empty:
-        d = weekday.loc[weekday["SPM"].idxmax()]
-        t = time_df.loc[time_df["SPM"].idxmax()]
-        op.append(
-            f"• {d['요일']}요일 SPM {d['SPM']:.1f}, {t['시간대']} 시간대 SPM {t['SPM']:.1f}로 높게 나타났으나 특정 고성과 상품 편성 영향이 포함될 수 있습니다. 최근 4주 동일 요일·시간대의 SPM과 고성과 상품 비중을 함께 비교해 반복적으로 우수한 경우에만 핵심 상품 우선 배치 기준으로 활용하는 것이 적절합니다."
-        )
+    # 최근 4주 반복성 실제 계산: 3주 이상 동일 우위일 때만 강한 시사점 생성
+    pattern4 = _recent_4week_time_pattern(week, year, sends_all)
+    if pattern4 and pattern4.get("time"):
+        tname, tcnt, ttotal = pattern4["time"]
+        if tcnt >= 3:
+            op.append(
+                f"• 최근 {ttotal}주 중 {tcnt}주에서 {tname} 시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인됐습니다. 해당 시간대에 편성된 고성과 상품·타겟 조합을 기준으로 핵심 상품 우선 배치 TEST를 확대하는 것이 적절합니다."
+            )
+    if pattern4 and pattern4.get("day"):
+        dname, dcnt, dtotal = pattern4["day"]
+        if dcnt >= 3:
+            op.append(
+                f"• 최근 {dtotal}주 중 {dcnt}주에서 {dname}요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다. 동일 요일의 상품 구성과 타겟 조건을 함께 비교해 재현 가능한 편성 조건으로 활용할 필요가 있습니다."
+            )
 
     if not big_cat.empty and big_cat["주문금액"].sum()>0:
         total = big_cat["주문금액"].sum()
@@ -2457,7 +2670,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if len(seq) >= 2:
             seq_txt = " → ".join(compact_money(x) for x in seq[-4:])
             op.append(
-                f"• {_short_weekly_product_name(pname)}은 금주 반복 편성 시 회차별 주문금액이 {seq_txt} 흐름을 보였습니다. 반복 편성 여부는 단순 운영횟수가 아니라 회차별 실적 추이를 기준으로 판단하고, 유지 시 단기 재편성·연속 하락 시 휴지기를 적용하는 방식으로 운영 기준을 차등화할 필요가 있습니다."
+                f"• {_short_weekly_product_name(pname)}은 금주 반복 편성 시 회차별 주문금액이 {seq_txt} 흐름을 보였습니다. 반복 편성 여부는 단순 운영횟수가 아니라 회차별 실적 추이를 기준으로 판단하고, 유지 시 단기 재편성·연속 하락 시 일정 기간 미편성 후 재운영하는 방식으로 운영 기준을 차등화할 필요가 있습니다."
             )
 
     # 차주 운영 제안
@@ -2470,7 +2683,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f"• 금주 핵심 상품인 {core_names}은 각 상품별 고성과 타겟·SEG를 기준으로 재편성하고, 동일 SEG 연속 반복보다 미발송 SEG를 순차 TEST해 추가 매출 확대 가능성을 확인할 필요가 있습니다."
         )
 
-    # 로우데이터에서 실제 휴지기 후보 발굴
+    # 로우데이터에서 실제 미편성 재편성 후보 발굴
     current = set(pw["상품명"].dropna().astype(str))
     hist = products_all[pd.to_datetime(products_all["_date"],errors="coerce") < week_end].copy()
     hist["_date2"] = pd.to_datetime(hist["_date"],errors="coerce")
@@ -2494,11 +2707,41 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         dorm = dorm.sort_values(["성공률","평균매출","미편성일수"],ascending=[False,False,False])
 
         # 너무 오래된 상품은 무조건 추천하지 않음: 120일 이내 우선
-        candidate = dorm[dorm["미편성일수"] <= 120].head(2)
+        candidate = dorm[dorm["미편성일수"] <= 120].head(6)
+        added = 0
         for _,r in candidate.iterrows():
+            pname = str(r["상품명"])
+            status = _detect_current_product_status(pname, products_all)
+            if status is False:
+                continue
+
+            price_info = _latest_and_high_perf_price(pname, products_all)
+            price_clause = ""
+            if price_info and price_info["high_perf_avg_price"]:
+                latest_p = price_info["latest_price"]
+                high_p = price_info["high_perf_avg_price"]
+                diff = (latest_p - high_p) / high_p * 100 if high_p else 0
+                if diff > 10:
+                    # 과거 고성과 대비 가격이 크게 오른 상품은 재편성 추천 제외
+                    continue
+                price_clause = f" 현재 혜택가 {latest_p:,.0f}원으로 과거 고성과 운영 평균 혜택가 {high_p:,.0f}원 대비 {diff:+.1f}% 수준입니다."
+
+            promo = _promotion_performance_stats(pname, products_all)
+            promo_clause = ""
+            if promo:
+                pa, na = promo["promo_avg"], promo["normal_avg"]
+                if na > 0 and pa / na >= 1.8:
+                    promo_clause = f" 프로모션 기간 평균 {compact_money(pa)} 대비 일반기간 평균 {compact_money(na)}으로 프로모션 의존도가 높아 일반기간 재편성은 보수적으로 판단해야 합니다."
+                else:
+                    promo_clause = f" 프로모션 기간 평균 {compact_money(pa)}, 일반기간 평균 {compact_money(na)}으로 일반기간에서도 일정 수준의 성과가 확인됩니다."
+
+            status_clause = " 최신 데이터상 판매중지·품절 신호는 확인되지 않았습니다." if status is not False else ""
             nxt.append(
-                f"• {_short_weekly_product_name(r['상품명'])}은 과거 {int(r['운영횟수'])}회 운영 중 {int(r['고성과횟수'])}회 500만원 이상, 평균 {compact_money(r['평균매출'])}을 기록했고 최근 {int(r['미편성일수'])}일간 미편성 상태입니다. 현재 판매 여부와 가격 경쟁력이 유지된다면 차주 재편성 우선 후보로 검토할 수 있습니다."
+                f"• {_short_weekly_product_name(pname)}은 과거 {int(r['운영횟수'])}회 운영 중 {int(r['고성과횟수'])}회 500만원 이상, 평균 {compact_money(r['평균매출'])}을 기록했고 최근 {int(r['미편성일수'])}일간 미편성 상태입니다.{price_clause}{promo_clause}{status_clause} 현재 판매 가능 여부와 가격 경쟁력이 유지되는 경우 차주 재편성 후보로 검토할 수 있습니다."
             )
+            added += 1
+            if added >= 2:
+                break
 
     # 시즌 제안
     month=int(week_end.month) if pd.notna(week_end) else 1
@@ -3657,6 +3900,16 @@ elif menu == "주간실적":
         detail_report = build_weekly_detail_analysis(
             week, selected_year, pw, sw, products, sends
         )
+        # 상세 데이터 보기에서도 화면용 상품명 축약을 동일 적용
+        detail_product_names = sorted(
+            pw["상품명"].dropna().astype(str).unique().tolist(),
+            key=len,
+            reverse=True,
+        )
+        for original_name in detail_product_names:
+            short_name = _short_weekly_product_name(original_name)
+            if short_name and short_name != original_name:
+                detail_report = detail_report.replace(original_name, short_name)
         # 기존 상세 분석의 각 섹션을 개별 한 줄 expander로 분리
         detail_map = {}
         current_title = None
