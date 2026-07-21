@@ -2742,19 +2742,18 @@ def _season_gap_action(pw, products_all, week_end):
 
 def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
     """
-    전년 동시즌(기준일 ±28일) 실제 고성과 상품 근거 추출.
-    반환 근거: 상품명, 성별/연령/SEG, 운영횟수, 평균/최고 주문금액,
-    전년 평균 혜택가, 300/500만원 이상 고성과 회차 평균 혜택가.
+    시즌성 근거 탐색 우선순위:
+    1) 전년 동일시점 ±28일
+    2) 전년 동일 시즌 월(기준월 ±1개월)
+    3) 보유 데이터 중 과거 동일 시즌 월(현재 분석주 이전)
+    실제 고성과 상품만 반환.
     """
     if pd.isna(week_end):
         return []
 
-    start = (week_end - pd.DateOffset(years=1) - pd.Timedelta(days=28)).normalize()
-    end = (week_end - pd.DateOffset(years=1) + pd.Timedelta(days=28)).normalize()
-
     df = products_all.copy()
     df["_date2"] = pd.to_datetime(df["_date"], errors="coerce")
-    df = df[df["_date2"].between(start, end)]
+    df = df[df["_date2"].notna() & (df["_date2"] < week_end)]
     if df.empty:
         return []
 
@@ -2765,7 +2764,22 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
     df["_amt"] = pd.to_numeric(df["주문금액"], errors="coerce").fillna(0)
     df["_price"] = pd.to_numeric(df[price_col], errors="coerce")
 
-    # 시즌 상품군 키워드
+    prior_year = int(week_end.year) - 1
+    exact_start = (week_end - pd.DateOffset(years=1) - pd.Timedelta(days=28)).normalize()
+    exact_end = (week_end - pd.DateOffset(years=1) + pd.Timedelta(days=28)).normalize()
+
+    season_months = {
+        1:[12,1,2], 2:[1,2,3], 3:[2,3,4], 4:[3,4,5],
+        5:[4,5,6], 6:[5,6,7], 7:[6,7,8], 8:[7,8,9],
+        9:[8,9,10], 10:[9,10,11], 11:[10,11,12], 12:[11,12,1]
+    }[int(week_end.month)]
+
+    scopes = [
+        ("전년 동시점", df[df["_date2"].between(exact_start, exact_end)].copy()),
+        ("전년 동시즌", df[(df["_date2"].dt.year == prior_year) & (df["_date2"].dt.month.isin(season_months))].copy()),
+        ("과거 동시즌", df[df["_date2"].dt.month.isin(season_months)].copy()),
+    ]
+
     groups = {
         "캐리어·여행용품": r"캐리어|여행|파우치|보스턴백",
         "여행용 소형가전": r"여행용|미니|휴대용.*(면도기|드라이기|선풍기)|코털제거기",
@@ -2775,79 +2789,89 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
         "보양식·간편식": r"삼계탕|장어|갈비탕|국밥|간편식|즉석|냉동",
     }
 
-    results = []
-    for label, pat in groups.items():
-        sub = df[df["상품명"].fillna("").astype(str).str.contains(pat, case=False, regex=True)].copy()
-        if sub.empty:
+    for scope_name, scope_df in scopes:
+        if scope_df.empty:
             continue
-
-        for pname, h in sub.groupby("상품명"):
-            h = h.sort_values("_date2")
-            n = len(h)
-            if n < 1:
+        results = []
+        for label, pat_kw in groups.items():
+            sub = scope_df[
+                scope_df["상품명"].fillna("").astype(str).str.contains(pat_kw, case=False, regex=True)
+            ].copy()
+            if sub.empty:
                 continue
 
-            avg_amt = float(h["_amt"].mean())
-            max_amt = float(h["_amt"].max())
-            ge3 = int((h["_amt"] >= 3_000_000).sum())
-            ge5 = int((h["_amt"] >= 5_000_000).sum())
-            if ge3 < 1:
-                continue
+            for pname, h in sub.groupby("상품명"):
+                h = h.sort_values("_date2")
+                n = len(h)
+                if n < 1:
+                    continue
+                avg_amt = float(h["_amt"].mean())
+                max_amt = float(h["_amt"].max())
+                ge3 = int((h["_amt"] >= 3_000_000).sum())
+                ge5 = int((h["_amt"] >= 5_000_000).sum())
+                if ge3 < 1:
+                    continue
 
-            avg_price = float(h["_price"].mean()) if h["_price"].notna().any() else None
-            hp3 = h[h["_amt"] >= 3_000_000]
-            hp5 = h[h["_amt"] >= 5_000_000]
-            hp3_price = float(hp3["_price"].mean()) if not hp3.empty and hp3["_price"].notna().any() else None
-            hp5_price = float(hp5["_price"].mean()) if not hp5.empty and hp5["_price"].notna().any() else None
+                avg_price = float(h["_price"].mean()) if h["_price"].notna().any() else None
+                hp3 = h[h["_amt"] >= 3_000_000]
+                hp5 = h[h["_amt"] >= 5_000_000]
+                hp3_price = float(hp3["_price"].mean()) if not hp3.empty and hp3["_price"].notna().any() else None
+                hp5_price = float(hp5["_price"].mean()) if not hp5.empty and hp5["_price"].notna().any() else None
 
-            # 가장 잘 나온 타겟 1개
-            target_cols = [c for c in ["성별","연령","SEG"] if c in h.columns]
-            target_text = ""
-            if target_cols:
-                tg = h.groupby(target_cols, dropna=False)["_amt"].mean().reset_index().sort_values("_amt", ascending=False)
-                if not tg.empty:
-                    r0 = tg.iloc[0]
-                    parts = []
-                    if "성별" in target_cols:
-                        parts.append(str(r0["성별"]))
-                    if "연령" in target_cols:
-                        parts.append(clean_identifier_value(r0["연령"]))
-                    if "SEG" in target_cols:
-                        parts.append(str(r0["SEG"]))
-                    target_text = " ".join(parts)
+                target_cols = [c for c in ["성별","연령","SEG"] if c in h.columns]
+                target_text = ""
+                target_amt = None
+                if target_cols:
+                    tg = (
+                        h.groupby(target_cols, dropna=False)["_amt"]
+                        .mean()
+                        .reset_index()
+                        .sort_values("_amt", ascending=False)
+                    )
+                    if not tg.empty:
+                        r0 = tg.iloc[0]
+                        bits = []
+                        if "성별" in target_cols:
+                            bits.append(str(r0["성별"]))
+                        if "연령" in target_cols:
+                            bits.append(clean_identifier_value(r0["연령"]))
+                        if "SEG" in target_cols:
+                            bits.append(str(r0["SEG"]))
+                        target_text = " ".join(bits)
+                        target_amt = float(r0["_amt"])
 
-            results.append({
-                "group": label,
-                "product": str(pname),
-                "count": n,
-                "avg_amt": avg_amt,
-                "max_amt": max_amt,
-                "ge3": ge3,
-                "ge5": ge5,
-                "avg_price": avg_price,
-                "hp3_price": hp3_price,
-                "hp5_price": hp5_price,
-                "target": target_text,
-            })
+                results.append({
+                    "scope": scope_name,
+                    "group": label,
+                    "product": str(pname),
+                    "count": n,
+                    "avg_amt": avg_amt,
+                    "max_amt": max_amt,
+                    "ge3": ge3,
+                    "ge5": ge5,
+                    "avg_price": avg_price,
+                    "hp3_price": hp3_price,
+                    "hp5_price": hp5_price,
+                    "target": target_text,
+                    "target_avg": target_amt,
+                })
 
-    return sorted(
-        results,
-        key=lambda x: (x["ge5"], x["ge3"], x["avg_amt"]),
-        reverse=True
-    )
+        if results:
+            return sorted(results, key=lambda x: (x["ge5"], x["ge3"], x["avg_amt"]), reverse=True)
+
+    return []
 
 
 def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
-    """전년 동시즌 실제 근거가 있을 때만 시즌성 차주 운영 제안 생성."""
+    """실제 시즌 고성과 상품 근거가 있을 때 상품·타겟·매출·가격까지 포함해 제안."""
     items = _seasonal_last_year_evidence(products_all, week_end)
     if not items:
         return None
 
-    # 최대 2개 상품만 사용, 서로 다른 상품군 우선
     selected = []
     used_groups = set()
     for x in items:
-        if x["group"] in used_groups and len(selected) < 1:
+        if x["group"] in used_groups and selected:
             continue
         selected.append(x)
         used_groups.add(x["group"])
@@ -2858,31 +2882,37 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     for x in selected:
         price_bits = []
         if x["avg_price"] is not None:
-            price_bits.append(f"전년 동시즌 평균 혜택가 {x['avg_price']:,.0f}원")
+            label = "전년 평균 혜택가" if x["scope"].startswith("전년") else "과거 시즌 평균 혜택가"
+            price_bits.append(f"{label} {x['avg_price']:,.0f}원")
         if x["hp5_price"] is not None:
             price_bits.append(f"500만원 이상 고성과 회차 평균 {x['hp5_price']:,.0f}원")
         elif x["hp3_price"] is not None:
             price_bits.append(f"300만원 이상 고성과 회차 평균 {x['hp3_price']:,.0f}원")
 
-        target = f", 주요 고성과 타겟 {x['target']}" if x["target"] else ""
-        price_text = ", ".join(price_bits)
+        target = ""
+        if x["target"]:
+            target = f", 주요 고성과 타겟 {x['target']}"
+            if x.get("target_avg") is not None:
+                target += f" 평균 {compact_money(x['target_avg'])}"
+
         chunks.append(
-            f"{_short_weekly_product_name(x['product'])}은 전년 동시즌 {x['count']}회 운영 중 "
+            f"{_short_weekly_product_name(x['product'])}은 {x['scope']} {x['count']}회 운영 중 "
             f"300만원 이상 {x['ge3']}회"
             + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
-            + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target}"
-            + (f", {price_text}" if price_text else "")
+            + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}"
+            + target
+            + (f", {', '.join(price_bits)}" if price_bits else "")
         )
 
     if not chunks:
         return None
 
     return (
-        "• " + " / ".join(chunks) +
-        "의 성과가 확인됐습니다. 전년 동시즌 고성과 상품의 실제 타겟과 가격대를 기준으로 "
-        "동일 상품 재운영 가능 여부를 우선 확인하고, 유사 가격대·구성의 신규·유사신규 상품을 해당 고성과 타겟 중심으로 TEST하는 것이 적절합니다."
+        "• " + " / ".join(chunks)
+        + "의 성과가 확인됐습니다. 실제 과거 시즌 고성과 상품의 타겟과 가격대를 기준으로 "
+          "동일 상품 재운영 가능 여부를 우선 확인하고, 유사 가격대·구성의 신규·유사신규 상품을 "
+          "해당 고성과 타겟 중심으로 TEST하는 것이 적절합니다."
     )
-
 
 
 def _get_secret_value(*names):
@@ -3391,40 +3421,78 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         seq = pd.to_numeric(wh["주문금액"], errors="coerce").fillna(0).tolist()
         if len(seq) >= 2:
             seq_txt = " → ".join(compact_money(x) for x in seq[-4:])
-            op.append(
-                f"• {_short_weekly_product_name(pname)}은 금주 반복 편성 시 회차별 주문금액이 {seq_txt} 흐름을 보였습니다. 반복 편성 여부는 단순 운영횟수가 아니라 회차별 실적 추이를 기준으로 판단하고, 유지 시 단기 재편성·연속 하락 시 일정 기간 미편성 후 재운영하는 방식으로 운영 기준을 차등화할 필요가 있습니다."
+            product_points.append(
+                f"• {_short_weekly_product_name(pname)}는 금주 반복 편성 시 회차별 주문금액이 {seq_txt} 흐름을 보였습니다. 연속 하락 여부를 실제 회차별 실적으로 판단해, 성과 유지 시 단기 재편성하고 연속 하락이 확인될 때만 일정 기간 미편성 후 재운영하는 것이 적절합니다."
             )
 
-    # 차주 운영 제안: 근거가 있는 액션만 중요도 순 4~5개 노출
-    nxt=[]
-    ranked_actions=_next_week_action_candidates(pw,products_all,week_end)
-    used={}
-    for score,kind,sentence in ranked_actions:
-        limit=2 if kind=="즉시 재편성" else 1
-        if used.get(kind,0)>=limit: continue
-        nxt.append("• "+sentence)
-        used[kind]=used.get(kind,0)+1
-        if len(nxt)>=4: break
 
+    # 우선순위:
+    # 1) 즉시 재편성
+    # 2) 타겟 변경·확대
+    # 3) 최근 ○일간 미편성 고성과
+    # 4) 부진 상품 대체
+    # 5) 전년/과거 동시즌 실제 고성과
+    # 6) NAVER 최신 트렌드 × MMS 교차검증
+    # 7) 가격 조건부 재운영
+    # 8) 신규·유사신규 TEST
+    # 차주 운영 제안: 개수 제한 없이 실제 근거가 있는 제안만 우선순위 순으로 노출
+    nxt = []
+    ranked_actions = _next_week_action_candidates(pw, products_all, week_end)
+
+    # 유형별 중복을 제한하되 전체 개수는 제한하지 않음.
+    # 즉시 재편성은 상품별 최대 2건, 나머지는 유형별 1건 우선.
+    used_kinds = {}
+    seen_sentences = set()
+
+    for score, kind, sentence in ranked_actions:
+        limit = 2 if kind == "즉시 재편성" else 1
+        if used_kinds.get(kind, 0) >= limit:
+            continue
+        clean_sentence = sentence.strip()
+        if not clean_sentence or clean_sentence in seen_sentences:
+            continue
+        nxt.append("• " + clean_sentence)
+        seen_sentences.add(clean_sentence)
+        used_kinds[kind] = used_kinds.get(kind, 0) + 1
+
+    # 시즌성 실제 상품 근거는 항상 별도 축으로 노출.
     seasonal_evidence = _seasonal_action_sentence(products_all, week_end)
-    if seasonal_evidence and len(nxt) < 5:
-        nxt.append(seasonal_evidence)
+    if seasonal_evidence:
+        clean = seasonal_evidence.strip()
+        if clean and clean not in seen_sentences:
+            nxt.append(clean)
+            seen_sentences.add(clean)
     else:
-        season_gap=_season_gap_action(pw,products_all,week_end)
-        if season_gap and len(nxt)<5:
-            nxt.append("• "+season_gap)
+        # 실제 과거 시즌 고성과 상품 근거가 전혀 없을 때만 편성 횟수형 fallback 사용
+        season_gap = _season_gap_action(pw, products_all, week_end)
+        if season_gap:
+            clean = ("• " + season_gap).strip()
+            if clean not in seen_sentences:
+                nxt.append(clean)
+                seen_sentences.add(clean)
 
-    # 최신 외부 트렌드는 내부 MMS 근거까지 교차검증된 경우에만 1건 추가
-    # 기존 핵심 제안이 5개면 강제로 밀어내지 않음.
+    # 최신 NAVER 외부 트렌드는 내부 MMS 근거까지 교차검증된 경우 별도 노출.
+    # 다른 제안이 많아도 개수 제한 때문에 잘리지 않음.
     latest_trend_action = _latest_trend_action_sentence(products_all, week_end)
-    if latest_trend_action and len(nxt) < 5:
-        nxt.append(latest_trend_action)
+    if latest_trend_action:
+        clean = latest_trend_action.strip()
+        if clean and clean not in seen_sentences:
+            nxt.append(clean)
+            seen_sentences.add(clean)
 
-    if len(nxt)<4:
-        poor_now=pw.groupby("상품명",as_index=False)["주문금액"].sum()
-        poor_now=poor_now[poor_now["주문금액"]<1_000_000]
+    # 근거형 제안이 거의 없을 때만 일반 원칙 보완
+    if len(nxt) < 3:
+        poor_now = pw.groupby("상품명", as_index=False)["주문금액"].sum()
+        poor_now = poor_now[poor_now["주문금액"] < 1_000_000]
         if not poor_now.empty:
-            nxt.append("• 금주 100만원 미만 상품은 과거 운영 이력·개당/장당 실구매가·타겟별 성과에서 개선 근거가 확인되는 경우에만 재TEST하고, 동일 조건 반복 부진 상품은 검증된 대체 상품으로 교체하는 것이 적절합니다.")
+            fallback_sentence = (
+                "• 금주 100만원 미만 상품은 과거 운영 이력·개당/장당 실구매가·타겟별 성과에서 "
+                "개선 근거가 확인되는 경우에만 재TEST하고, 동일 조건 반복 부진 상품은 검증된 대체 상품으로 "
+                "교체하는 것이 적절합니다."
+            )
+            if fallback_sentence not in seen_sentences:
+                nxt.append(fallback_sentence)
+                seen_sentences.add(fallback_sentence)
 
     return "\n".join([
         "■ 주간 실적 요약",*summary,"",
