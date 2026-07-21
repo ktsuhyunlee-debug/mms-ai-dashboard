@@ -3690,53 +3690,18 @@ def _weekly_table_title(title: str):
 
 
 def _style_weekly_category_total(df: pd.DataFrame):
-    """호환용: 총합계 스타일은 별도 HTML 행에서 처리."""
-    return df
+    """대/중카테고리 총합계: 배경색을 건드리지 않고 Bold만 적용."""
+    def _row_style(row):
+        values = [_clean_text_value(v) for v in row.tolist()]
+        if any(v == "총합계" for v in values):
+            # 배경색 지정 금지: Streamlit 기본 흰 배경 유지
+            return ["font-weight: 800 !important;" for _ in row]
+        return ["" for _ in row]
 
-
-def _render_total_row_html(total_row: pd.Series, column_names: list[str]):
-    """총합계 행만 별도 HTML로 렌더하여 실제 화면에서 굵게 표시."""
-    cells = []
-    for col in column_names:
-        value = total_row.get(col, "")
-        cells.append(
-            "<td style='"
-            "padding:8px 10px;"
-            "border:1px solid #E5E7EB;"
-            "background:#FFFFFF;"
-            "font-weight:800;"
-            "color:#111827;"
-            "white-space:nowrap;"
-            "'>"
-            f"{value}"
-            "</td>"
-        )
-
-    st.markdown(
-        (
-            "<div style='width:100%; overflow-x:auto;'>"
-            "<table style='width:100%; border-collapse:collapse; table-layout:auto;'>"
-            "<tbody><tr>"
-            + "".join(cells)
-            + "</tr></tbody></table></div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def _split_total_row(df: pd.DataFrame):
-    """총합계 행을 본문과 분리."""
-    if df is None or df.empty:
-        return df, None
-    mask = df.apply(
-        lambda row: any(_clean_text_value(v) == "총합계" for v in row.tolist()),
-        axis=1,
-    )
-    if not mask.any():
-        return df, None
-    body = df.loc[~mask].copy()
-    total = df.loc[mask].iloc[-1].copy()
-    return body, total
+    try:
+        return df.style.apply(_row_style, axis=1)
+    except Exception:
+        return df
 
 
 def _get_secret_value(*names):
@@ -5528,15 +5493,12 @@ elif menu == "주간실적":
         )
         _weekly_table_title("대카테고리 편성 및 주문 비중")
         _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
-        _big_body, _big_total = _split_total_row(_big_table_display)
         st.dataframe(
-            _big_body,
+            _style_weekly_category_total(_big_table_display),
             use_container_width=True,
             hide_index=True,
-            height=390,
+            height=430,
         )
-        if _big_total is not None:
-            _render_total_row_html(_big_total, list(_big_table_display.columns))
 
     with cat_right:
         mid_table = category_summary_table(pw, "중카", week, selected_year)
@@ -5547,15 +5509,12 @@ elif menu == "주간실적":
         )
         _weekly_table_title("중카테고리 편성 및 주문 비중")
         _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
-        _mid_body, _mid_total = _split_total_row(_mid_table_display)
         st.dataframe(
-            _mid_body,
+            _style_weekly_category_total(_mid_table_display),
             use_container_width=True,
             hide_index=True,
-            height=520,
+            height=560,
         )
-        if _mid_total is not None:
-            _render_total_row_html(_mid_total, list(_mid_table_display.columns))
 
     tabs = st.tabs([
         "주간실적 분석", "상품 실적", "소재 실적",
@@ -5687,21 +5646,16 @@ elif menu == "주간실적":
             if "주문금액" in view.columns else []
         )
         formatted_view = clean_identifier_columns(weekly_display_format(view))
-        _product_body, _product_total = _split_total_row(formatted_view)
-
-        _body_raw_amounts = raw_amounts[:len(_product_body)]
-        styled_view = _product_body.style.apply(
-            lambda _: style_weekly_product_rows(_product_body, _body_raw_amounts),
+        styled_view = formatted_view.style.apply(
+            lambda _: style_weekly_product_rows(formatted_view, raw_amounts),
             axis=None,
         )
         st.dataframe(
             styled_view,
             use_container_width=True,
             hide_index=True,
-            height=640,
+            height=680,
         )
-        if _product_total is not None:
-            _render_total_row_html(_product_total, list(formatted_view.columns))
 
     with tabs[2]:
         material = pd.DataFrame({
