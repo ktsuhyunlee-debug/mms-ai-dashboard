@@ -1974,23 +1974,22 @@ def clean_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
-    """주간 상품실적 행 스타일. 총합계는 항상 검은 배경/흰 글씨."""
+    """주간 상품실적 행 스타일. 총합계는 검은 배경 + 흰 글씨 + Bold."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
 
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
             break
 
-        # 총합계 행은 금액 조건보다 최우선 적용
-        row_values = [
-            _clean_text_value(v)
-            for v in formatted_df.iloc[idx].tolist()
-        ]
-        if any(v == "총합계" for v in row_values[:3]):
+        row_values = [_clean_text_value(v) for v in formatted_df.iloc[idx].tolist()]
+
+        # 총합계 행은 다른 모든 조건보다 우선
+        if any(v == "총합계" for v in row_values):
             styles.iloc[idx, :] = (
                 "background-color: #000000 !important; "
                 "color: #FFFFFF !important; "
-                "font-weight: 700 !important;"
+                "font-weight: 700 !important; "
+                "-webkit-text-fill-color: #FFFFFF !important;"
             )
             continue
 
@@ -2000,9 +1999,9 @@ def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
             continue
 
         if value >= 3_000_000:
-            styles.iloc[idx, :] = "background-color: #fff2cc"
+            styles.iloc[idx, :] = "background-color: #fff2cc;"
         elif value < 1_000_000:
-            styles.iloc[idx, :] = "background-color: #e7e6e6"
+            styles.iloc[idx, :] = "background-color: #e7e6e6;"
 
     return styles
 
@@ -3413,14 +3412,26 @@ def _dedupe_next_week_recommendations(points):
 
 
 def _style_total_row(df: pd.DataFrame):
-    """총합계 행을 일반 행과 시각적으로 구분."""
+    """주간실적 모든 표의 총합계/합계 행을 검은 배경 + 흰 글씨 + Bold로 통일."""
     def _row_style(row):
-        first = _clean_text_value(row.iloc[0]) if len(row) else ""
-        if first in ["총합계", "합계", "Total", "TOTAL"]:
-            return ["background-color: #000000; color: #FFFFFF; font-weight: 700;" for _ in row]
+        values = [_clean_text_value(v) for v in row.tolist()]
+        is_total = any(v in {"총합계", "합계", "Total", "TOTAL"} for v in values)
+        if is_total:
+            return [
+                "background-color: #000000 !important; "
+                "color: #FFFFFF !important; "
+                "font-weight: 700 !important; "
+                "-webkit-text-fill-color: #FFFFFF !important;"
+                for _ in row
+            ]
         return ["" for _ in row]
     try:
-        return df.style.apply(_row_style, axis=1)
+        return df.style.apply(_row_style, axis=1).set_table_styles([
+            {
+                "selector": "tbody tr:hover td",
+                "props": [("color", "inherit")]
+            }
+        ])
     except Exception:
         return df
 
@@ -3689,6 +3700,42 @@ def _merge_same_product_recommendations(sentences, products_all: pd.DataFrame):
             seen.add(k)
             final.append(s)
     return final
+
+
+def _force_total_row_white_text(styler, df: pd.DataFrame):
+    """Streamlit/Pandas Styler 테마가 글자색을 덮는 경우를 방지하기 위해 셀별 직접 적용."""
+    try:
+        total_rows = []
+        for idx in df.index:
+            vals = [_clean_text_value(v) for v in df.loc[idx].tolist()]
+            if any(v == "총합계" for v in vals):
+                total_rows.append(idx)
+
+        if not total_rows:
+            return styler
+
+        for idx in total_rows:
+            styler = styler.set_properties(
+                subset=pd.IndexSlice[[idx], :],
+                **{
+                    "background-color": "#000000",
+                    "color": "#FFFFFF",
+                    "font-weight": "700",
+                    "-webkit-text-fill-color": "#FFFFFF",
+                }
+            )
+        return styler
+    except Exception:
+        return styler
+
+
+def _weekly_table_title(title: str):
+    """주간실적 표 제목 가운데 정렬."""
+    st.markdown(
+        f"<div style='text-align:center; font-weight:700; font-size:1.05rem; "
+        f"margin:0.45rem 0 0.35rem 0;'>{title}</div>",
+        unsafe_allow_html=True,
+    )
 
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
@@ -5477,7 +5524,7 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
-        st.markdown("**대카테고리 편성 및 주문 비중**")
+        _weekly_table_title("대카테고리 편성 및 주문 비중")
         st.dataframe(
             clean_identifier_columns(weekly_display_format(big_table)),
             use_container_width=True,
@@ -5492,7 +5539,7 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
-        st.markdown("**중카테고리 편성 및 주문 비중**")
+        _weekly_table_title("중카테고리 편성 및 주문 비중")
         st.dataframe(
             clean_identifier_columns(weekly_display_format(mid_table)),
             use_container_width=True,
@@ -5537,13 +5584,13 @@ elif menu == "주간실적":
                 if _md_rec_df.empty:
                     st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
                 else:
-                    st.dataframe(_md_rec_df, use_container_width=True, hide_index=True)
+                    st.dataframe(_style_total_row(_md_rec_df), use_container_width=True, hide_index=True)
 
             with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
                 if _md_src_df.empty:
                     st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
                 else:
-                    st.dataframe(_md_src_df, use_container_width=True, hide_index=True)
+                    st.dataframe(_style_total_row(_md_src_df), use_container_width=True, hide_index=True)
         except Exception as _md_exc:
             st.caption(f"MD 상세 분석을 불러오지 못했습니다: {type(_md_exc).__name__}")
         detail_sections = [
