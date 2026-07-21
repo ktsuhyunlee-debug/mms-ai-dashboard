@@ -2738,6 +2738,151 @@ def _season_gap_action(pw, products_all, week_end):
     return None
 
 
+
+def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
+    """
+    전년 동시즌(기준일 ±28일) 실제 고성과 상품 근거 추출.
+    반환 근거: 상품명, 성별/연령/SEG, 운영횟수, 평균/최고 주문금액,
+    전년 평균 혜택가, 300/500만원 이상 고성과 회차 평균 혜택가.
+    """
+    if pd.isna(week_end):
+        return []
+
+    start = (week_end - pd.DateOffset(years=1) - pd.Timedelta(days=28)).normalize()
+    end = (week_end - pd.DateOffset(years=1) + pd.Timedelta(days=28)).normalize()
+
+    df = products_all.copy()
+    df["_date2"] = pd.to_datetime(df["_date"], errors="coerce")
+    df = df[df["_date2"].between(start, end)]
+    if df.empty:
+        return []
+
+    price_col = first_col(df, ["멤버십 혜택가", "행사가", "판매가", "혜택가"])
+    if not price_col:
+        return []
+
+    df["_amt"] = pd.to_numeric(df["주문금액"], errors="coerce").fillna(0)
+    df["_price"] = pd.to_numeric(df[price_col], errors="coerce")
+
+    # 시즌 상품군 키워드
+    groups = {
+        "캐리어·여행용품": r"캐리어|여행|파우치|보스턴백",
+        "여행용 소형가전": r"여행용|미니|휴대용.*(면도기|드라이기|선풍기)|코털제거기",
+        "선케어": r"선크림|선스틱|선쿠션|자외선",
+        "냉감·기능성 의류": r"냉감|쿨링|드라이셀|기능성|언더셔츠",
+        "냉방가전": r"선풍기|써큘|서큘|냉풍|에어컨",
+        "보양식·간편식": r"삼계탕|장어|갈비탕|국밥|간편식|즉석|냉동",
+    }
+
+    results = []
+    for label, pat in groups.items():
+        sub = df[df["상품명"].fillna("").astype(str).str.contains(pat, case=False, regex=True)].copy()
+        if sub.empty:
+            continue
+
+        for pname, h in sub.groupby("상품명"):
+            h = h.sort_values("_date2")
+            n = len(h)
+            if n < 1:
+                continue
+
+            avg_amt = float(h["_amt"].mean())
+            max_amt = float(h["_amt"].max())
+            ge3 = int((h["_amt"] >= 3_000_000).sum())
+            ge5 = int((h["_amt"] >= 5_000_000).sum())
+            if ge3 < 1:
+                continue
+
+            avg_price = float(h["_price"].mean()) if h["_price"].notna().any() else None
+            hp3 = h[h["_amt"] >= 3_000_000]
+            hp5 = h[h["_amt"] >= 5_000_000]
+            hp3_price = float(hp3["_price"].mean()) if not hp3.empty and hp3["_price"].notna().any() else None
+            hp5_price = float(hp5["_price"].mean()) if not hp5.empty and hp5["_price"].notna().any() else None
+
+            # 가장 잘 나온 타겟 1개
+            target_cols = [c for c in ["성별","연령","SEG"] if c in h.columns]
+            target_text = ""
+            if target_cols:
+                tg = h.groupby(target_cols, dropna=False)["_amt"].mean().reset_index().sort_values("_amt", ascending=False)
+                if not tg.empty:
+                    r0 = tg.iloc[0]
+                    parts = []
+                    if "성별" in target_cols:
+                        parts.append(str(r0["성별"]))
+                    if "연령" in target_cols:
+                        parts.append(clean_identifier_value(r0["연령"]))
+                    if "SEG" in target_cols:
+                        parts.append(str(r0["SEG"]))
+                    target_text = " ".join(parts)
+
+            results.append({
+                "group": label,
+                "product": str(pname),
+                "count": n,
+                "avg_amt": avg_amt,
+                "max_amt": max_amt,
+                "ge3": ge3,
+                "ge5": ge5,
+                "avg_price": avg_price,
+                "hp3_price": hp3_price,
+                "hp5_price": hp5_price,
+                "target": target_text,
+            })
+
+    return sorted(
+        results,
+        key=lambda x: (x["ge5"], x["ge3"], x["avg_amt"]),
+        reverse=True
+    )
+
+
+def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
+    """전년 동시즌 실제 근거가 있을 때만 시즌성 차주 운영 제안 생성."""
+    items = _seasonal_last_year_evidence(products_all, week_end)
+    if not items:
+        return None
+
+    # 최대 2개 상품만 사용, 서로 다른 상품군 우선
+    selected = []
+    used_groups = set()
+    for x in items:
+        if x["group"] in used_groups and len(selected) < 1:
+            continue
+        selected.append(x)
+        used_groups.add(x["group"])
+        if len(selected) >= 2:
+            break
+
+    chunks = []
+    for x in selected:
+        price_bits = []
+        if x["avg_price"] is not None:
+            price_bits.append(f"전년 동시즌 평균 혜택가 {x['avg_price']:,.0f}원")
+        if x["hp5_price"] is not None:
+            price_bits.append(f"500만원 이상 고성과 회차 평균 {x['hp5_price']:,.0f}원")
+        elif x["hp3_price"] is not None:
+            price_bits.append(f"300만원 이상 고성과 회차 평균 {x['hp3_price']:,.0f}원")
+
+        target = f", 주요 고성과 타겟 {x['target']}" if x["target"] else ""
+        price_text = ", ".join(price_bits)
+        chunks.append(
+            f"{_short_weekly_product_name(x['product'])}은 전년 동시즌 {x['count']}회 운영 중 "
+            f"300만원 이상 {x['ge3']}회"
+            + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
+            + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target}"
+            + (f", {price_text}" if price_text else "")
+        )
+
+    if not chunks:
+        return None
+
+    return (
+        "• " + " / ".join(chunks) +
+        "의 성과가 확인됐습니다. 전년 동시즌 고성과 상품의 실제 타겟과 가격대를 기준으로 "
+        "동일 상품 재운영 가능 여부를 우선 확인하고, 유사 가격대·구성의 신규·유사신규 상품을 해당 고성과 타겟 중심으로 TEST하는 것이 적절합니다."
+    )
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
@@ -2960,9 +3105,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         used[kind]=used.get(kind,0)+1
         if len(nxt)>=4: break
 
-    season_gap=_season_gap_action(pw,products_all,week_end)
-    if season_gap and len(nxt)<5:
-        nxt.append("• "+season_gap)
+    seasonal_evidence = _seasonal_action_sentence(products_all, week_end)
+    if seasonal_evidence and len(nxt) < 5:
+        nxt.append(seasonal_evidence)
+    else:
+        season_gap=_season_gap_action(pw,products_all,week_end)
+        if season_gap and len(nxt)<5:
+            nxt.append("• "+season_gap)
 
     if len(nxt)<4:
         poor_now=pw.groupby("상품명",as_index=False)["주문금액"].sum()
