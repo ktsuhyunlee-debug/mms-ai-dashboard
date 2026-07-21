@@ -3036,8 +3036,13 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
     if dcol:
         tmp[dcol] = pd.to_datetime(tmp[dcol], errors="coerce")
 
+    _week_product_col = first_col(week_df, ["상품명", "MMS 상품명", "상품"]) if week_df is not None else None
+    _week_products = set(week_df[_week_product_col].dropna().astype(str)) if _week_product_col and not week_df.empty else set()
+
     for pname, g in tmp.groupby(pcol, dropna=True):
         if not _clean_text_value(pname):
+            continue
+        if _week_products and str(pname) not in _week_products:
             continue
         cnt = len(g)
         ge3 = int((g[acol] >= 3_000_000).sum())
@@ -3088,6 +3093,182 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
     src_df = pd.DataFrame(sourcing_rows).drop_duplicates(subset=["시즌/상품군", "과거 고성과 사례"]).head(10)
     return rec_df, src_df
 
+
+
+def _extract_product_from_insight_line(line: str) -> str:
+    m = re.match(r"\s*\[([^\]]+)\]", str(line))
+    return _clean_text_value(m.group(1)) if m else ""
+
+def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame, all_products: pd.DataFrame) -> str:
+    """
+    동일 상품의 발송 건별 상세 인사이트를 상품별 1개로 통합.
+    기존 문장에 의존하지 않고 실제 금주/누적 데이터로 핵심 판정을 재구성한다.
+    """
+    if not detail_text or week_df is None or getattr(week_df, "empty", True):
+        return detail_text
+
+    pcol = first_col(week_df, ["상품명", "MMS 상품명", "상품"])
+    acol = first_col(week_df, ["주문금액", "거래액", "매출"])
+    dcol = first_col(week_df, ["발송일", "발송일자", "일자", "날짜"])
+    target_col = first_col(week_df, ["타겟", "성별연령", "성별/연령", "성연령"])
+    seg_col = first_col(week_df, ["SEG", "세그", "세그먼트"])
+    price_col = first_col(week_df, ["멤버십 혜택가", "멤버십혜택가", "혜택가", "최종혜택가", "행사가", "판매가"])
+    lowest_col = first_col(week_df, ["발송일 비교 최저가", "비교최저가", "최저가", "네이버최저가"])
+
+    if not pcol or not acol:
+        return detail_text
+
+    w = week_df.copy()
+    w[acol] = pd.to_numeric(w[acol], errors="coerce").fillna(0)
+    if dcol:
+        w[dcol] = pd.to_datetime(w[dcol], errors="coerce")
+
+    # Preserve product order from the original detail text where possible.
+    original_order = []
+    for ln in str(detail_text).splitlines():
+        pn = _extract_product_from_insight_line(ln)
+        if pn and pn not in original_order:
+            original_order.append(pn)
+    for pn in w[pcol].dropna().astype(str).unique():
+        if pn not in original_order:
+            original_order.append(pn)
+
+    out = []
+    for pname in original_order:
+        g = w[w[pcol].astype(str) == str(pname)].copy()
+        if g.empty:
+            continue
+        g = g.sort_values(dcol) if dcol else g
+        week_total = float(g[acol].sum())
+        week_max = float(g[acol].max())
+        week_count = len(g)
+        ge3 = int((g[acol] >= 3_000_000).sum())
+        ge5 = int((g[acol] >= 5_000_000).sum())
+
+        # Cumulative history
+        hist = pd.DataFrame()
+        if all_products is not None and not getattr(all_products, "empty", True):
+            apcol = first_col(all_products, ["상품명", "MMS 상품명", "상품"])
+            aacol = first_col(all_products, ["주문금액", "거래액", "매출"])
+            if apcol and aacol:
+                hist = all_products[all_products[apcol].astype(str) == str(pname)].copy()
+                hist[aacol] = pd.to_numeric(hist[aacol], errors="coerce").fillna(0)
+        hist_count = len(hist)
+        hist_avg = float(hist[aacol].mean()) if not hist.empty else None
+        hist_max = float(hist[aacol].max()) if not hist.empty else None
+
+        parts = []
+        subject = f"[{_safe_product_label(pname)}]"
+
+        # 1. Current week result
+        if week_count > 1:
+            parts.append(
+                f"금주 {week_count}회 편성에서 누적 {compact_money(week_total)}, "
+                f"회차 최고 {compact_money(week_max)}을 기록했으며 300만원 이상 {ge3}회"
+                + (f", 500만원 이상 {ge5}회" if ge5 else "") + "의 성과가 확인됐습니다."
+            )
+        else:
+            parts.append(f"금번 {compact_money(week_total)}을 기록했습니다.")
+
+        # 2. Historical meaning
+        if hist_count >= 2 and hist_avg is not None:
+            if hist_max is not None and week_max >= hist_max - 1:
+                parts.append(f"누적 {hist_count}회 평균 {compact_money(hist_avg)} 대비 금번 회차 최고 {compact_money(week_max)}으로 역대 최고 수준의 성과를 기록했습니다.")
+            elif week_total >= 5_000_000:
+                parts.append(f"누적 {hist_count}회 평균 {compact_money(hist_avg)}을 기록한 반복 운영 상품으로, 금주에도 핵심 매출 기여 수준의 성과를 확보했습니다.")
+
+        # 3. Target/SEG comparison in current week
+        group_cols = [c for c in [target_col, seg_col] if c]
+        target_summary = None
+        if group_cols and len(g) >= 2:
+            tg = g.groupby(group_cols, dropna=False)[acol].agg(["count","mean","sum"]).reset_index().sort_values("mean", ascending=False)
+            if len(tg) >= 2:
+                top, second = tg.iloc[0], tg.iloc[1]
+                def _label(row):
+                    vals = []
+                    for c in group_cols:
+                        v = _clean_text_value(row[c])
+                        if v and v.lower() != "nan":
+                            vals.append(v)
+                    return " ".join(vals)
+                l1, l2 = _label(top), _label(second)
+                if l1 and l2 and float(second["mean"]) > 0:
+                    ratio = float(top["mean"]) / float(second["mean"])
+                    if ratio >= 1.5:
+                        target_summary = (
+                            f"{l1} 평균 {compact_money(float(top['mean']))}으로 "
+                            f"{l2} 평균 {compact_money(float(second['mean']))} 대비 {ratio:.1f}배 높아 "
+                            f"{l1}의 상대적 강세가 확인됩니다."
+                        )
+        if target_summary:
+            parts.append(target_summary)
+
+        # 4. Actual repeat trend, no generic "check later" sentence.
+        if week_count >= 3:
+            vals = g[acol].tolist()
+            seq = " → ".join(compact_money(float(v)) for v in vals[-3:])
+            if vals[-3] > vals[-2] > vals[-1]:
+                parts.append(f"최근 3회 주문금액은 {seq}으로 2회 연속 하락해 동일 조건의 즉시 반복 편성보다 운영 간격 또는 타겟 전환이 필요합니다.")
+            elif vals[-3] < vals[-2] < vals[-1]:
+                parts.append(f"최근 3회 주문금액은 {seq}으로 연속 상승해 현재까지 반복 운영에 따른 성과 둔화는 확인되지 않습니다.")
+            else:
+                parts.append(f"최근 3회 주문금액은 {seq}으로 연속 하락 흐름은 확인되지 않아 단기 재편성 여력이 있습니다.")
+
+        # 5. Price evidence only when actual columns exist.
+        if price_col:
+            prices = pd.to_numeric(g[price_col], errors="coerce").dropna()
+            lows = pd.to_numeric(g[lowest_col], errors="coerce").dropna() if lowest_col else pd.Series(dtype=float)
+            if not prices.empty and not lows.empty:
+                curp, lowp = float(prices.iloc[-1]), float(lows.iloc[-1])
+                if curp <= lowp:
+                    parts.append(f"멤버십 혜택가 {curp:,.0f}원으로 발송일 비교 최저가 {lowp:,.0f}원 이하의 가격 경쟁력을 확보했습니다.")
+                else:
+                    parts.append(f"멤버십 혜택가 {curp:,.0f}원으로 발송일 비교 최저가 {lowp:,.0f}원 대비 가격 우위가 없어 가격 조건 재점검이 필요합니다.")
+
+        # 6. First test terminology: product / target / SEG are explicitly separated.
+        if hist_count == 1:
+            parts.append("MMS 첫 운영 상품으로 추가 운영을 통해 재현성 검증이 필요합니다.")
+        elif target_col:
+            # Compare current target against prior history if possible.
+            apcol = first_col(all_products, ["상품명", "MMS 상품명", "상품"]) if all_products is not None else None
+            atcol = first_col(all_products, ["타겟", "성별연령", "성별/연령", "성연령"]) if all_products is not None else None
+            aseg = first_col(all_products, ["SEG", "세그", "세그먼트"]) if all_products is not None else None
+            if apcol and atcol and not hist.empty:
+                current_targets = g[target_col].dropna().astype(str).unique().tolist()
+                for ct in current_targets:
+                    hct = hist[hist[atcol].astype(str) == str(ct)] if atcol in hist.columns else pd.DataFrame()
+                    if len(hct) == 1:
+                        parts.append(f"{ct} 타겟 첫 TEST 성과로, 동일 타겟 1회 추가 검증 후 확대 여부를 판단하는 것이 적절합니다.")
+                        break
+
+        # 7. One final action, aligned with evidence.
+        action = ""
+        if week_count >= 3:
+            vals = g[acol].tolist()
+            declining = vals[-3] > vals[-2] > vals[-1]
+        else:
+            declining = False
+
+        if target_summary:
+            # pull top label from sentence
+            top_label = target_summary.split(" 평균 ")[0]
+        else:
+            top_label = ""
+
+        if declining:
+            action = "다음 운영 제안: 최근 연속 하락이 확인된 동일 조건의 즉시 반복 편성은 보수적으로 운영하고, 최근 미발송 타겟·SEG 전환 또는 일정 기간 미편성 후 재검토하는 것이 적절합니다."
+        elif week_total >= 5_000_000 or ge5 >= 1:
+            if top_label:
+                action = f"다음 운영 제안: {top_label}을 우선 재편성 대상으로 검토하고, 동일 조건 1회 추가 검증 후 미발송 SEG 확대 여부를 판단하는 것이 적절합니다."
+            else:
+                action = "다음 운영 제안: 금주 고성과 조건을 우선 유지해 단기 재편성을 검토하되, 동일 SEG 과다 반복은 피하고 미발송 SEG 확대 여부를 함께 검토하는 것이 적절합니다."
+        else:
+            action = "다음 운영 제안: 금주 성과와 과거 평균을 함께 비교해 재편성 우선순위를 결정하고, 근거가 충분하지 않은 타겟 확대는 추가 TEST 후 판단하는 것이 적절합니다."
+
+        parts.append(action)
+        out.append(subject + " " + " > ".join(parts))
+
+    return "\n".join(out)
 
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
@@ -4928,7 +5109,7 @@ elif menu == "주간실적":
             _week_end = pd.to_datetime(pw["_date"], errors="coerce").max()
             _md_rec_df, _md_src_df = _md_recommendation_tables(products, pw, _week_end)
 
-            with st.expander("▶ 재편성 추천 상품", expanded=False):
+            with st.expander("▶ 금주 재편성 추천 상품", expanded=False):
                 if _md_rec_df.empty:
                     st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
                 else:
