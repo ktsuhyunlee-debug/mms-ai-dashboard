@@ -2112,7 +2112,7 @@ def build_weekly_detail_analysis(
     price_df = merge_lowest_price(pw)
     unavailable = price_df[price_df["최저가 확보"] == "미확보"]["상품명"].dropna().astype(str).unique().tolist()
     price_line = (
-        "[발송일 최저가 미확보 상품] " + " / ".join(unavailable)
+        " " + " / ".join(unavailable)
         if unavailable else "발송일 최저가가 입력된 상품 중 미확보 사례 없음"
     )
 
@@ -2149,7 +2149,7 @@ def build_weekly_detail_analysis(
         "■ 상품 인사이트",
         product_insights,
         "",
-        "■ 가격·카테고리 인사이트",
+        "■ 최저가 미확보 상품",
         price_line,
     ]
     return "\n".join(str(x) for x in lines if x is not None)
@@ -2866,8 +2866,25 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
 
 
 
+
+def _normalize_season_group(product_name: str, current_group: str) -> str:
+    """상품명 기반 시즌 상품군 보정. 명확한 상품 키워드를 일반 키워드보다 우선."""
+    name = _clean_text_value(product_name).lower()
+    if any(k in name for k in ["우양산", "양산", "우산"]):
+        return "우양산"
+    if any(k in name for k in ["캐리어", "여행가방", "트렁크"]):
+        return "캐리어·여행용품"
+    if any(k in name for k in ["선스틱", "선크림", "선쿠션", "자외선"]):
+        return "선케어"
+    if any(k in name for k in ["냉감", "쿨링", "드라이셀", "흡습속건"]):
+        return "냉감·기능성 의류"
+    if any(k in name for k in ["선풍기", "서큘", "써큘", "에어써큘", "냉풍기"]):
+        return "냉방가전"
+    return current_group
+
 def _season_specific_action(group_name: str) -> str:
     actions = {
+        "우양산": "1만원 내외 가격대의 경량·휴대용·암막 기능을 갖춘 우양산",
         "캐리어·여행용품": "기내용·경량·확장형 등 휴가 수요가 명확한 캐리어·여행용품",
         "여행용 소형가전": "휴대성·소형·멀티전압 등 여행 편의성이 명확한 소형가전",
         "선케어": "휴대성·간편 도포·높은 자외선 차단 지수를 갖춘 선스틱·선쿠션·선크림",
@@ -2878,18 +2895,66 @@ def _season_specific_action(group_name: str) -> str:
     return actions.get(group_name, "동일 시즌 수요와 기능성이 명확한 상품")
 
 
+
+def _marketing_calendar_reason(group_name: str, ref_date=None) -> str:
+    """월별/계절 마케팅 캘린더 기반 '왜 지금인가' 근거."""
+    try:
+        month = int(pd.Timestamp(ref_date).month) if ref_date is not None else int(pd.Timestamp.today().month)
+    except Exception:
+        month = int(pd.Timestamp.today().month)
+
+    reasons = {
+        1: {
+            "default": "신년·설 준비 수요가 확대되는 1월",
+            "건강": "신년 건강관리와 설 선물 수요가 함께 확대되는 1월",
+        },
+        2: {"default": "설 이후 신학기·봄 준비 수요가 시작되는 2월"},
+        3: {"default": "신학기·입학·이사와 봄맞이 수요가 집중되는 3월"},
+        4: {"default": "환절기·봄나들이·야외활동 수요가 확대되는 4월"},
+        5: {"default": "가정의달 선물·나들이 수요가 집중되는 5월"},
+        6: {
+            "default": "초여름·장마 준비와 휴가 사전 수요가 시작되는 6월",
+            "우양산": "장마 시작과 자외선 차단 수요가 함께 커지는 6월",
+            "냉방가전": "기온 상승으로 냉방가전 수요가 본격화되는 6월",
+        },
+        7: {
+            "default": "장마·폭염·여름휴가 수요가 동시에 집중되는 7월",
+            "우양산": "장마·폭염이 겹쳐 우천 대응과 자외선 차단 수요가 동시에 커지는 7월",
+            "냉방가전": "폭염·열대야로 냉방가전 수요가 집중되는 7월",
+            "캐리어·여행용품": "본격적인 여름휴가·여행 수요가 확대되는 7월",
+            "선케어": "휴가·야외활동과 강한 자외선으로 선케어 수요가 집중되는 7월",
+            "냉감·기능성 의류": "폭염과 야외활동 증가로 냉감·흡습속건 의류 수요가 커지는 7월",
+            "보양식·간편식": "초복·중복 등 보양식 수요가 집중되는 7월",
+        },
+        8: {"default": "폭염·휴가 후반과 개학 준비 수요가 이어지는 8월"},
+        9: {"default": "추석 선물·귀성 및 환절기 수요가 확대되는 9월"},
+        10: {"default": "가을 나들이·환절기·겨울 준비 수요가 시작되는 10월"},
+        11: {"default": "겨울 준비·김장·연말 쇼핑 수요가 확대되는 11월"},
+        12: {"default": "한파·크리스마스·연말 선물 수요가 집중되는 12월"},
+    }
+    month_map = reasons.get(month, {})
+    return month_map.get(group_name) or month_map.get("default") or f"{month}월 시즌 수요가 형성되는 시기"
+
+
 def _season_single_or_repeat_sentence(x: dict) -> str:
     name = _safe_product_label(x["product"])
     subject = _with_topic(name)
     scope = x["scope"]
     price_bits = []
-    if x.get("avg_price") is not None:
-        label = "전년 평균 혜택가" if scope.startswith("전년") else "과거 시즌 평균 혜택가"
-        price_bits.append(f"{label} {x['avg_price']:,.0f}원")
-    if x.get("hp5_price") is not None:
-        price_bits.append(f"500만원 이상 고성과 회차 평균 혜택가 {x['hp5_price']:,.0f}원")
-    elif x.get("hp3_price") is not None:
-        price_bits.append(f"300만원 이상 고성과 회차 평균 혜택가 {x['hp3_price']:,.0f}원")
+    if int(x.get("count", 0)) == 1:
+        one_price = x.get("avg_price")
+        if one_price is None:
+            one_price = x.get("hp5_price") if x.get("hp5_price") is not None else x.get("hp3_price")
+        if one_price is not None:
+            price_bits.append(f"당시 혜택가 {one_price:,.0f}원")
+    else:
+        if x.get("avg_price") is not None:
+            label = "전년 평균 혜택가" if scope.startswith("전년") else "과거 시즌 평균 혜택가"
+            price_bits.append(f"{label} {x['avg_price']:,.0f}원")
+        if x.get("hp5_price") is not None:
+            price_bits.append(f"500만원 이상 고성과 회차 평균 혜택가 {x['hp5_price']:,.0f}원")
+        elif x.get("hp3_price") is not None:
+            price_bits.append(f"300만원 이상 고성과 회차 평균 혜택가 {x['hp3_price']:,.0f}원")
 
     target = _clean_text_value(x.get("target"))
     target_part = ""
@@ -2899,14 +2964,17 @@ def _season_single_or_repeat_sentence(x: dict) -> str:
             target_part += f" 평균 {compact_money(x['target_avg'])}"
 
     price_part = f", {', '.join(price_bits)}" if price_bits else ""
-    action_product = _season_specific_action(x["group"])
+    season_group = _normalize_season_group(x["product"], x["group"])
+    action_product = _season_specific_action(season_group)
+    calendar_reason = _marketing_calendar_reason(season_group, x.get("ref_date"))
 
     if int(x["count"]) == 1:
         # 1회 성과는 '검증'이 아니라 '고성과 사례'로만 표현
         return (
-            f"{subject} {scope} 1회 운영에서 {compact_money(x['max_amt'])}을 기록한 고성과 사례로 확인됐습니다"
-            f"{target_part}{price_part}. 단일 운영 사례인 만큼 반복 검증된 상품으로 단정하지 않고, "
-            f"당시와 유사한 가격 조건을 확보할 수 있을 때 {action_product}의 신규·유사신규 TEST 후보로 검토하는 것이 적절합니다."
+            f"{subject} {scope} 1회 운영에서 {compact_money(x['max_amt'])}을 기록한 고성과 사례이며{price_part}"
+            f"{target_part}. 단일 운영 사례인 만큼 반복 성과가 검증된 상품으로 단정할 수는 없으나, "
+            f"{calendar_reason} 시즌 수요와 과거 고성과가 함께 확인된 만큼 당시와 유사한 가격 조건을 확보한 "
+            f"{action_product}의 신규·유사신규 TEST를 검토할 필요가 있습니다."
         )
 
     # 2회 이상: 반복 성과 수준을 수치로 구분
@@ -2944,7 +3012,81 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     if not selected:
         return None
 
-    return "• " + " / ".join(_season_single_or_repeat_sentence(x) for x in selected)
+    return "\n".join("• " + _season_single_or_repeat_sentence(x) for x in selected)
+
+
+
+def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame, week_end):
+    """MD 의사결정용: 재편성 추천 / 신규·유사신규 소싱 제안 데이터."""
+    rec_rows = []
+    sourcing_rows = []
+
+    if products_all is None or products_all.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    pcol = first_col(products_all, ["상품명", "MMS 상품명", "상품"])
+    acol = first_col(products_all, ["주문금액", "거래액", "매출"])
+    dcol = first_col(products_all, ["발송일", "발송일자", "일자", "날짜"])
+    price_col = first_col(products_all, ["멤버십 혜택가", "멤버십혜택가", "혜택가", "최종혜택가", "행사가", "판매가", "MMS혜택가", "MMS 혜택가", "실판매가"])
+    if not pcol or not acol:
+        return pd.DataFrame(), pd.DataFrame()
+
+    tmp = products_all.copy()
+    tmp[acol] = pd.to_numeric(tmp[acol], errors="coerce").fillna(0)
+    if dcol:
+        tmp[dcol] = pd.to_datetime(tmp[dcol], errors="coerce")
+
+    for pname, g in tmp.groupby(pcol, dropna=True):
+        if not _clean_text_value(pname):
+            continue
+        cnt = len(g)
+        ge3 = int((g[acol] >= 3_000_000).sum())
+        ge5 = int((g[acol] >= 5_000_000).sum())
+        avg_amt = float(g[acol].mean()) if cnt else 0
+        max_amt = float(g[acol].max()) if cnt else 0
+        last_date = g[dcol].max() if dcol else pd.NaT
+        days = None
+        if dcol and pd.notna(last_date):
+            try:
+                days = max(0, (pd.Timestamp(week_end).normalize() - pd.Timestamp(last_date).normalize()).days)
+            except Exception:
+                days = None
+        if ge5 >= 1 or ge3 >= 2:
+            price_txt = ""
+            if price_col:
+                vals = pd.to_numeric(g[price_col], errors="coerce").dropna()
+                if not vals.empty:
+                    price_txt = f"{vals.mean():,.0f}원"
+            rec_rows.append({
+                "상품": _safe_product_label(pname),
+                "운영횟수": cnt,
+                "300만원↑": ge3,
+                "500만원↑": ge5,
+                "평균매출": compact_money(avg_amt),
+                "최고매출": compact_money(max_amt),
+                "최근 미편성": f"{days}일" if days is not None and days > 0 else "-",
+                "과거 평균 혜택가": price_txt or "-"
+            })
+
+    season_items = _seasonal_last_year_evidence(products_all, week_end)
+    for x in season_items[:10]:
+        sg = _normalize_season_group(x["product"], x["group"])
+        reason = _marketing_calendar_reason(sg, week_end)
+        price = x.get("avg_price") or x.get("hp5_price") or x.get("hp3_price")
+        sourcing_rows.append({
+            "시즌/상품군": sg,
+            "과거 고성과 사례": _safe_product_label(x["product"]),
+            "성과": f"{x['scope']} {x['count']}회 / 평균 {compact_money(x['avg_amt'])} / 최고 {compact_money(x['max_amt'])}",
+            "당시 가격": f"{price:,.0f}원" if price is not None else "-",
+            "왜 지금": reason,
+            "소싱 방향": _season_specific_action(sg)
+        })
+
+    rec_df = pd.DataFrame(rec_rows)
+    if not rec_df.empty:
+        rec_df = rec_df.sort_values(["500만원↑", "300만원↑", "운영횟수"], ascending=False).head(15)
+    src_df = pd.DataFrame(sourcing_rows).drop_duplicates(subset=["시즌/상품군", "과거 고성과 사례"]).head(10)
+    return rec_df, src_df
 
 
 def _get_secret_value(*names):
@@ -3446,7 +3588,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         short = _short_weekly_product_name(pname)
         if count >= 2:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 회차별 실제 실적 추이를 기준으로 재편성 여부를 판단하는 것이 적절합니다."
+                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 회차별 주문금액과 타겟별 성과를 실제 비교해 반복 운영 지속 여부를 판정하는 것이 적절합니다."
             )
         else:
             product_points.append(
@@ -3561,6 +3703,27 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f"• 대카테고리 매출은 {cats} 순으로 구성됐습니다. 카테고리 비중만으로 편성 우선순위를 정하기보다 카테고리 내 과거 300만원·500만원 이상 달성 횟수와 가격 경쟁력을 함께 비교해 검증 상품 중심으로 편성을 정교화할 필요가 있습니다."
         )
 
+
+
+    # 반복 운영 상품: generic 문장을 실제 회차별 판정 문장으로 교체
+    _repeat_replaced = []
+    _repeat_done = set()
+    for _s in product_points:
+        _matched = False
+        for _pname in pd.Series(pw.get("상품명", [])).dropna().astype(str).unique() if "상품명" in pw.columns else []:
+            _short = _safe_product_label(_pname)
+            if _short and _short in str(_s):
+                _rows = pw[pw["상품명"].astype(str) == str(_pname)] if "상품명" in pw.columns else pd.DataFrame()
+                if len(_rows) >= 2 and ("회차별" in str(_s) or "편성 중" in str(_s)):
+                    _actual = _repeat_operation_sentence(_pname, pw)
+                    if _actual and _pname not in _repeat_done:
+                        _repeat_replaced.append(_actual)
+                        _repeat_done.add(_pname)
+                        _matched = True
+                        break
+        if not _matched:
+            _repeat_replaced.append(_s)
+    product_points = _repeat_replaced
 
     # 상품 운영 시사점 중복 제거: 동일 문장/동일 반복판정 중복 방지
     _pp_seen = set()
@@ -4759,6 +4922,19 @@ elif menu == "주간실적":
         )
 
         st.markdown("### 상세 데이터 보기")
+
+        # MD 의사결정용 상세
+        _md_rec_df, _md_src_df = _md_recommendation_tables(products_all, pw, week_end)
+        with st.expander("▶ 재편성 추천 상품", expanded=False):
+            if _md_rec_df.empty:
+                st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
+            else:
+                st.dataframe(_md_rec_df, use_container_width=True, hide_index=True)
+        with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
+            if _md_src_df.empty:
+                st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
+            else:
+                st.dataframe(_md_src_df, use_container_width=True, hide_index=True)
         detail_sections = [
             "MMS 상품 실적",
             "MMS 발송 통계",
@@ -4766,7 +4942,7 @@ elif menu == "주간실적":
             "SEG 분석",
             "요일·시간대 분석",
             "상품별 상세 인사이트",
-            "가격·카테고리 상세",
+            "최저가 미확보 상품",
         ]
         detail_report = build_weekly_detail_analysis(
             week, selected_year, pw, sw, products, sends
@@ -4792,7 +4968,7 @@ elif menu == "주간실적":
             "■ SEG 분석": "SEG 분석",
             "■ 요일·시간대 분석": "요일·시간대 분석",
             "■ 상품 인사이트": "상품별 상세 인사이트",
-            "■ 가격·카테고리 인사이트": "가격·카테고리 상세",
+            "■ 최저가 미확보 상품": "최저가 미확보 상품",
         }
         for raw_line in detail_report.splitlines():
             line = raw_line.strip()
