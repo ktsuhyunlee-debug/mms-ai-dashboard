@@ -882,7 +882,7 @@ def trend_chart(df: pd.DataFrame, title: str, color: str) -> go.Figure:
         )
     ymax = max(vals) if vals else 0
     fig.update_layout(
-        title=dict(text=title, x=.5, font=dict(size=23)),
+        title=dict(text=title, x=0.5, xanchor="center", font=dict(size=23)),
         height=480,
         margin=dict(l=60, r=30, t=72, b=100),
         plot_bgcolor="#ffffff",
@@ -1699,7 +1699,7 @@ def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(tickformat=",", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 상품 실적", x=.5, font=dict(size=23)),
+        title=dict(text="MMS 상품 실적", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
@@ -1763,7 +1763,7 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(ticksuffix="%", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 발송 통계", x=.5, font=dict(size=23)),
+        title=dict(text="MMS 발송 통계", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
@@ -1947,7 +1947,7 @@ def category_pie_chart(
         )
     )
     fig.update_layout(
-        title=dict(text=title, x=.5),
+        title=dict(text=title, x=0.5, xanchor="center"),
         height=560,
         margin=dict(l=40, r=40, t=70, b=40),
         uniformtext_minsize=8,
@@ -3730,10 +3730,22 @@ def _force_total_row_white_text(styler, df: pd.DataFrame):
 
 
 def _weekly_table_title(title: str):
-    """주간실적 표 제목 가운데 정렬."""
+    """주간실적 표/섹션 제목을 카드 전체 폭 기준 정중앙 정렬."""
     st.markdown(
-        f"<div style='text-align:center; font-weight:700; font-size:1.05rem; "
-        f"margin:0.45rem 0 0.35rem 0;'>{title}</div>",
+        (
+            "<div style='"
+            "width:100%;"
+            "display:flex;"
+            "justify-content:center;"
+            "align-items:center;"
+            "text-align:center;"
+            "font-weight:700;"
+            "font-size:1.05rem;"
+            "margin:0.45rem 0 0.35rem 0;"
+            "'>"
+            f"{title}"
+            "</div>"
+        ),
         unsafe_allow_html=True,
     )
 
@@ -5708,15 +5720,74 @@ elif menu == "주간실적":
             if "주문금액" in view.columns else []
         )
         formatted_view = clean_identifier_columns(weekly_display_format(view))
-        styled_view = formatted_view.style.apply(
-            lambda _: style_weekly_product_rows(formatted_view, raw_amounts),
-            axis=None,
+        # Streamlit DataFrame(Grid)은 Styler의 글자색을 일부 무시할 수 있어,
+        # 주간 상품실적 표는 HTML 렌더로 총합계 흰색/Bold를 확실히 보장한다.
+        _weekly_product_html = formatted_view.copy()
+
+        def _weekly_product_html_style(row):
+            vals = [_clean_text_value(v) for v in row.tolist()]
+            if any(v == "총합계" for v in vals):
+                return [
+                    "background-color:#000000 !important;"
+                    "color:#FFFFFF !important;"
+                    "-webkit-text-fill-color:#FFFFFF !important;"
+                    "font-weight:700 !important;"
+                    for _ in row
+                ]
+
+            try:
+                idx = row.name
+                amount = float(raw_amounts[idx]) if idx < len(raw_amounts) else float("nan")
+            except Exception:
+                amount = float("nan")
+
+            if pd.notna(amount) and amount >= 3_000_000:
+                return ["background-color:#fff2cc;" for _ in row]
+            if pd.notna(amount) and amount < 1_000_000:
+                return ["background-color:#e7e6e6;" for _ in row]
+            return ["" for _ in row]
+
+        _weekly_product_styler = (
+            _weekly_product_html.style
+            .apply(_weekly_product_html_style, axis=1)
+            .hide(axis="index")
+            .set_table_styles([
+                {
+                    "selector": "table",
+                    "props": [
+                        ("width", "100%"),
+                        ("border-collapse", "collapse"),
+                        ("font-size", "14px"),
+                    ],
+                },
+                {
+                    "selector": "th",
+                    "props": [
+                        ("text-align", "center"),
+                        ("vertical-align", "middle"),
+                        ("padding", "8px"),
+                        ("border", "1px solid #E5E7EB"),
+                        ("white-space", "nowrap"),
+                    ],
+                },
+                {
+                    "selector": "td",
+                    "props": [
+                        ("padding", "8px"),
+                        ("border", "1px solid #E5E7EB"),
+                        ("white-space", "nowrap"),
+                    ],
+                },
+            ], overwrite=False)
         )
-        st.dataframe(
-            styled_view,
-            use_container_width=True,
-            hide_index=True,
-            height=680,
+        _weekly_product_table_html = _weekly_product_styler.to_html()
+        st.markdown(
+            """
+            <div style="width:100%; max-height:680px; overflow:auto; border-radius:0 0 14px 14px;">
+            """ + _weekly_product_table_html + """
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     with tabs[2]:
