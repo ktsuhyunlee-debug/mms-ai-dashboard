@@ -1974,7 +1974,7 @@ def clean_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
-    """주간 상품실적: 총합계는 흰 배경 + 진한 글씨만 적용."""
+    """주간 상품실적: 총합계는 배경색을 건드리지 않고 Bold만 적용."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
 
     for idx, amount in enumerate(raw_amounts):
@@ -1983,11 +1983,8 @@ def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
 
         row_values = [_clean_text_value(v) for v in formatted_df.iloc[idx].tolist()]
         if any(v == "총합계" for v in row_values):
-            styles.iloc[idx, :] = (
-                "background-color: #ffffff !important; "
-                "color: inherit !important; "
-                "font-weight: 800 !important;"
-            )
+            # 배경색 지정 금지: Streamlit 기본 흰 배경 유지
+            styles.iloc[idx, :] = "font-weight: 800 !important;"
             continue
 
         try:
@@ -3409,7 +3406,7 @@ def _dedupe_next_week_recommendations(points):
 
 
 def _style_total_row(df: pd.DataFrame):
-    """총합계 행 별도 색상 없이 기본 표 스타일을 유지합니다."""
+    """총합계 별도 배경색 없이 기본 표 스타일 유지."""
     return df
 
 
@@ -3693,16 +3690,12 @@ def _weekly_table_title(title: str):
 
 
 def _style_weekly_category_total(df: pd.DataFrame):
-    """대/중카테고리 총합계: 흰 배경 + 진한 글씨만 적용."""
+    """대/중카테고리 총합계: 배경색을 건드리지 않고 Bold만 적용."""
     def _row_style(row):
         values = [_clean_text_value(v) for v in row.tolist()]
         if any(v == "총합계" for v in values):
-            return [
-                "background-color: #ffffff !important; "
-                "color: inherit !important; "
-                "font-weight: 800 !important;"
-                for _ in row
-            ]
+            # 배경색 지정 금지: Streamlit 기본 흰 배경 유지
+            return ["font-weight: 800 !important;" for _ in row]
         return ["" for _ in row]
 
     try:
