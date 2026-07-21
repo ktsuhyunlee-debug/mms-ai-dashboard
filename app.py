@@ -1699,7 +1699,7 @@ def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(tickformat=",", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 상품 실적", x=.5, font=dict(size=23)),
+        title=dict(text="MMS 상품 실적", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
@@ -1763,7 +1763,7 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(ticksuffix="%", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 발송 통계", x=.5, font=dict(size=23)),
+        title=dict(text="MMS 발송 통계", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
@@ -1947,7 +1947,7 @@ def category_pie_chart(
         )
     )
     fig.update_layout(
-        title=dict(text=title, x=.5),
+        title=dict(text=title, x=0.5, xanchor="center"),
         height=560,
         margin=dict(l=40, r=40, t=70, b=40),
         uniformtext_minsize=8,
@@ -1982,17 +1982,6 @@ def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
             break
 
         # 총합계 행은 금액 조건보다 최우선 적용
-        row_values = [
-            _clean_text_value(v)
-            for v in formatted_df.iloc[idx].tolist()
-        ]
-        if any(v == "총합계" for v in row_values[:3]):
-            styles.iloc[idx, :] = (
-                "background-color: #000000 !important; "
-                "color: #FFFFFF !important; "
-                "font-weight: 700 !important;"
-            )
-            continue
 
         try:
             value = float(amount)
@@ -3413,16 +3402,8 @@ def _dedupe_next_week_recommendations(points):
 
 
 def _style_total_row(df: pd.DataFrame):
-    """총합계 행을 일반 행과 시각적으로 구분."""
-    def _row_style(row):
-        first = _clean_text_value(row.iloc[0]) if len(row) else ""
-        if first in ["총합계", "합계", "Total", "TOTAL"]:
-            return ["background-color: #000000; color: #FFFFFF; font-weight: 700;" for _ in row]
-        return ["" for _ in row]
-    try:
-        return df.style.apply(_row_style, axis=1)
-    except Exception:
-        return df
+    """총합계 행 별도 색상 없이 기본 표 스타일을 유지합니다."""
+    return df
 
 
 def _normalize_core_product_name(name: str) -> str:
@@ -3689,6 +3670,20 @@ def _merge_same_product_recommendations(sentences, products_all: pd.DataFrame):
             seen.add(k)
             final.append(s)
     return final
+
+def _weekly_table_title(title: str):
+    """주간실적의 표 제목을 카드 폭 기준 가운데 정렬합니다."""
+    st.markdown(
+        (
+            "<div style='width:100%; text-align:center; "
+            "font-weight:700; font-size:1.05rem; "
+            "margin:0.45rem 0 0.35rem 0;'>"
+            f"{title}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
@@ -5477,7 +5472,7 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
-        st.markdown("**대카테고리 편성 및 주문 비중**")
+        _weekly_table_title("대카테고리 편성 및 주문 비중")
         st.dataframe(
             clean_identifier_columns(weekly_display_format(big_table)),
             use_container_width=True,
@@ -5492,7 +5487,7 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
-        st.markdown("**중카테고리 편성 및 주문 비중**")
+        _weekly_table_title("중카테고리 편성 및 주문 비중")
         st.dataframe(
             clean_identifier_columns(weekly_display_format(mid_table)),
             use_container_width=True,
