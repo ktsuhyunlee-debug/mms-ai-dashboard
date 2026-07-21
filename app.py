@@ -3737,6 +3737,35 @@ def _weekly_table_title(title: str):
         unsafe_allow_html=True,
     )
 
+
+def _weekly_table_styler(formatted_df: pd.DataFrame):
+    """주간실적 공통 표: 총합계 검정/흰글씨 + 컬럼 헤더 가운데 정렬."""
+    def _row_style(row):
+        vals = [_clean_text_value(v) for v in row.tolist()]
+        if any(v in {"총합계", "합계", "Total", "TOTAL"} for v in vals):
+            return [
+                "background-color: #000000 !important; "
+                "color: #FFFFFF !important; "
+                "-webkit-text-fill-color: #FFFFFF !important; "
+                "font-weight: 700 !important;"
+                for _ in row
+            ]
+        return ["" for _ in row]
+
+    try:
+        return (
+            formatted_df.style
+            .apply(_row_style, axis=1)
+            .set_table_styles([
+                {"selector": "th.col_heading",
+                 "props": [("text-align", "center"), ("vertical-align", "middle")]},
+                {"selector": "th.blank",
+                 "props": [("text-align", "center"), ("vertical-align", "middle")]},
+            ], overwrite=False)
+        )
+    except Exception:
+        return formatted_df
+
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5525,8 +5554,9 @@ elif menu == "주간실적":
             config={"displayModeBar": False},
         )
         _weekly_table_title("대카테고리 편성 및 주문 비중")
+        _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
         st.dataframe(
-            clean_identifier_columns(weekly_display_format(big_table)),
+            _weekly_table_styler(_big_table_display),
             use_container_width=True,
             hide_index=True,
             height=430,
@@ -5540,8 +5570,9 @@ elif menu == "주간실적":
             config={"displayModeBar": False},
         )
         _weekly_table_title("중카테고리 편성 및 주문 비중")
+        _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
         st.dataframe(
-            clean_identifier_columns(weekly_display_format(mid_table)),
+            _weekly_table_styler(_mid_table_display),
             use_container_width=True,
             hide_index=True,
             height=560,
