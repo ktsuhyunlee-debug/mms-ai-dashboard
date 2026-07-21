@@ -1992,7 +1992,7 @@ def weekly_delta(cur: float, prev: float, pp: bool = False) -> str:
     return change_label((cur - prev) / abs(prev))
 
 
-def build_weekly_analysis(
+def build_weekly_detail_analysis(
     week: str,
     year: int,
     pw: pd.DataFrame,
@@ -2152,6 +2152,145 @@ def build_weekly_analysis(
         price_line,
     ]
     return "\n".join(str(x) for x in lines if x is not None)
+
+
+def _weekly_plain_delta(cur: float, prev: float, pp: bool = False) -> str:
+    if pd.isna(cur) or pd.isna(prev):
+        return "-"
+    if pp:
+        diff = (cur - prev) * 100
+        if abs(diff) < 0.05:
+            diff = 0.0
+        return f"{diff:+.1f}%p" if diff != 0 else "0.0%p"
+    if prev == 0:
+        return "-"
+    diff = (cur - prev) / abs(prev) * 100
+    if abs(diff) < 0.05:
+        diff = 0.0
+    return f"{diff:+.1f}%" if diff != 0 else "0.0%"
+
+
+def _season_recommendations(month: int, operated_text: str):
+    season_map = {
+        1: ("한파·설 명절", ["온열가전", "겨울 침구", "보온의류", "명절 식품·선물세트"]),
+        2: ("환절기·신학기", ["건강식품", "공기청정·청소가전", "신학기 생활용품", "간편식"]),
+        3: ("봄·신학기", ["봄 의류", "청소·생활가전", "건강식품", "나들이용품"]),
+        4: ("봄 나들이·가정의달 준비", ["선케어", "나들이 식품", "건강식품", "선물형 소형가전"]),
+        5: ("가정의달·초여름", ["건강식품", "뷰티 선물", "선풍기·서큘레이터", "여름 의류"]),
+        6: ("장마·초여름", ["제습·건조가전", "선풍기·서큘레이터", "여름 침구·쿨링용품", "간편식"]),
+        7: ("폭염·휴가 시즌", ["캐리어", "여행용 소형가전", "선케어", "기능성·냉감 의류", "보양식·간편식"]),
+        8: ("폭염·휴가·추석 준비", ["냉방가전", "여행용품", "선케어", "보양식", "명절 선물 사전수요 상품"]),
+        9: ("추석·환절기", ["명절 식품·선물세트", "건강식품", "환절기 의류", "생활가전"]),
+        10: ("가을·동절기 준비", ["온열가전", "가을 의류", "건강식품", "침구"]),
+        11: ("초겨울·연말 준비", ["온열가전", "겨울 침구", "보온의류", "연말 선물형 상품"]),
+        12: ("한파·연말", ["온열가전", "겨울 의류", "홈파티 식품", "선물형 가전·뷰티"]),
+    }
+    theme, groups = season_map.get(month, ("시즌 수요", ["시즌 상품"]))
+    fresh = [g for g in groups if g.split("·")[0] not in operated_text][:3] or groups[:3]
+    return theme, "·".join(fresh)
+
+
+def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
+    send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
+    send_count = float(sw[send_col].sum())
+    click_count = float(sw[click_col].sum())
+    order_count = float(sw["주문건수"].sum())
+    qty = float(sw["주문수량"].sum())
+    amount = float(sw["주문금액"].sum())
+    ctr = click_count / send_count if send_count else 0
+    cvr = order_count / click_count if click_count else 0
+    aov = amount / order_count if order_count else 0
+    spm = amount / send_count if send_count else 0
+
+    all_weeks = sends_all[sends_all["_year"] == year].groupby("주차")["_date"].min().sort_values()
+    week_names = [str(x) for x in all_weeks.index]
+    prev_sw = pd.DataFrame()
+    prev_pw = pd.DataFrame()
+    if week in week_names and week_names.index(week) > 0:
+        prev_week = week_names[week_names.index(week)-1]
+        prev_sw = sends_all[(sends_all["_year"] == year) & (sends_all["주차"].astype(str) == prev_week)].copy()
+        prev_pw = products_all[(products_all["_year"] == year) & (products_all["주차"].astype(str) == prev_week)].copy()
+
+    if not prev_sw.empty:
+        psend = float(prev_sw[send_col].sum())
+        pclick = float(prev_sw[click_col].sum())
+        porders = float(prev_sw["주문건수"].sum())
+        pqty = float(prev_sw["주문수량"].sum())
+        pamount = float(prev_sw["주문금액"].sum())
+        pctr = pclick / psend if psend else 0
+        pcvr = porders / pclick if pclick else 0
+        paov = pamount / porders if porders else 0
+        pspm = pamount / psend if psend else 0
+        summary = [
+            f"발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 상품수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
+            f"주문건수 {int(order_count):,}건({_weekly_plain_delta(order_count,porders)}) / 주문수량 {int(qty):,}건({_weekly_plain_delta(qty,pqty)}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) 기록",
+            f"CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
+        ]
+    else:
+        summary = [
+            f"발송횟수 {len(sw):,}회 / 상품수 {len(pw):,}건 / 발송건수 {int(send_count):,}건 운영",
+            f"주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
+            f"CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
+        ]
+
+    rank = pw.groupby("상품명",as_index=False).agg(주문금액=("주문금액","sum")).sort_values("주문금액",ascending=False)
+    core = rank[rank["주문금액"]>=5_000_000]
+    poor = rank[rank["주문금액"]<1_000_000]
+    product_points=[]
+    if not core.empty:
+        product_points.append("• " + ", ".join(core.head(4)["상품명"].astype(str)) + " 등 500만원 이상 핵심 상품이 주간 매출을 견인했습니다.")
+    if not rank.empty:
+        r=rank.iloc[0]
+        product_points.append(f"• [{r['상품명']}]이 {compact_money(r['주문금액'])}으로 금주 최고 매출을 기록해 우선 재편성 후보로 확인됩니다.")
+    if not poor.empty:
+        product_points.append("• " + ", ".join(poor.head(4)["상품명"].astype(str)) + " 등 100만원 미만 상품은 가격·구성·타겟 재점검 후 선택적 재TEST가 필요합니다.")
+
+    seg=grouped_send_table(sw,["성별","연령"])
+    weekday=grouped_send_table(sw,["요일"])
+    time_df=grouped_send_table(sw,["시간대"])
+    big_cat=pw.groupby("대카",as_index=False)["주문금액"].sum().sort_values("주문금액",ascending=False)
+    op=[]
+    if not seg.empty:
+        s=seg.loc[seg["SPM"].idxmax()]; a=seg.loc[seg["주문금액"].idxmax()]
+        op.append(f"• {s['성별']}{clean_identifier_value(s['연령'])}은 SPM {s['SPM']:.1f}로 최고 효율, {a['성별']}{clean_identifier_value(a['연령'])}은 주문금액 {compact_money(a['주문금액'])}으로 최고 매출 기여를 기록해 타겟별 역할을 구분한 편성이 필요합니다.")
+    if not weekday.empty and not time_df.empty:
+        d=weekday.loc[weekday["SPM"].idxmax()]; t=time_df.loc[time_df["SPM"].idxmax()]
+        op.append(f"• {d['요일']}요일 SPM {d['SPM']:.1f}, {t['시간대']} 시간대 SPM {t['SPM']:.1f}로 효율이 높아 핵심·우수 상품 우선 배치를 검토할 수 있습니다.")
+    if not big_cat.empty and big_cat["주문금액"].sum()>0:
+        total=big_cat["주문금액"].sum()
+        cats=", ".join(f"{r['대카']} {r['주문금액']/total*100:.1f}%" for _,r in big_cat.head(3).iterrows())
+        op.append(f"• 대카테고리 매출은 {cats} 순으로 구성되어 주력 카테고리는 유지하되 특정 카테고리 편중 여부를 함께 점검할 필요가 있습니다.")
+
+    nxt=[]
+    if not core.empty:
+        nxt.append("• 금주 핵심 상품인 " + ", ".join(core.head(3)["상품명"].astype(str)) + "은 검증된 고성과 타겟 중심으로 재편성하되 동일 SEG 연속 반복은 피하고 미발송 SEG 추가 TEST를 병행하는 것이 좋습니다.")
+
+    week_end=pd.to_datetime(pw["_date"],errors="coerce").max()
+    current=set(pw["상품명"].dropna().astype(str))
+    hist=products_all[pd.to_datetime(products_all["_date"],errors="coerce") < week_end].copy()
+    hist["_date2"]=pd.to_datetime(hist["_date"],errors="coerce")
+    hist=hist[~hist["상품명"].astype(str).isin(current)]
+    if not hist.empty:
+        dorm=hist.groupby("상품명",as_index=False).agg(평균매출=("주문금액","mean"),최고매출=("주문금액","max"),최근발송일=("_date2","max"))
+        dorm["미편성일수"]=(week_end.normalize()-dorm["최근발송일"].dt.normalize()).dt.days
+        dorm=dorm[(dorm["평균매출"]>=3_000_000)&(dorm["최고매출"]>=5_000_000)&(dorm["미편성일수"]>=14)].sort_values(["평균매출","미편성일수"],ascending=[False,False])
+        for _,r in dorm.head(2).iterrows():
+            nxt.append(f"• [{r['상품명']}]은 과거 평균 {compact_money(r['평균매출'])}, 최고 {compact_money(r['최고매출'])}을 기록한 우수 상품으로 최근 {int(r['미편성일수'])}일간 미편성되어 재운영 시점 검토가 필요합니다.")
+
+    month=int(week_end.month) if pd.notna(week_end) else 1
+    operated=" ".join(pw.get("상품명",pd.Series(dtype=str)).fillna("").astype(str).tolist()+pw.get("대카",pd.Series(dtype=str)).fillna("").astype(str).tolist()+pw.get("중카",pd.Series(dtype=str)).fillna("").astype(str).tolist())
+    theme,groups=_season_recommendations(month,operated)
+    nxt.append(f"• 차주는 {theme} 수요를 고려해 {groups} 등 시즌 상품군의 신규·유사신규 상품 발굴 및 TEST를 확대할 필요가 있습니다.")
+    if not poor.empty:
+        nxt.append("• 100만원 미만 부진 상품은 단순 재편성하지 않고 가격 경쟁력·상품 구성·타겟 조건이 개선된 경우에 한해 재TEST하는 것이 좋습니다.")
+
+    return "\n".join([
+        "■ 주간 실적 요약",*summary,"",
+        "■ 상품 운영 시사점",*(product_points[:4] or ["• 금주 상품 성과를 기준으로 재편성 우선순위를 점검할 필요가 있습니다."]),"",
+        "■ 편성 운영 시사점",*(op[:4] or ["• 타겟·요일·시간대·카테고리별 효율을 비교해 편성 우선순위를 조정할 필요가 있습니다."]),"",
+        "■ 차주 운영 제안",*nxt[:5]
+    ])
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -3256,11 +3395,20 @@ elif menu == "주간실적":
         report = build_weekly_analysis(
             week, selected_year, pw, sw, products, sends
         )
-        report = re.sub(r"\n{2,}", "\n", report).strip()
         st.markdown(
             f'<div class="insight-box">{report}</div>',
             unsafe_allow_html=True,
         )
+
+        st.markdown("### 상세 데이터 보기")
+        with st.expander("▶ 주간 상세 분석 펼쳐보기", expanded=False):
+            detail_report = build_weekly_detail_analysis(
+                week, selected_year, pw, sw, products, sends
+            )
+            st.markdown(
+                f'<div class="insight-box">{detail_report}</div>',
+                unsafe_allow_html=True,
+            )
 
     with tabs[1]:
         total_amount = pw["주문금액"].sum()
