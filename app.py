@@ -3012,7 +3012,15 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     if not selected:
         return None
 
-    return "\n".join("• " + _season_single_or_repeat_sentence(x) for x in selected)
+    _season_lines = []
+    _season_seen = set()
+    for x in selected:
+        _line = "• " + _clean_seg_display_text(_season_single_or_repeat_sentence(x))
+        _key = re.sub(r"\s+", " ", _line).strip()
+        if _key not in _season_seen:
+            _season_seen.add(_key)
+            _season_lines.append(_line)
+    return "\n".join(_season_lines)
 
 
 
@@ -3269,6 +3277,120 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
         out.append(subject + " " + " > ".join(parts))
 
     return "\n".join(out)
+
+
+def _normalize_reco_product_key(name: str) -> str:
+    """추천 중복 판정용 상품 키. 접두어/모델 표기 차이를 완화하되 과도한 상품 통합은 피함."""
+    s = _clean_text_value(name).lower()
+    s = re.sub(r"\[(?:m|단독|무료배송|쇼라[^\]]*)\]", " ", s)
+    s = re.sub(r"★\s*단독", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _extract_bracket_or_subject_product(sentence: str) -> str:
+    s = _clean_text_value(sentence)
+    m = re.search(r"\[([^\]]+)\]", s)
+    if m:
+        return _clean_text_value(m.group(1))
+    # bullet 뒤 첫 서술부를 상품명 후보로 사용
+    s = re.sub(r"^[•\-\s]+", "", s)
+    for token in [" 상품은 ", "은 ", "는 ", "이 ", "가 "]:
+        if token in s:
+            return _clean_text_value(s.split(token, 1)[0])
+    return ""
+
+def _recommendation_priority(sentence: str) -> int:
+    """같은 상품이 여러 추천 규칙에 걸릴 때 가장 정보량 높은 문장을 우선."""
+    s = str(sentence)
+    score = 0
+    if "동시즌" in s: score += 8
+    if "최근" in s and "미편성" in s: score += 5
+    if "누적" in s: score += 4
+    if "500만원 이상" in s: score += 4
+    if "평균" in s and "최고" in s: score += 3
+    if "혜택가" in s or "가격" in s: score += 3
+    if "타겟" in s or "SEG" in s: score += 2
+    if "신규·유사신규" in s: score += 1
+    return score
+
+def _clean_seg_display_text(s: str) -> str:
+    """SEG 숫자가 1.0/2.0/3.0으로 노출되는 문제 및 조사 오류 보정."""
+    s = str(s)
+    s = re.sub(r"\b(남성|여성)\s*(3040|5060)\s+([123])\.0\b", r"\1 \2 SEG\3", s)
+    s = re.sub(r"\bSEG\s*([123])\.0\b", r"SEG\1", s, flags=re.I)
+    s = re.sub(r"선풍기·서큘레이터으로", "선풍기·서큘레이터로", s)
+    s = re.sub(r"선풍기·서큘레이터을", "선풍기·서큘레이터를", s)
+    return s
+
+def _dedupe_next_week_recommendations(points):
+    """
+    모든 주차 공통 적용.
+    - 완전 동일 문장 제거
+    - 동일 상품이 시즌/미편성/재편성 규칙에 중복 포착되면 1개만 유지
+    - 시즌+미편성은 정보량 높은 시즌 문장을 우선
+    """
+    if not points:
+        return points
+
+    # 문자열/리스트 모두 지원
+    was_string = isinstance(points, str)
+    rows = [x.strip() for x in str(points).splitlines() if x.strip()] if was_string else [str(x).strip() for x in points if str(x).strip()]
+
+    # exact dedupe
+    exact = []
+    seen = set()
+    for r in rows:
+        c = _clean_seg_display_text(r)
+        key = re.sub(r"\s+", " ", c).strip()
+        if key not in seen:
+            seen.add(key)
+            exact.append(c)
+
+    # product-level dedupe
+    product_best = {}
+    non_product = []
+    order = []
+    for r in exact:
+        pname = _extract_bracket_or_subject_product(r)
+        if not pname:
+            non_product.append(r)
+            continue
+        key = _normalize_reco_product_key(pname)
+        if not key:
+            non_product.append(r)
+            continue
+        if key not in product_best:
+            product_best[key] = r
+            order.append(key)
+        else:
+            old = product_best[key]
+            if _recommendation_priority(r) > _recommendation_priority(old):
+                product_best[key] = r
+
+    merged = [product_best[k] for k in order] + non_product
+
+    # second exact pass after cleanup
+    final, seen2 = [], set()
+    for r in merged:
+        k = re.sub(r"\s+", " ", r).strip()
+        if k not in seen2:
+            seen2.add(k)
+            final.append(r)
+
+    return "\n".join(final) if was_string else final
+
+
+def _style_total_row(df: pd.DataFrame):
+    """총합계 행을 일반 행과 시각적으로 구분."""
+    def _row_style(row):
+        first = _clean_text_value(row.iloc[0]) if len(row) else ""
+        if first in ["총합계", "합계", "Total", "TOTAL"]:
+            return ["background-color: rgba(120, 120, 120, 0.16); font-weight: 700;" for _ in row]
+        return ["" for _ in row]
+    try:
+        return df.style.apply(_row_style, axis=1)
+    except Exception:
+        return df
 
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
