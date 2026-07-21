@@ -2190,6 +2190,24 @@ def _season_recommendations(month: int, operated_text: str):
     return theme, "·".join(fresh)
 
 
+
+def _short_weekly_product_name(name: str) -> str:
+    """주간 요약 화면용 상품명 축약. 원본 데이터/상세 분석에는 영향 없음."""
+    s = str(name or "").strip()
+    # 반복되는 운영 태그 제거
+    s = re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", s)
+    s = re.sub(r"^\s*\(M\)\s*", "", s, flags=re.I)
+    s = re.sub(r"^\s*M\]\s*", "", s, flags=re.I)
+    # 괄호 안의 배송/소비기한/증정 등 긴 부가정보 제거
+    s = re.sub(r"\s*\((?:무료배송|소비기한|재고부족|편성|추가|증정)[^)]*\)", "", s, flags=re.I)
+    # 구분자 뒤 긴 구성 설명은 화면에서 축약
+    s = re.split(r"\s*/\s*|\s+\+\s+", s)[0].strip()
+    # 지나치게 긴 경우 핵심 앞부분만 표시
+    if len(s) > 34:
+        s = s[:34].rstrip() + "…"
+    return s or str(name)
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
@@ -2239,12 +2257,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     poor = rank[rank["주문금액"]<1_000_000]
     product_points=[]
     if not core.empty:
-        product_points.append("• " + ", ".join(core.head(4)["상품명"].astype(str)) + " 등 500만원 이상 핵심 상품이 주간 매출을 견인했습니다.")
+        product_points.append("• " + ", ".join(_short_weekly_product_name(x) for x in core.head(4)["상품명"].astype(str)) + " 등 500만원 이상 핵심 상품이 주간 매출을 견인했습니다.")
     if not rank.empty:
         r=rank.iloc[0]
-        product_points.append(f"• [{r['상품명']}]이 {compact_money(r['주문금액'])}으로 금주 최고 매출을 기록해 우선 재편성 후보로 확인됩니다.")
+        product_points.append(f"• {_short_weekly_product_name(r['상품명'])}이 {compact_money(r['주문금액'])}으로 금주 최고 매출을 기록해 우선 재편성 후보로 확인됩니다.")
     if not poor.empty:
-        product_points.append("• " + ", ".join(poor.head(4)["상품명"].astype(str)) + " 등 100만원 미만 상품은 가격·구성·타겟 재점검 후 선택적 재TEST가 필요합니다.")
+        product_points.append("• " + ", ".join(_short_weekly_product_name(x) for x in poor.head(4)["상품명"].astype(str)) + " 등 100만원 미만 상품은 가격·구성·타겟 재점검 후 선택적 재TEST가 필요합니다.")
 
     seg=grouped_send_table(sw,["성별","연령"])
     weekday=grouped_send_table(sw,["요일"])
@@ -2264,7 +2282,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     nxt=[]
     if not core.empty:
-        nxt.append("• 금주 핵심 상품인 " + ", ".join(core.head(3)["상품명"].astype(str)) + "은 검증된 고성과 타겟 중심으로 재편성하되 동일 SEG 연속 반복은 피하고 미발송 SEG 추가 TEST를 병행하는 것이 좋습니다.")
+        nxt.append("• 금주 핵심 상품인 " + ", ".join(_short_weekly_product_name(x) for x in core.head(3)["상품명"].astype(str)) + "은 검증된 고성과 타겟 중심으로 재편성하되 동일 SEG 연속 반복은 피하고 미발송 SEG 추가 TEST를 병행하는 것이 좋습니다.")
 
     week_end=pd.to_datetime(pw["_date"],errors="coerce").max()
     current=set(pw["상품명"].dropna().astype(str))
@@ -2276,7 +2294,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         dorm["미편성일수"]=(week_end.normalize()-dorm["최근발송일"].dt.normalize()).dt.days
         dorm=dorm[(dorm["평균매출"]>=3_000_000)&(dorm["최고매출"]>=5_000_000)&(dorm["미편성일수"]>=14)].sort_values(["평균매출","미편성일수"],ascending=[False,False])
         for _,r in dorm.head(2).iterrows():
-            nxt.append(f"• [{r['상품명']}]은 과거 평균 {compact_money(r['평균매출'])}, 최고 {compact_money(r['최고매출'])}을 기록한 우수 상품으로 최근 {int(r['미편성일수'])}일간 미편성되어 재운영 시점 검토가 필요합니다.")
+            nxt.append(f"• {_short_weekly_product_name(r['상품명'])}은 과거 평균 {compact_money(r['평균매출'])}, 최고 {compact_money(r['최고매출'])}을 기록한 우수 상품으로 최근 {int(r['미편성일수'])}일간 미편성되어 재운영 시점 검토가 필요합니다.")
 
     month=int(week_end.month) if pd.notna(week_end) else 1
     operated=" ".join(pw.get("상품명",pd.Series(dtype=str)).fillna("").astype(str).tolist()+pw.get("대카",pd.Series(dtype=str)).fillna("").astype(str).tolist()+pw.get("중카",pd.Series(dtype=str)).fillna("").astype(str).tolist())
@@ -3395,20 +3413,73 @@ elif menu == "주간실적":
         report = build_weekly_analysis(
             week, selected_year, pw, sw, products, sends
         )
+        # 4개 의사결정 섹션: 제목은 굵게, 내용은 불필요한 빈 줄 없이 한 줄씩 표시
+        report_lines = [line.strip() for line in report.splitlines() if line.strip()]
+        report_html = []
+        for line in report_lines:
+            if line.startswith("■ "):
+                report_html.append(
+                    f'<div style="font-weight:700; margin-top:14px; margin-bottom:4px;">{line}</div>'
+                )
+            else:
+                report_html.append(
+                    f'<div style="margin:0 0 3px 0; line-height:1.55;">{line}</div>'
+                )
         st.markdown(
-            f'<div class="insight-box">{report}</div>',
+            '<div class="insight-box">' + "".join(report_html) + '</div>',
             unsafe_allow_html=True,
         )
 
         st.markdown("### 상세 데이터 보기")
-        with st.expander("▶ 주간 상세 분석 펼쳐보기", expanded=False):
-            detail_report = build_weekly_detail_analysis(
-                week, selected_year, pw, sw, products, sends
-            )
-            st.markdown(
-                f'<div class="insight-box">{detail_report}</div>',
-                unsafe_allow_html=True,
-            )
+        detail_sections = [
+            "MMS 상품 실적",
+            "MMS 발송 통계",
+            "카테고리 분석",
+            "SEG 분석",
+            "요일·시간대 분석",
+            "상품별 상세 인사이트",
+            "가격·카테고리 상세",
+        ]
+        detail_report = build_weekly_detail_analysis(
+            week, selected_year, pw, sw, products, sends
+        )
+        # 기존 상세 분석의 각 섹션을 개별 한 줄 expander로 분리
+        detail_map = {}
+        current_title = None
+        current_lines = []
+        title_map = {
+            "■ MMS 상품 실적": "MMS 상품 실적",
+            "■ MMS 발송 통계": "MMS 발송 통계",
+            "■ 카테고리 분석": "카테고리 분석",
+            "■ SEG 분석": "SEG 분석",
+            "■ 요일·시간대 분석": "요일·시간대 분석",
+            "■ 상품 인사이트": "상품별 상세 인사이트",
+            "■ 가격·카테고리 인사이트": "가격·카테고리 상세",
+        }
+        for raw_line in detail_report.splitlines():
+            line = raw_line.strip()
+            if line in title_map:
+                if current_title is not None:
+                    detail_map[current_title] = "\n".join(current_lines).strip()
+                current_title = title_map[line]
+                current_lines = []
+            elif current_title is not None and line:
+                current_lines.append(line)
+        if current_title is not None:
+            detail_map[current_title] = "\n".join(current_lines).strip()
+
+        for section_name in detail_sections:
+            with st.expander(f"▶ {section_name}", expanded=False):
+                section_text = detail_map.get(section_name, "해당 기간 데이터가 없습니다.")
+                section_lines = [x.strip() for x in section_text.splitlines() if x.strip()]
+                section_html = "".join(
+                    f'<div style="margin:0 0 3px 0; line-height:1.55;">{x}</div>'
+                    for x in section_lines
+                )
+                st.markdown(
+                    f'<div class="insight-box">{section_html}</div>',
+                    unsafe_allow_html=True,
+                )
 
     with tabs[1]:
         total_amount = pw["주문금액"].sum()
