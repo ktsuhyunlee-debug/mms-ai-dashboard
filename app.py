@@ -3778,6 +3778,73 @@ def _weekly_table_styler(formatted_df: pd.DataFrame):
     except Exception:
         return formatted_df
 
+
+def _render_weekly_category_table(df: pd.DataFrame, height: int):
+    """대/중카테고리 표: 기본 표 형태를 유지하면서 총합계 검정/흰글씨/Bold를 확실히 렌더."""
+    def _style_row(row):
+        vals = [_clean_text_value(v) for v in row.tolist()]
+        if any(v == "총합계" for v in vals):
+            return [
+                "background-color:#000000 !important;"
+                "color:#FFFFFF !important;"
+                "-webkit-text-fill-color:#FFFFFF !important;"
+                "font-weight:700 !important;"
+                for _ in row
+            ]
+        return ["" for _ in row]
+
+    styler = (
+        df.style
+        .apply(_style_row, axis=1)
+        .hide(axis="index")
+        .set_table_styles([
+            {
+                "selector": "table",
+                "props": [
+                    ("width", "100%"),
+                    ("border-collapse", "collapse"),
+                    ("font-size", "14px"),
+                ],
+            },
+            {
+                "selector": "th",
+                "props": [
+                    ("text-align", "center"),
+                    ("vertical-align", "middle"),
+                    ("padding", "8px 10px"),
+                    ("border", "1px solid #E5E7EB"),
+                    ("background-color", "#F8FAFC"),
+                    ("font-weight", "600"),
+                    ("white-space", "nowrap"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("padding", "8px 10px"),
+                    ("border", "1px solid #E5E7EB"),
+                    ("white-space", "nowrap"),
+                ],
+            },
+        ], overwrite=False)
+    )
+    table_html = styler.to_html()
+    st.markdown(
+        f"""
+        <div style="
+            width:100%;
+            max-height:{height}px;
+            overflow:auto;
+            border:1px solid #E5E7EB;
+            border-radius:0 0 12px 12px;
+        ">
+        {table_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5567,12 +5634,7 @@ elif menu == "주간실적":
         )
         _weekly_table_title("대카테고리 편성 및 주문 비중")
         _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
-        st.dataframe(
-            _weekly_table_styler(_big_table_display),
-            use_container_width=True,
-            hide_index=True,
-            height=430,
-        )
+        _render_weekly_category_table(_big_table_display, height=430)
 
     with cat_right:
         mid_table = category_summary_table(pw, "중카", week, selected_year)
@@ -5583,12 +5645,7 @@ elif menu == "주간실적":
         )
         _weekly_table_title("중카테고리 편성 및 주문 비중")
         _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
-        st.dataframe(
-            _weekly_table_styler(_mid_table_display),
-            use_container_width=True,
-            hide_index=True,
-            height=560,
-        )
+        _render_weekly_category_table(_mid_table_display, height=560)
 
     tabs = st.tabs([
         "주간실적 분석", "상품 실적", "소재 실적",
@@ -5699,12 +5756,21 @@ elif menu == "주간실적":
     with tabs[1]:
         total_amount = pw["주문금액"].sum()
         pw["주문비중"] = pw["주문금액"] / total_amount if total_amount else 0
-        sort_cols = [c for c in ["_date", "시간대", "전시순서"] if c in pw.columns]
-        product_sorted = pw.sort_values(sort_cols) if sort_cols else pw
-        cols = [
-            "일자", "요일", "시간대", "성별", "연령", "소재",
-            "전시순서", "추가노출", "상품명", "멤버십혜택가",
-            "주문건수", "주문수량", "주문금액", "주문비중"
+        sort_cols = [
+            "일자",
+            "요일",
+            "시간대",
+            "성별",
+            "연령",
+            "소재",
+            "전시순서",
+            "추가노출",
+            "상품명",
+            "멤버십혜택가",
+            "주문건수",
+            "주문수량",
+            "주문금액",
+            "주문비중",
         ]
         view = product_sorted[[c for c in cols if c in product_sorted.columns]].copy()
         total = {c: "" for c in view.columns}
@@ -5720,74 +5786,15 @@ elif menu == "주간실적":
             if "주문금액" in view.columns else []
         )
         formatted_view = clean_identifier_columns(weekly_display_format(view))
-        # Streamlit DataFrame(Grid)은 Styler의 글자색을 일부 무시할 수 있어,
-        # 주간 상품실적 표는 HTML 렌더로 총합계 흰색/Bold를 확실히 보장한다.
-        _weekly_product_html = formatted_view.copy()
-
-        def _weekly_product_html_style(row):
-            vals = [_clean_text_value(v) for v in row.tolist()]
-            if any(v == "총합계" for v in vals):
-                return [
-                    "background-color:#000000 !important;"
-                    "color:#FFFFFF !important;"
-                    "-webkit-text-fill-color:#FFFFFF !important;"
-                    "font-weight:700 !important;"
-                    for _ in row
-                ]
-
-            try:
-                idx = row.name
-                amount = float(raw_amounts[idx]) if idx < len(raw_amounts) else float("nan")
-            except Exception:
-                amount = float("nan")
-
-            if pd.notna(amount) and amount >= 3_000_000:
-                return ["background-color:#fff2cc;" for _ in row]
-            if pd.notna(amount) and amount < 1_000_000:
-                return ["background-color:#e7e6e6;" for _ in row]
-            return ["" for _ in row]
-
-        _weekly_product_styler = (
-            _weekly_product_html.style
-            .apply(_weekly_product_html_style, axis=1)
-            .hide(axis="index")
-            .set_table_styles([
-                {
-                    "selector": "table",
-                    "props": [
-                        ("width", "100%"),
-                        ("border-collapse", "collapse"),
-                        ("font-size", "14px"),
-                    ],
-                },
-                {
-                    "selector": "th",
-                    "props": [
-                        ("text-align", "center"),
-                        ("vertical-align", "middle"),
-                        ("padding", "8px"),
-                        ("border", "1px solid #E5E7EB"),
-                        ("white-space", "nowrap"),
-                    ],
-                },
-                {
-                    "selector": "td",
-                    "props": [
-                        ("padding", "8px"),
-                        ("border", "1px solid #E5E7EB"),
-                        ("white-space", "nowrap"),
-                    ],
-                },
-            ], overwrite=False)
+        styled_view = formatted_view.style.apply(
+            lambda _: style_weekly_product_rows(formatted_view, raw_amounts),
+            axis=None,
         )
-        _weekly_product_table_html = _weekly_product_styler.to_html()
-        st.markdown(
-            """
-            <div style="width:100%; max-height:680px; overflow:auto; border-radius:0 0 14px 14px;">
-            """ + _weekly_product_table_html + """
-            </div>
-            """,
-            unsafe_allow_html=True,
+        st.dataframe(
+            styled_view,
+            use_container_width=True,
+            hide_index=True,
+            height=680,
         )
 
     with tabs[2]:
