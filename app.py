@@ -1974,14 +1974,24 @@ def clean_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
-    """주간 상품실적 행 스타일. 총합계는 항상 검은 배경/흰 글씨."""
+    """주간 상품실적 행 스타일. 총합계는 흰 배경 + 진한 Bold로 표시합니다."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
 
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
             break
 
-        # 총합계 행은 금액 조건보다 최우선 적용
+        # 총합계는 주문금액이 커도 고성과 연노랑보다 최우선 적용
+        row_values = [
+            _clean_text_value(v)
+            for v in formatted_df.iloc[idx].tolist()
+        ]
+        if any(v == "총합계" for v in row_values):
+            styles.iloc[idx, :] = (
+                "background-color: #ffffff !important; "
+                "font-weight: 800 !important;"
+            )
+            continue
 
         try:
             value = float(amount)
@@ -3682,6 +3692,25 @@ def _weekly_table_title(title: str):
         ),
         unsafe_allow_html=True,
     )
+
+
+
+def _style_weekly_category_total(df: pd.DataFrame):
+    """대/중카테고리 표의 총합계만 흰 배경 + 진한 Bold로 표시합니다."""
+    def _row_style(row):
+        values = [_clean_text_value(v) for v in row.tolist()]
+        if any(v == "총합계" for v in values):
+            return [
+                "background-color: #ffffff !important; "
+                "font-weight: 800 !important;"
+                for _ in row
+            ]
+        return ["" for _ in row]
+
+    try:
+        return df.style.apply(_row_style, axis=1)
+    except Exception:
+        return df
 
 
 
@@ -5473,8 +5502,9 @@ elif menu == "주간실적":
             config={"displayModeBar": False},
         )
         _weekly_table_title("대카테고리 편성 및 주문 비중")
+        _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
         st.dataframe(
-            clean_identifier_columns(weekly_display_format(big_table)),
+            _style_weekly_category_total(_big_table_display),
             use_container_width=True,
             hide_index=True,
             height=430,
@@ -5488,8 +5518,9 @@ elif menu == "주간실적":
             config={"displayModeBar": False},
         )
         _weekly_table_title("중카테고리 편성 및 주문 비중")
+        _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
         st.dataframe(
-            clean_identifier_columns(weekly_display_format(mid_table)),
+            _style_weekly_category_total(_mid_table_display),
             use_container_width=True,
             hide_index=True,
             height=560,
