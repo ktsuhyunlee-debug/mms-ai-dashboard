@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 from pathlib import Path
 import re
 from datetime import datetime
@@ -2883,6 +2884,306 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     )
 
 
+
+def _get_secret_value(*names):
+    """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
+    for name in names:
+        try:
+            value = st.secrets.get(name)
+            if value:
+                return str(value).strip()
+        except Exception:
+            pass
+        value = os.getenv(name)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def _naver_trend_credentials():
+    """
+    NAVER API HUB 인증정보.
+    권장 Secrets:
+      NAVER_API_HUB_CLIENT_ID
+      NAVER_API_HUB_CLIENT_SECRET
+    """
+    cid = _get_secret_value(
+        "NAVER_API_HUB_CLIENT_ID",
+        "NAVER_API_CLIENT_ID",
+    )
+    secret = _get_secret_value(
+        "NAVER_API_HUB_CLIENT_SECRET",
+        "NAVER_API_CLIENT_SECRET",
+    )
+    return cid, secret
+
+
+def _naver_trend_seed_catalog(month: int):
+    """
+    Shopping Insight는 '임의의 실시간 인기 키워드 목록'을 반환하는 API가 아니라
+    지정한 키워드의 쇼핑 클릭 추이를 조회하는 API이므로,
+    현재 월/시즌에 맞는 후보군을 코드 내부에서 자동 선정해 상승폭을 비교한다.
+    """
+    common = [
+        ("생필품", "50000008", ["휴지", "세제", "샴푸", "치약", "생수"]),
+        ("건강식품", "50000006", ["유산균", "비타민", "오메가3", "단백질", "건강기능식품"]),
+        ("디지털가전", "50000003", ["무선이어폰", "면도기", "소형가전", "마사지기", "로봇청소기"]),
+    ]
+    seasonal = {
+        1: [("겨울", "50000003", ["온풍기", "전기요", "가습기", "히터", "온열매트"])],
+        2: [("신학기", "50000003", ["태블릿", "노트북", "이어폰", "백팩", "책상"])],
+        3: [("봄", "50000000", ["봄자켓", "트렌치코트", "운동화", "청소기", "공기청정기"])],
+        4: [("나들이", "50000000", ["선크림", "운동화", "바람막이", "캠핑용품", "도시락"])],
+        5: [("가정의달", "50000006", ["건강식품", "안마기", "화장품세트", "소형가전", "선물세트"])],
+        6: [("초여름", "50000003", ["선풍기", "서큘레이터", "제습기", "선크림", "냉감티셔츠"])],
+        7: [
+            ("휴가", "50000005", ["캐리어", "여행가방", "여행용파우치", "기내용캐리어", "보스턴백"]),
+            ("여름뷰티", "50000002", ["선스틱", "선크림", "선쿠션", "쿨링화장품", "데오드란트"]),
+            ("여름가전", "50000003", ["휴대용선풍기", "서큘레이터", "제습기", "냉풍기", "미니선풍기"]),
+            ("여름패션", "50000000", ["냉감티셔츠", "기능성티셔츠", "래쉬가드", "샌들", "아쿠아슈즈"]),
+        ],
+        8: [
+            ("휴가", "50000005", ["캐리어", "여행가방", "여행용파우치", "기내용캐리어", "보스턴백"]),
+            ("여름뷰티", "50000002", ["선스틱", "선크림", "선쿠션", "데오드란트", "쿨링화장품"]),
+            ("여름가전", "50000003", ["휴대용선풍기", "서큘레이터", "제습기", "냉풍기", "미니선풍기"]),
+        ],
+        9: [("추석", "50000006", ["선물세트", "한우", "건강식품", "과일세트", "홍삼"])],
+        10: [("가을", "50000000", ["가디건", "경량패딩", "등산복", "온열매트", "가습기"])],
+        11: [("겨울준비", "50000003", ["온풍기", "전기요", "가습기", "패딩", "온열매트"])],
+        12: [("연말", "50000006", ["선물세트", "홈파티", "와인잔", "향수", "소형가전"])],
+    }
+    return seasonal.get(month, []) + common
+
+
+def _naver_shopping_keyword_scores(as_of_date, timeout=8):
+    """
+    NAVER API HUB Shopping Insight의 키워드별 트렌드 조회.
+    최근 7일 평균 관심도 vs 직전 7일 평균 관심도를 비교해 상승률 계산.
+    인증정보/통신/API 응답 문제 시 [] 반환 → 기존 대시보드에는 영향 없음.
+    """
+    cid, secret = _naver_trend_credentials()
+    if not cid or not secret:
+        return []
+
+    end = pd.Timestamp(as_of_date).normalize()
+    start = end - pd.Timedelta(days=13)
+
+    url = "https://naverapihub.apigw.ntruss.com/shopping/v1/category/keywords"
+    headers = {
+        "X-NCP-APIGW-API-KEY-ID": cid,
+        "X-NCP-APIGW-API-KEY": secret,
+        "Content-Type": "application/json",
+    }
+
+    output = []
+    for theme, category_id, keywords in _naver_trend_seed_catalog(int(end.month)):
+        # API는 한 요청에 복수 keyword group을 받을 수 있으므로 최대 5개씩 묶음.
+        keyword_groups = [
+            {"name": kw, "param": [kw]}
+            for kw in keywords[:5]
+        ]
+        payload = {
+            "startDate": start.strftime("%Y-%m-%d"),
+            "endDate": end.strftime("%Y-%m-%d"),
+            "timeUnit": "date",
+            "category": str(category_id),
+            "keyword": keyword_groups,
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:
+            continue
+
+        for result in data.get("results", []):
+            title = str(result.get("title", "")).strip()
+            points = result.get("data", []) or []
+            if not title or len(points) < 8:
+                continue
+            vals = []
+            for p in points:
+                try:
+                    vals.append((pd.Timestamp(p.get("period")), float(p.get("ratio", 0))))
+                except Exception:
+                    pass
+            vals = sorted(vals, key=lambda x: x[0])
+            if len(vals) < 8:
+                continue
+            recent = [v for _, v in vals[-7:]]
+            previous = [v for _, v in vals[-14:-7]] if len(vals) >= 14 else [v for _, v in vals[:-7]]
+            if not previous:
+                continue
+            recent_avg = sum(recent) / len(recent)
+            prev_avg = sum(previous) / len(previous)
+            growth = ((recent_avg - prev_avg) / prev_avg * 100) if prev_avg > 0 else None
+            output.append({
+                "theme": theme,
+                "keyword": title,
+                "recent_avg": recent_avg,
+                "prev_avg": prev_avg,
+                "growth": growth,
+            })
+
+    # 최근 관심도와 상승률을 함께 반영하되, 전주 평균 0은 강한 트렌드로 단정하지 않음.
+    output = [x for x in output if x["growth"] is not None]
+    return sorted(
+        output,
+        key=lambda x: (x["growth"], x["recent_avg"]),
+        reverse=True,
+    )
+
+
+def _match_trend_to_mms_history(keyword: str, products_all: pd.DataFrame, week_end):
+    """
+    외부 트렌드 키워드를 내부 MMS 과거 이력과 교차검증.
+    키워드 직접 포함 + 일부 대표 동의어 매핑만 사용하며, 근거가 없으면 None.
+    """
+    aliases = {
+        "기내용캐리어": ["캐리어"],
+        "여행가방": ["캐리어", "여행가방"],
+        "휴대용선풍기": ["선풍기", "써큘레이터", "서큘레이터"],
+        "미니선풍기": ["선풍기"],
+        "냉감티셔츠": ["냉감", "드라이셀", "기능성", "언더셔츠"],
+        "기능성티셔츠": ["기능성", "드라이셀", "언더셔츠"],
+        "선스틱": ["선스틱"],
+        "선크림": ["선크림"],
+        "선쿠션": ["선쿠션"],
+        "무선이어폰": ["이어폰", "블루투스"],
+        "면도기": ["면도기"],
+        "유산균": ["유산균", "락토핏", "BNR17"],
+    }
+    terms = aliases.get(keyword, [keyword])
+    pattern = "|".join(re.escape(x) for x in terms if x)
+    if not pattern:
+        return None
+
+    df = products_all.copy()
+    df["_date2"] = pd.to_datetime(df["_date"], errors="coerce")
+    hist = df[
+        df["상품명"].fillna("").astype(str).str.contains(pattern, case=False, regex=True)
+        & df["_date2"].notna()
+        & (df["_date2"] <= week_end)
+    ].copy()
+    if hist.empty:
+        return None
+
+    hist["_amt"] = pd.to_numeric(hist["주문금액"], errors="coerce").fillna(0)
+    # 최소 한 번 300만원 이상이어야 'MMS 검증 근거'로 인정.
+    if int((hist["_amt"] >= 3_000_000).sum()) < 1:
+        return None
+
+    price_col = first_col(hist, ["멤버십 혜택가", "행사가", "판매가", "혜택가"])
+    if price_col:
+        hist["_price"] = pd.to_numeric(hist[price_col], errors="coerce")
+    else:
+        hist["_price"] = pd.NA
+
+    # 가장 성과가 좋은 실제 상품
+    prod = (
+        hist.groupby("상품명", as_index=False)
+        .agg(
+            운영횟수=("상품명", "size"),
+            평균매출=("_amt", "mean"),
+            최고매출=("_amt", "max"),
+            고성과횟수=("_amt", lambda x: int((x >= 5_000_000).sum())),
+            평균혜택가=("_price", "mean"),
+        )
+        .sort_values(["고성과횟수", "평균매출", "최고매출"], ascending=False)
+    )
+    if prod.empty:
+        return None
+    best = prod.iloc[0]
+    pname = str(best["상품명"])
+    ph = hist[hist["상품명"].astype(str) == pname].copy()
+
+    # 해당 상품의 고성과 타겟
+    target_cols = [c for c in ["성별", "연령", "SEG"] if c in ph.columns]
+    target = ""
+    target_amt = None
+    if target_cols:
+        tg = (
+            ph.groupby(target_cols, dropna=False)["_amt"]
+            .mean()
+            .reset_index()
+            .sort_values("_amt", ascending=False)
+        )
+        if not tg.empty:
+            r = tg.iloc[0]
+            bits = []
+            if "성별" in target_cols:
+                bits.append(str(r["성별"]))
+            if "연령" in target_cols:
+                bits.append(clean_identifier_value(r["연령"]))
+            if "SEG" in target_cols:
+                bits.append(str(r["SEG"]))
+            target = " ".join(bits)
+            target_amt = float(r["_amt"])
+
+    hp = ph[ph["_amt"] >= 5_000_000]
+    hp_price = (
+        float(pd.to_numeric(hp["_price"], errors="coerce").mean())
+        if not hp.empty and pd.to_numeric(hp["_price"], errors="coerce").notna().any()
+        else None
+    )
+
+    return {
+        "product": pname,
+        "count": int(best["운영횟수"]),
+        "avg_amt": float(best["평균매출"]),
+        "max_amt": float(best["최고매출"]),
+        "ge5": int(best["고성과횟수"]),
+        "avg_price": float(best["평균혜택가"]) if pd.notna(best["평균혜택가"]) else None,
+        "hp_price": hp_price,
+        "target": target,
+        "target_avg": target_amt,
+    }
+
+
+def _latest_trend_action_sentence(products_all: pd.DataFrame, week_end):
+    """
+    외부 최신 트렌드 + 내부 MMS 검증이 모두 있을 때만 차주 운영 제안 1건 생성.
+    외부 API 실패/인증키 없음/내부 근거 없음 → None.
+    """
+    scores = _naver_shopping_keyword_scores(week_end)
+    if not scores:
+        return None
+
+    # 상승률 20% 이상을 우선. 미달이면 '트렌드'로 강하게 표현하지 않음.
+    for tr in scores[:12]:
+        if tr["growth"] < 20:
+            continue
+        evidence = _match_trend_to_mms_history(tr["keyword"], products_all, week_end)
+        if not evidence:
+            continue
+
+        price_bits = []
+        if evidence["avg_price"] is not None:
+            price_bits.append(f"과거 평균 혜택가 {evidence['avg_price']:,.0f}원")
+        if evidence["hp_price"] is not None:
+            price_bits.append(f"500만원 이상 고성과 회차 평균 {evidence['hp_price']:,.0f}원")
+        price_text = ", ".join(price_bits)
+
+        target_text = ""
+        if evidence["target"]:
+            target_text = f", 고성과 타겟 {evidence['target']}"
+            if evidence["target_avg"] is not None:
+                target_text += f" 평균 {compact_money(evidence['target_avg'])}"
+
+        return (
+            f"• NAVER 쇼핑 클릭 트렌드에서 최근 7일 '{tr['keyword']}' 관심도가 직전 7일 대비 "
+            f"{tr['growth']:+.1f}% 상승했습니다. 내부 MMS 이력상 {_short_weekly_product_name(evidence['product'])}은 "
+            f"{evidence['count']}회 운영, 평균 {compact_money(evidence['avg_amt'])}, 최고 {compact_money(evidence['max_amt'])}"
+            + (f", 500만원 이상 {evidence['ge5']}회" if evidence["ge5"] else "")
+            + target_text
+            + (f", {price_text}" if price_text else "")
+            + "의 성과가 확인됐습니다. 최신 관심 상승과 과거 MMS 성과가 동시에 확인된 만큼 "
+              "유사 가격대·구성의 동일/유사 상품을 고성과 타겟 중심으로 신규·유사신규 TEST하는 것이 적절합니다."
+        )
+    return None
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
@@ -3112,6 +3413,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         season_gap=_season_gap_action(pw,products_all,week_end)
         if season_gap and len(nxt)<5:
             nxt.append("• "+season_gap)
+
+    # 최신 외부 트렌드는 내부 MMS 근거까지 교차검증된 경우에만 1건 추가
+    # 기존 핵심 제안이 5개면 강제로 밀어내지 않음.
+    latest_trend_action = _latest_trend_action_sentence(products_all, week_end)
+    if latest_trend_action and len(nxt) < 5:
+        nxt.append(latest_trend_action)
 
     if len(nxt)<4:
         poor_now=pw.groupby("상품명",as_index=False)["주문금액"].sum()
