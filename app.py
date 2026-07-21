@@ -1974,18 +1974,36 @@ def clean_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
+    """주간 상품실적 행 스타일. 총합계는 항상 검은 배경/흰 글씨."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
+
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
             break
+
+        # 총합계 행은 금액 조건보다 최우선 적용
+        row_values = [
+            _clean_text_value(v)
+            for v in formatted_df.iloc[idx].tolist()
+        ]
+        if any(v == "총합계" for v in row_values[:3]):
+            styles.iloc[idx, :] = (
+                "background-color: #000000 !important; "
+                "color: #FFFFFF !important; "
+                "font-weight: 700 !important;"
+            )
+            continue
+
         try:
             value = float(amount)
         except (TypeError, ValueError):
             continue
+
         if value >= 3_000_000:
             styles.iloc[idx, :] = "background-color: #fff2cc"
         elif value < 1_000_000:
             styles.iloc[idx, :] = "background-color: #e7e6e6"
+
     return styles
 
 
@@ -3548,6 +3566,130 @@ def _same_product_master(df: pd.DataFrame, row_a_idx, row_b_idx) -> bool:
     d = _attach_product_master_keys(df)
     return _clean_text_value(d.loc[row_a_idx, "_product_master_key"]) == _clean_text_value(d.loc[row_b_idx, "_product_master_key"])
 
+
+def _sentence_product_master_key(sentence: str, products_all: pd.DataFrame):
+    """
+    추천 문장에 포함된 실제 상품명을 찾아 상품 마스터키 반환.
+    상품명 유사도 병합은 사용하지 않고, 실제 데이터에 존재하는 상품명 일치 → master key 매핑만 사용.
+    """
+    if products_all is None or products_all.empty:
+        return "", ""
+
+    d = _attach_product_master_keys(products_all.copy())
+    pcol = first_col(d, ["상품명", "MMS 상품명", "상품"])
+    if not pcol or "_product_master_key" not in d.columns:
+        return "", ""
+
+    s = str(sentence)
+    candidates = []
+    for _, r in d[[pcol, "_product_master_key"]].dropna(subset=[pcol]).drop_duplicates().iterrows():
+        pname = _clean_text_value(r[pcol])
+        if pname and pname in s:
+            candidates.append((len(pname), pname, _clean_text_value(r["_product_master_key"])))
+
+    if not candidates:
+        return "", ""
+    candidates.sort(reverse=True)
+    _, pname, key = candidates[0]
+    return key, pname
+
+
+def _extract_recent_unassigned_days(sentence: str):
+    m = re.search(r"최근\s*(\d+)일간\s*미편성", str(sentence))
+    return int(m.group(1)) if m else None
+
+
+def _merge_same_product_recommendations(sentences, products_all: pd.DataFrame):
+    """
+    모든 주차 공통:
+    동일 상품 마스터가 '즉시 재편성 / 최근 미편성 / 동시즌 / 시즌성'에 중복 등장하면 1개로 통합.
+    코드가 다르더라도 실질 동일 product master면 통합하고, 다른 master는 절대 합치지 않음.
+    """
+    if not sentences:
+        return sentences
+
+    groups = {}
+    no_product = []
+    order = []
+
+    for raw in sentences:
+        s = _clean_seg_display_text(str(raw).strip())
+        if not s:
+            continue
+        key, pname = _sentence_product_master_key(s, products_all)
+        if not key:
+            no_product.append(s)
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((s, pname))
+
+    merged = []
+    for key in order:
+        items = groups[key]
+        if len(items) == 1:
+            merged.append(items[0][0])
+            continue
+
+        # 가장 근거가 풍부한 문장을 기본으로 선택
+        def score(x):
+            s = x[0]
+            val = 0
+            if "동시즌" in s: val += 10
+            if "300만원 이상" in s: val += 4
+            if "500만원 이상" in s: val += 5
+            if "평균" in s and "최고" in s: val += 4
+            if "혜택가" in s or "가격" in s: val += 4
+            if "타겟" in s or "SEG" in s: val += 3
+            if "미편성" in s: val += 2
+            return val
+
+        items = sorted(items, key=score, reverse=True)
+        base_sentence = items[0][0]
+
+        # 다른 중복 문장에서 최근 미편성 기간만 유용한 근거로 흡수
+        days = None
+        for s, _ in items:
+            d = _extract_recent_unassigned_days(s)
+            if d is not None:
+                days = max(days or 0, d)
+
+        if days is not None and "미편성" not in base_sentence:
+            # 마지막 액션 문장 전에 자연스럽게 삽입
+            marker_candidates = [
+                "현재 판매 가능 여부",
+                "당시와 유사한 가격 조건",
+                "동일 상품 재운영",
+                "신규·유사신규 TEST",
+            ]
+            inserted = False
+            for marker in marker_candidates:
+                pos = base_sentence.find(marker)
+                if pos > 0:
+                    prefix = base_sentence[:pos].rstrip()
+                    suffix = base_sentence[pos:]
+                    if prefix.endswith("."):
+                        base_sentence = prefix + f" 최근 {days}일간 미편성된 상태이며, " + suffix
+                    else:
+                        base_sentence = prefix + f", 최근 {days}일간 미편성된 상태이며, " + suffix
+                    inserted = True
+                    break
+            if not inserted:
+                base_sentence += f" 최근 {days}일간 미편성된 상태입니다."
+
+        merged.append(base_sentence)
+
+    # 상품을 특정하지 않는 카테고리/신규소싱 제안은 유지하되 완전 동일 문장 제거
+    merged.extend(no_product)
+    final, seen = [], set()
+    for s in merged:
+        k = re.sub(r"\s+", " ", s).strip()
+        if k not in seen:
+            seen.add(k)
+            final.append(s)
+    return final
+
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -4253,11 +4395,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 nxt.append(fallback_sentence)
                 seen_sentences.add(fallback_sentence)
 
+    # 모든 주차 공통 최종 중복 제거:
+    # 동일 product master가 여러 추천 규칙에 걸리면 근거를 하나로 병합해 1회만 노출
+    nxt = _merge_same_product_recommendations(nxt, products_all)
+
     return "\n".join([
         "■ 주간 실적 요약",*summary,"",
         "■ 상품 운영 시사점",*(product_points[:5] or ["• 금주 상품 성과를 기준으로 재편성 우선순위를 점검할 필요가 있습니다."]),"",
         "■ 편성 운영 시사점",*(op[:5] or ["• 타겟·요일·시간대·카테고리별 효율을 원인 상품과 함께 비교해 편성 우선순위를 조정할 필요가 있습니다."]),"",
-        "■ 차주 운영 제안",*nxt[:5]
+        "■ 차주 운영 제안",*nxt
     ])
 
 
