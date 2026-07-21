@@ -4924,17 +4924,23 @@ elif menu == "주간실적":
         st.markdown("### 상세 데이터 보기")
 
         # MD 의사결정용 상세
-        _md_rec_df, _md_src_df = _md_recommendation_tables(products_all, pw, week_end)
-        with st.expander("▶ 재편성 추천 상품", expanded=False):
-            if _md_rec_df.empty:
-                st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
-            else:
-                st.dataframe(_md_rec_df, use_container_width=True, hide_index=True)
-        with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
-            if _md_src_df.empty:
-                st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
-            else:
-                st.dataframe(_md_src_df, use_container_width=True, hide_index=True)
+        try:
+            _week_end = pd.to_datetime(pw["_date"], errors="coerce").max()
+            _md_rec_df, _md_src_df = _md_recommendation_tables(products, pw, _week_end)
+
+            with st.expander("▶ 재편성 추천 상품", expanded=False):
+                if _md_rec_df.empty:
+                    st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
+                else:
+                    st.dataframe(_md_rec_df, use_container_width=True, hide_index=True)
+
+            with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
+                if _md_src_df.empty:
+                    st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
+                else:
+                    st.dataframe(_md_src_df, use_container_width=True, hide_index=True)
+        except Exception as _md_exc:
+            st.caption(f"MD 상세 분석을 불러오지 못했습니다: {type(_md_exc).__name__}")
         detail_sections = [
             "MMS 상품 실적",
             "MMS 발송 통계",
