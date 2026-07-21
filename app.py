@@ -2475,6 +2475,269 @@ def _latest_and_high_perf_price(product_name: str, all_products: pd.DataFrame):
     }
 
 
+
+def _product_target_strength_analysis(product_name: str, all_products: pd.DataFrame, week_end):
+    """
+    상품별 성별→연령→SEG 강세와 반복 운영 패턴을 실제 이력으로 판정.
+    프로모션은 이 판정에 사용하지 않음.
+    근거: 운영횟수, 주문금액, 평균매출, 300/500만원 이상 횟수, SPM(가능한 경우).
+    """
+    h = all_products[all_products["상품명"].astype(str) == str(product_name)].copy()
+    if h.empty:
+        return None
+
+    h["_date2"] = pd.to_datetime(h["_date"], errors="coerce")
+    h = h[h["_date2"].notna() & (h["_date2"] <= week_end)].sort_values("_date2")
+    if len(h) < 2:
+        return {"type": "insufficient", "count": len(h)}
+
+    h["_amt"] = pd.to_numeric(h["주문금액"], errors="coerce").fillna(0)
+    send_col = first_col(h, ["발송 성공 건수", "총 발송 건수", "발송건수"])
+    if send_col:
+        h["_send"] = pd.to_numeric(h[send_col], errors="coerce").fillna(0)
+        h["_spm_calc"] = h["_amt"] / h["_send"].replace(0, pd.NA)
+    elif "SPM" in h.columns:
+        h["_spm_calc"] = pd.to_numeric(h["SPM"], errors="coerce")
+    else:
+        h["_spm_calc"] = pd.NA
+
+    def stats(group_cols):
+        g = h.groupby(group_cols, dropna=False).agg(
+            운영횟수=("_amt","size"),
+            평균매출=("_amt","mean"),
+            최고매출=("_amt","max"),
+            삼백이상=("_amt", lambda x: int((x >= 3_000_000).sum())),
+            오백이상=("_amt", lambda x: int((x >= 5_000_000).sum())),
+            평균SPM=("_spm_calc","mean"),
+        ).reset_index()
+        g["고성과율"] = g["오백이상"] / g["운영횟수"]
+        return g
+
+    gender = stats(["성별"]) if "성별" in h.columns else pd.DataFrame()
+    age = stats(["성별","연령"]) if {"성별","연령"}.issubset(h.columns) else pd.DataFrame()
+    seg = stats(["성별","연령","SEG"]) if {"성별","연령","SEG"}.issubset(h.columns) else pd.DataFrame()
+
+    # 동일 타겟 반복 피로도: 최근 동일 성별/연령/SEG 3회 이상 연속 감소 + 최초 대비 30% 이상 감소
+    fatigue = None
+    if {"성별","연령","SEG"}.issubset(h.columns):
+        for keys, sub in h.groupby(["성별","연령","SEG"], dropna=False):
+            sub = sub.sort_values("_date2").tail(4)
+            vals = sub["_amt"].tolist()
+            if len(vals) >= 3:
+                recent = vals[-3:]
+                decreasing = all(recent[i] < recent[i-1] for i in range(1, len(recent)))
+                drop = (recent[0] - recent[-1]) / recent[0] if recent[0] > 0 else 0
+                if decreasing and drop >= 0.30:
+                    fatigue = {
+                        "target": keys, "vals": recent, "drop": drop,
+                        "count": len(sub)
+                    }
+                    break
+
+    # 안정 반복: 동일 성별/연령에서 최근 3회 이상 모두 300만원 이상, SEG 2개 이상이면 강한 근거
+    stable = None
+    if {"성별","연령"}.issubset(h.columns):
+        for keys, sub in h.groupby(["성별","연령"], dropna=False):
+            sub = sub.sort_values("_date2").tail(4)
+            vals = sub["_amt"].tolist()
+            seg_n = sub["SEG"].nunique(dropna=True) if "SEG" in sub.columns else 0
+            if len(vals) >= 3 and all(v >= 3_000_000 for v in vals):
+                stable = {"target": keys, "vals": vals, "seg_n": int(seg_n), "count": len(sub)}
+                break
+
+    # 성별 강세: 양쪽 2회 이상 + 평균매출 1.5배 이상 + SPM도 열위가 아니어야 강세 판정
+    gender_strength = None
+    if len(gender) >= 2:
+        eligible = gender[gender["운영횟수"] >= 2].sort_values("평균매출", ascending=False)
+        if len(eligible) >= 2:
+            a, b = eligible.iloc[0], eligible.iloc[1]
+            ratio = a["평균매출"] / b["평균매출"] if b["평균매출"] > 0 else float("inf")
+            spm_ok = True
+            if pd.notna(a["평균SPM"]) and pd.notna(b["평균SPM"]) and b["평균SPM"] > 0:
+                spm_ok = a["평균SPM"] >= b["평균SPM"]
+            if ratio >= 1.5 and spm_ok:
+                gender_strength = (a, b, ratio)
+
+    # 연령 강세: 같은 성별 안에서 3040/5060 등 2회 이상씩 비교
+    age_strength = None
+    if not age.empty:
+        for gender_name, gg in age.groupby("성별"):
+            eligible = gg[gg["운영횟수"] >= 2].sort_values("평균매출", ascending=False)
+            if len(eligible) >= 2:
+                a, b = eligible.iloc[0], eligible.iloc[1]
+                ratio = a["평균매출"] / b["평균매출"] if b["평균매출"] > 0 else float("inf")
+                spm_ok = True
+                if pd.notna(a["평균SPM"]) and pd.notna(b["평균SPM"]) and b["평균SPM"] > 0:
+                    spm_ok = a["평균SPM"] >= b["평균SPM"]
+                if ratio >= 1.5 and spm_ok:
+                    age_strength = (a, b, ratio)
+                    break
+
+    return {
+        "type": "ok",
+        "fatigue": fatigue,
+        "stable": stable,
+        "gender_strength": gender_strength,
+        "age_strength": age_strength,
+        "gender": gender,
+        "age": age,
+        "seg": seg,
+    }
+
+
+def _target_strength_sentence(product_name: str, analysis):
+    if not analysis or analysis.get("type") != "ok":
+        return None
+    short = _short_weekly_product_name(product_name)
+
+    # 1순위: 동일 타겟 반복 하락
+    f = analysis.get("fatigue")
+    if f:
+        g, a, seg = f["target"]
+        vals = " → ".join(compact_money(v) for v in f["vals"])
+        return (
+            f"• {short}은 동일 타겟 {g}{clean_identifier_value(a)} {seg}에서 최근 3회 주문금액이 "
+            f"{vals}으로 연속 하락해 최초 대비 {f['drop']*100:.0f}% 감소했습니다. "
+            f"타겟 변경에 따른 차이가 아닌 동일 조건 반복 운영에서 성과 둔화가 확인된 만큼, "
+            f"즉시 동일 SEG 재편성보다 최근 미발송 SEG로 전환 TEST하거나 일정 기간 미편성 후 재운영하는 것이 적절합니다."
+        )
+
+    # 2순위: 특정 성별/연령 강세
+    ag = analysis.get("age_strength")
+    if ag:
+        a, b, ratio = ag
+        spm_txt = ""
+        if pd.notna(a["평균SPM"]) and pd.notna(b["평균SPM"]):
+            spm_txt = f", 평균 SPM도 {a['평균SPM']:.1f} vs {b['평균SPM']:.1f}"
+        return (
+            f"• {short}은 {a['성별']}{clean_identifier_value(a['연령'])}에서 {int(a['운영횟수'])}회 평균 "
+            f"{compact_money(a['평균매출'])}, 500만원 이상 {int(a['오백이상'])}회를 기록한 반면 "
+            f"{b['성별']}{clean_identifier_value(b['연령'])}은 {int(b['운영횟수'])}회 평균 {compact_money(b['평균매출'])}"
+            f"{spm_txt}으로 차이가 확인됐습니다. 평균매출이 {ratio:.1f}배 높은 {a['성별']}{clean_identifier_value(a['연령'])}을 "
+            f"우선 편성하되, 해당 연령대 내 고성과 SEG와 미발송 SEG를 순차 TEST하는 것이 적절합니다."
+        )
+
+    gs = analysis.get("gender_strength")
+    if gs:
+        a, b, ratio = gs
+        spm_txt = ""
+        if pd.notna(a["평균SPM"]) and pd.notna(b["평균SPM"]):
+            spm_txt = f", 평균 SPM {a['평균SPM']:.1f} vs {b['평균SPM']:.1f}"
+        return (
+            f"• {short}은 {a['성별']} 타겟 {int(a['운영횟수'])}회 평균 {compact_money(a['평균매출'])}, "
+            f"500만원 이상 {int(a['오백이상'])}회로 {b['성별']} 평균 {compact_money(b['평균매출'])} 대비 {ratio:.1f}배 높았고"
+            f"{spm_txt}로 효율도 함께 확인됐습니다. 단일 회차가 아닌 반복 이력에서 성별 강세가 확인된 만큼 "
+            f"{a['성별']} 중심으로 편성하되 연령·SEG별 성과를 기준으로 세부 타겟을 좁히는 것이 적절합니다."
+        )
+
+    # 3순위: 안정적 반복 운영
+    s = analysis.get("stable")
+    if s:
+        g, a = s["target"]
+        vals = " → ".join(compact_money(v) for v in s["vals"])
+        seg_text = f", {s['seg_n']}개 SEG에서 운영" if s["seg_n"] >= 2 else ""
+        return (
+            f"• {short}은 {g}{clean_identifier_value(a)}에서 최근 {len(s['vals'])}회 주문금액이 {vals}으로 "
+            f"모두 300만원 이상을 유지했고{seg_text}했습니다. 동일 성별·연령에서 반복 성과가 유지돼 "
+            f"해당 타겟 적합도가 확인된 상품으로, 고성과 SEG 순환과 미발송 SEG 확대 TEST를 병행할 수 있습니다."
+        )
+    return None
+
+
+
+def _next_week_action_candidates(pw, products_all, week_end):
+    """근거가 충분한 차주 운영 제안 후보를 점수화. 타겟/가격/성과/미편성/카테고리 근거 사용."""
+    actions=[]; current=set(pw["상품명"].dropna().astype(str))
+    wk=pw.groupby("상품명",as_index=False).agg(주문금액=("주문금액","sum"),금주운영횟수=("상품명","size")).sort_values("주문금액",ascending=False)
+
+    # 즉시 재편성 + 타겟 강세
+    for _,r in wk[wk["주문금액"]>=5_000_000].head(5).iterrows():
+        pname=str(r["상품명"]); hist=_weekly_product_history_stats(pname,products_all,week_end)
+        if not hist: continue
+        ta=_product_target_strength_analysis(pname,products_all,week_end)
+        s=f"{_short_weekly_product_name(pname)}은 금주 {compact_money(r['주문금액'])}, 누적 {hist['count']}회 운영 중 500만원 이상 {hist['ge5m']}회를 기록해 차주 재편성 우선 후보입니다."
+        if ta and ta.get("age_strength"):
+            a,b,ratio=ta["age_strength"]
+            s+=f" {a['성별']}{clean_identifier_value(a['연령'])} 평균매출이 비교 연령대 대비 {ratio:.1f}배 높아 해당 타겟 내 고성과 SEG와 미발송 SEG를 순차 편성하는 것이 적절합니다."
+        elif ta and ta.get("gender_strength"):
+            a,b,ratio=ta["gender_strength"]
+            s+=f" {a['성별']} 평균매출이 {b['성별']} 대비 {ratio:.1f}배 높아 {a['성별']} 중심 편성이 적절합니다."
+        else:
+            s+=" 최근 고성과 타겟을 우선 유지하되 동일 SEG 과다 반복은 피하는 것이 적절합니다."
+        actions.append((100+float(r["주문금액"])/1e6,"즉시 재편성",s))
+
+    histdf=products_all.copy()
+    histdf["_date2"]=pd.to_datetime(histdf["_date"],errors="coerce")
+
+    # 가격 회복 시 재운영
+    for pname,h in histdf.groupby("상품명"):
+        pname=str(pname)
+        if pname in current: continue
+        h=h[h["_date2"].notna()&(h["_date2"]<=week_end)]
+        amt=pd.to_numeric(h["주문금액"],errors="coerce").fillna(0)
+        if len(h)<2 or (amt>=5_000_000).sum()<1: continue
+        pi=_latest_and_high_perf_price(pname,products_all)
+        if not pi or not pi["high_perf_avg_price"]: continue
+        diff=(pi["latest_price"]-pi["high_perf_avg_price"])/pi["high_perf_avg_price"]*100
+        if diff>=10:
+            actions.append((70,"가격 조건",f"{_short_weekly_product_name(pname)}은 과거 500만원 이상 고성과 이력이 있으나 최신 혜택가 {pi['latest_price']:,.0f}원으로 고성과 당시 평균 {pi['high_perf_avg_price']:,.0f}원 대비 {diff:.1f}% 높습니다. 현재 조건에서는 우선순위를 낮추고 과거 고성과 가격대에 근접할 경우 재운영을 검토하는 것이 적절합니다."))
+
+    # 최근 미편성 고성과
+    past=histdf[~histdf["상품명"].astype(str).isin(current)].copy()
+    if not past.empty:
+        dorm=past.groupby("상품명",as_index=False).agg(
+            운영횟수=("상품명","size"),평균매출=("주문금액","mean"),최고매출=("주문금액","max"),
+            최근발송일=("_date2","max"),고성과횟수=("주문금액",lambda x:int((pd.to_numeric(x,errors="coerce").fillna(0)>=5_000_000).sum())))
+        dorm["미편성일수"]=(week_end.normalize()-dorm["최근발송일"].dt.normalize()).dt.days
+        dorm=dorm[(dorm["운영횟수"]>=2)&(dorm["평균매출"]>=3_000_000)&(dorm["고성과횟수"]>=1)&dorm["미편성일수"].between(14,120)]
+        for _,r in dorm.sort_values(["고성과횟수","평균매출"],ascending=False).head(5).iterrows():
+            pname=str(r["상품명"])
+            if _detect_current_product_status(pname,products_all) is False: continue
+            pi=_latest_and_high_perf_price(pname,products_all)
+            if pi and pi["high_perf_avg_price"]:
+                diff=(pi["latest_price"]-pi["high_perf_avg_price"])/pi["high_perf_avg_price"]*100
+                if diff>10: continue
+            actions.append((80+r["고성과횟수"]*2,"최근 미편성",f"{_short_weekly_product_name(pname)}은 과거 {int(r['운영횟수'])}회 중 {int(r['고성과횟수'])}회 500만원 이상, 평균 {compact_money(r['평균매출'])}을 기록했고 최근 {int(r['미편성일수'])}일간 미편성 상태입니다. 최신 데이터에서 판매중지·품절 신호와 큰 폭의 가격 상승이 확인되지 않는 경우 차주 재편성 후보로 검토할 수 있습니다."))
+
+    # 반복 부진 상품이지만 카테고리는 강한 경우 → 상품 교체
+    total=float(pw["주문금액"].sum())
+    cat=pw.groupby("대카",as_index=False)["주문금액"].sum()
+    shares={str(r["대카"]):float(r["주문금액"])/total*100 for _,r in cat.iterrows()} if total else {}
+    for pname,h in products_all.groupby("상품명"):
+        pname=str(pname)
+        if pname not in current: continue
+        hh=h[pd.to_datetime(h["_date"],errors="coerce")<=week_end]
+        vals=pd.to_numeric(hh["주문금액"],errors="coerce").fillna(0)
+        if len(vals)>=2 and int((vals>=3_000_000).sum())==0:
+            wkrow=pw[pw["상품명"].astype(str)==pname]
+            if wkrow.empty: continue
+            catname=str(wkrow["대카"].iloc[0]); share=shares.get(catname,0)
+            if share>=20:
+                actions.append((65,"상품 교체",f"{_short_weekly_product_name(pname)}은 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지했습니다. 카테고리 비중을 줄이기보다 동일 카테고리 내 과거 300만원 이상 성과가 반복된 검증 상품으로 교체하는 것이 적절합니다."))
+
+    seen=set(); out=[]
+    for score,kind,s in sorted(actions,key=lambda x:x[0],reverse=True):
+        if s in seen: continue
+        seen.add(s); out.append((score,kind,s))
+    return out
+
+
+def _season_gap_action(pw, products_all, week_end):
+    """최근 4주 시즌 상품군별 실제 편성 횟수 차이가 클 때만 공백 제안."""
+    start=week_end-pd.Timedelta(days=27)
+    d=pd.to_datetime(products_all["_date"],errors="coerce")
+    recent=products_all[(d>=start)&(d<=week_end)].copy()
+    if int(week_end.month) not in [6,7,8]: return None
+    groups={"냉방가전":r"선풍기|써큘|서큘|에어컨|냉풍","여행용품":r"캐리어|여행|파우치|보스턴백","선케어":r"선크림|선스틱|선쿠션|자외선","냉감·기능성 의류":r"냉감|쿨링|드라이셀|기능성|언더셔츠"}
+    names=recent["상품명"].fillna("").astype(str)
+    counts={k:int(names.str.contains(p,case=False,regex=True).sum()) for k,p in groups.items()}
+    mx=max(counts,key=counts.get); mn=min(counts,key=counts.get)
+    if counts[mx]>=max(3,counts[mn]*2+1):
+        detail=" / ".join(f"{k} {v}회" for k,v in counts.items())
+        return f"최근 4주 시즌 상품 편성은 {detail}로 구성됐습니다. {mx} 편성이 상대적으로 많은 반면 {mn} 편성이 적어, 동일 상품군 반복 확대보다 {mn} 신규·유사신규 상품 TEST를 우선 검토해 시즌 매출원을 분산할 필요가 있습니다."
+    return None
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
@@ -2604,6 +2867,19 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     )
                     break
 
+    # 성별·연령·SEG × 반복 운영 자동 판정
+    # 프로모션은 이 판정에서 제외하고 실제 운영횟수·매출·SPM·고성과율만 사용
+    if not rank.empty:
+        target_sentence_added = 0
+        for pname in rank.head(10)["상품명"].astype(str):
+            ta = _product_target_strength_analysis(pname, products_all, week_end)
+            sentence = _target_strength_sentence(pname, ta)
+            if sentence:
+                product_points.append(sentence)
+                target_sentence_added += 1
+            if target_sentence_added >= 2:
+                break
+
     # 프로모션 효과 분리: 일반기간에서도 성과가 유지되는지 확인
     if not rank.empty:
         for pname in rank.head(8)["상품명"].astype(str):
@@ -2673,92 +2949,26 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 f"• {_short_weekly_product_name(pname)}은 금주 반복 편성 시 회차별 주문금액이 {seq_txt} 흐름을 보였습니다. 반복 편성 여부는 단순 운영횟수가 아니라 회차별 실적 추이를 기준으로 판단하고, 유지 시 단기 재편성·연속 하락 시 일정 기간 미편성 후 재운영하는 방식으로 운영 기준을 차등화할 필요가 있습니다."
             )
 
-    # 차주 운영 제안
-    nxt = []
+    # 차주 운영 제안: 근거가 있는 액션만 중요도 순 4~5개 노출
+    nxt=[]
+    ranked_actions=_next_week_action_candidates(pw,products_all,week_end)
+    used={}
+    for score,kind,sentence in ranked_actions:
+        limit=2 if kind=="즉시 재편성" else 1
+        if used.get(kind,0)>=limit: continue
+        nxt.append("• "+sentence)
+        used[kind]=used.get(kind,0)+1
+        if len(nxt)>=4: break
 
-    # 금주 핵심상품
-    if not core.empty:
-        core_names = ", ".join(_short_weekly_product_name(x) for x in core.head(3)["상품명"].astype(str))
-        nxt.append(
-            f"• 금주 핵심 상품인 {core_names}은 각 상품별 고성과 타겟·SEG를 기준으로 재편성하고, 동일 SEG 연속 반복보다 미발송 SEG를 순차 TEST해 추가 매출 확대 가능성을 확인할 필요가 있습니다."
-        )
+    season_gap=_season_gap_action(pw,products_all,week_end)
+    if season_gap and len(nxt)<5:
+        nxt.append("• "+season_gap)
 
-    # 로우데이터에서 실제 미편성 재편성 후보 발굴
-    current = set(pw["상품명"].dropna().astype(str))
-    hist = products_all[pd.to_datetime(products_all["_date"],errors="coerce") < week_end].copy()
-    hist["_date2"] = pd.to_datetime(hist["_date"],errors="coerce")
-    hist = hist[~hist["상품명"].astype(str).isin(current)]
-    if not hist.empty:
-        dorm = hist.groupby("상품명",as_index=False).agg(
-            운영횟수=("상품명","size"),
-            평균매출=("주문금액","mean"),
-            최고매출=("주문금액","max"),
-            최근발송일=("_date2","max"),
-            고성과횟수=("주문금액", lambda x: int((pd.to_numeric(x,errors="coerce").fillna(0)>=5_000_000).sum()))
-        )
-        dorm["미편성일수"]=(week_end.normalize()-dorm["최근발송일"].dt.normalize()).dt.days
-        dorm = dorm[
-            (dorm["운영횟수"] >= 2)
-            & (dorm["평균매출"] >= 3_000_000)
-            & (dorm["고성과횟수"] >= 1)
-            & (dorm["미편성일수"] >= 14)
-        ].copy()
-        dorm["성공률"] = dorm["고성과횟수"] / dorm["운영횟수"]
-        dorm = dorm.sort_values(["성공률","평균매출","미편성일수"],ascending=[False,False,False])
-
-        # 너무 오래된 상품은 무조건 추천하지 않음: 120일 이내 우선
-        candidate = dorm[dorm["미편성일수"] <= 120].head(6)
-        added = 0
-        for _,r in candidate.iterrows():
-            pname = str(r["상품명"])
-            status = _detect_current_product_status(pname, products_all)
-            if status is False:
-                continue
-
-            price_info = _latest_and_high_perf_price(pname, products_all)
-            price_clause = ""
-            if price_info and price_info["high_perf_avg_price"]:
-                latest_p = price_info["latest_price"]
-                high_p = price_info["high_perf_avg_price"]
-                diff = (latest_p - high_p) / high_p * 100 if high_p else 0
-                if diff > 10:
-                    # 과거 고성과 대비 가격이 크게 오른 상품은 재편성 추천 제외
-                    continue
-                price_clause = f" 현재 혜택가 {latest_p:,.0f}원으로 과거 고성과 운영 평균 혜택가 {high_p:,.0f}원 대비 {diff:+.1f}% 수준입니다."
-
-            promo = _promotion_performance_stats(pname, products_all)
-            promo_clause = ""
-            if promo:
-                pa, na = promo["promo_avg"], promo["normal_avg"]
-                if na > 0 and pa / na >= 1.8:
-                    promo_clause = f" 프로모션 기간 평균 {compact_money(pa)} 대비 일반기간 평균 {compact_money(na)}으로 프로모션 의존도가 높아 일반기간 재편성은 보수적으로 판단해야 합니다."
-                else:
-                    promo_clause = f" 프로모션 기간 평균 {compact_money(pa)}, 일반기간 평균 {compact_money(na)}으로 일반기간에서도 일정 수준의 성과가 확인됩니다."
-
-            status_clause = " 최신 데이터상 판매중지·품절 신호는 확인되지 않았습니다." if status is not False else ""
-            nxt.append(
-                f"• {_short_weekly_product_name(pname)}은 과거 {int(r['운영횟수'])}회 운영 중 {int(r['고성과횟수'])}회 500만원 이상, 평균 {compact_money(r['평균매출'])}을 기록했고 최근 {int(r['미편성일수'])}일간 미편성 상태입니다.{price_clause}{promo_clause}{status_clause} 현재 판매 가능 여부와 가격 경쟁력이 유지되는 경우 차주 재편성 후보로 검토할 수 있습니다."
-            )
-            added += 1
-            if added >= 2:
-                break
-
-    # 시즌 제안
-    month=int(week_end.month) if pd.notna(week_end) else 1
-    operated=" ".join(
-        pw.get("상품명",pd.Series(dtype=str)).fillna("").astype(str).tolist()
-        + pw.get("대카",pd.Series(dtype=str)).fillna("").astype(str).tolist()
-        + pw.get("중카",pd.Series(dtype=str)).fillna("").astype(str).tolist()
-    )
-    theme,groups=_season_recommendations(month,operated)
-    nxt.append(
-        f"• 차주는 {theme} 수요를 고려해 {groups} 등 시즌 상품군의 신규·유사신규 TEST를 확대하되, 이미 반복 운영 중인 상품군보다 최근 편성이 적었던 인접 시즌 상품군을 우선 발굴해 매출원을 넓힐 필요가 있습니다."
-    )
-
-    if not poor.empty:
-        nxt.append(
-            "• 100만원 미만 부진 상품은 단순 재편성하지 않고 개당·장당 실구매가, 과거 유사 가격대 성과, 타겟 적합도까지 확인해 명확한 개선점이 있는 경우에만 재TEST하는 것이 좋습니다."
-        )
+    if len(nxt)<4:
+        poor_now=pw.groupby("상품명",as_index=False)["주문금액"].sum()
+        poor_now=poor_now[poor_now["주문금액"]<1_000_000]
+        if not poor_now.empty:
+            nxt.append("• 금주 100만원 미만 상품은 과거 운영 이력·개당/장당 실구매가·타겟별 성과에서 개선 근거가 확인되는 경우에만 재TEST하고, 동일 조건 반복 부진 상품은 검증된 대체 상품으로 교체하는 것이 적절합니다.")
 
     return "\n".join([
         "■ 주간 실적 요약",*summary,"",
