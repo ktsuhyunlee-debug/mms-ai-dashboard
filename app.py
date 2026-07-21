@@ -1,3 +1,9 @@
+
+# 상품 식별 원칙:
+# - 동일 코드 또는 동일 모델/본품/용량·수량 fingerprint -> 동일 product master로 과거 이력 연결 가능
+# - 단, 증정품/추가구성 차이는 _product_variant_key로 별도 보존
+# - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
+
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
 # VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER
 
@@ -3047,7 +3053,9 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
     _week_product_col = first_col(week_df, ["상품명", "MMS 상품명", "상품"]) if week_df is not None else None
     _week_products = set(week_df[_week_product_col].dropna().astype(str)) if _week_product_col and not week_df.empty else set()
 
-    for pname, g in tmp.groupby(pcol, dropna=True):
+    tmp = _attach_product_master_keys(tmp)
+    for _master_key, g in tmp.groupby("_product_master_key", dropna=True):
+        pname = str(g[pcol].dropna().iloc[-1]) if pcol in g.columns and g[pcol].notna().any() else str(_master_key)
         if not _clean_text_value(pname):
             continue
         if _week_products and str(pname) not in _week_products:
@@ -3126,7 +3134,7 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
     if not pcol or not acol:
         return detail_text
 
-    w = week_df.copy()
+    w = _attach_product_master_keys(week_df.copy())
     w[acol] = pd.to_numeric(w[acol], errors="coerce").fillna(0)
     if dcol:
         w[dcol] = pd.to_datetime(w[dcol], errors="coerce")
@@ -3142,10 +3150,19 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
             original_order.append(pn)
 
     out = []
-    for pname in original_order:
-        g = w[w[pcol].astype(str) == str(pname)].copy()
+    # 상품명 순서 대신 master key 기준으로 통합
+    _master_order = []
+    if "_product_master_key" in w.columns:
+        for _mk in w["_product_master_key"].dropna().astype(str):
+            if _mk not in _master_order:
+                _master_order.append(_mk)
+
+    for _master_key in _master_order:
+        g = w[w["_product_master_key"].astype(str) == str(_master_key)].copy()
         if g.empty:
             continue
+        pname = str(g[pcol].dropna().iloc[-1]) if pcol in g.columns and g[pcol].notna().any() else str(_master_key)
+
         g = g.sort_values(dcol) if dcol else g
         week_total = float(g[acol].sum())
         week_max = float(g[acol].max())
@@ -3159,7 +3176,8 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
             apcol = first_col(all_products, ["상품명", "MMS 상품명", "상품"])
             aacol = first_col(all_products, ["주문금액", "거래액", "매출"])
             if apcol and aacol:
-                hist = all_products[all_products[apcol].astype(str) == str(pname)].copy()
+                _all_master = _attach_product_master_keys(all_products.copy())
+                hist = _all_master[_all_master["_product_master_key"].astype(str) == str(_master_key)].copy()
                 hist[aacol] = pd.to_numeric(hist[aacol], errors="coerce").fillna(0)
         hist_count = len(hist)
         hist_avg = float(hist[aacol].mean()) if not hist.empty else None
@@ -3280,12 +3298,8 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
 
 
 def _normalize_reco_product_key(name: str) -> str:
-    """추천 중복 판정용 상품 키. 접두어/모델 표기 차이를 완화하되 과도한 상품 통합은 피함."""
-    s = _clean_text_value(name).lower()
-    s = re.sub(r"\[(?:m|단독|무료배송|쇼라[^\]]*)\]", " ", s)
-    s = re.sub(r"★\s*단독", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    """DEPRECATED: 추천 중복 판정은 상품 마스터키 기준으로 전환. 이름 유사도 병합 금지."""
+    return _clean_text_value(name)
 
 def _extract_bracket_or_subject_product(sentence: str) -> str:
     s = _clean_text_value(sentence)
@@ -3385,12 +3399,154 @@ def _style_total_row(df: pd.DataFrame):
     def _row_style(row):
         first = _clean_text_value(row.iloc[0]) if len(row) else ""
         if first in ["총합계", "합계", "Total", "TOTAL"]:
-            return ["background-color: rgba(120, 120, 120, 0.16); font-weight: 700;" for _ in row]
+            return ["background-color: #000000; color: #FFFFFF; font-weight: 700;" for _ in row]
         return ["" for _ in row]
     try:
         return df.style.apply(_row_style, axis=1)
     except Exception:
         return df
+
+
+def _normalize_core_product_name(name: str) -> str:
+    """
+    코드 변경 전후 동일 상품 판정을 위한 핵심 상품명 정규화.
+    단순 접두어/프로모션 문구만 제거하며 모델/용량/수량/본품 구성은 유지한다.
+    """
+    s = _clean_text_value(name).lower()
+    s = re.sub(r"\[(?:m|단독|무료배송|쇼라[^\]]*|특별혜택가)\]", " ", s)
+    s = re.sub(r"★\s*단독", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _extract_model_tokens(name: str):
+    """모델명 후보 추출. 영문+숫자 조합을 우선 식별."""
+    s = _clean_text_value(name).upper()
+    toks = re.findall(r"\b[A-Z]{1,6}[-_/]?[A-Z0-9]{2,}\b", s)
+    # 지나치게 일반적인 토큰 제거
+    bad = {"MMS", "NEW", "SET", "EA", "ML", "KG"}
+    return tuple(sorted(set(t for t in toks if t not in bad)))
+
+
+def _extract_quantity_signature(name: str):
+    """
+    용량/수량/구성 시그니처.
+    120포, 3통, 500ml, 20캔, 36개, 1+1, 3+3 등 핵심 구성 차이를 유지한다.
+    """
+    s = _clean_text_value(name).lower()
+    pats = [
+        r"\d+(?:\.\d+)?\s*(?:ml|l|g|kg|포|통|캔|개|매|롤|팩|봉|병|입|개월|인치)",
+        r"\d+\s*[x×]\s*\d+",
+        r"\d+\s*\+\s*\d+",
+    ]
+    vals = []
+    for p in pats:
+        vals.extend(re.findall(p, s))
+    return tuple(sorted(set(re.sub(r"\s+", "", v) for v in vals)))
+
+
+def _extract_gift_signature(name: str):
+    """
+    증정/추가 구성 식별.
+    증정품이 달라도 본품은 동일할 수 있으므로 상품 마스터는 연결 가능하되,
+    운영 구성은 별도 variant로 기록한다.
+    """
+    s = _clean_text_value(name).lower()
+    gift_markers = ["증정", "추가증정", "+", "보조배터리", "리필", "사은품"]
+    hits = [m for m in gift_markers if m in s]
+    return tuple(sorted(set(hits)))
+
+
+def _get_product_code_columns(df: pd.DataFrame):
+    shora = first_col(df, ["쇼라코드", "쇼핑라운지코드", "상품코드", "샵바이코드"])
+    alpha = first_col(df, ["알파코드", "알파상품코드"])
+    return shora, alpha
+
+
+def _product_master_key_from_row(row, shora_col=None, alpha_col=None, name_col=None):
+    """
+    상품 마스터키 판정:
+    1) 동일 코드면 동일상품
+    2) 코드가 달라도 모델명 + 핵심 상품명 + 용량/수량 시그니처가 동일하면 과거 이력 연결
+    3) 구성/모델/용량이 다르면 별도 상품
+    """
+    name = _clean_text_value(row.get(name_col, "")) if name_col else ""
+    core = _normalize_core_product_name(name)
+    models = _extract_model_tokens(name)
+    qty = _extract_quantity_signature(name)
+
+    shora = _clean_text_value(row.get(shora_col, "")) if shora_col else ""
+    alpha = _clean_text_value(row.get(alpha_col, "")) if alpha_col else ""
+
+    # 코드가 있으면 우선 코드 기반 키
+    if shora:
+        code_key = f"SHORA:{shora}"
+    elif alpha:
+        code_key = f"ALPHA:{alpha}"
+    else:
+        code_key = ""
+
+    # 실질 동일성 비교용 fingerprint
+    # 모델명이 있으면 모델+수량을 강하게 사용
+    if models:
+        fp = f"MODEL:{'|'.join(models)}::QTY:{'|'.join(qty)}"
+    else:
+        # 모델명이 없으면 핵심명+수량
+        fp = f"NAME:{core}::QTY:{'|'.join(qty)}"
+
+    return {
+        "code_key": code_key,
+        "fingerprint": fp,
+        "core_name": core,
+        "models": models,
+        "qty": qty,
+        "gift_sig": _extract_gift_signature(name),
+    }
+
+
+def _attach_product_master_keys(df: pd.DataFrame):
+    """
+    각 행에 _product_master_key / _product_variant_key 추가.
+    코드가 바뀌었더라도 fingerprint가 동일하면 동일 master로 묶는다.
+    증정/추가구성은 variant에서 분리한다.
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    name_col = first_col(out, ["상품명", "MMS 상품명", "상품"])
+    if not name_col:
+        out["_product_master_key"] = ""
+        out["_product_variant_key"] = ""
+        return out
+
+    shora_col, alpha_col = _get_product_code_columns(out)
+
+    meta = []
+    for _, row in out.iterrows():
+        meta.append(_product_master_key_from_row(row, shora_col, alpha_col, name_col))
+
+    tmp = pd.DataFrame(meta, index=out.index)
+
+    # 동일 fingerprint가 여러 코드에 걸쳐 있으면 같은 master로 연결
+    fp_to_master = {}
+    for idx, r in tmp.iterrows():
+        fp = r["fingerprint"]
+        code = r["code_key"]
+        if fp not in fp_to_master:
+            fp_to_master[fp] = code or fp
+
+    out["_product_master_key"] = [fp_to_master.get(r["fingerprint"], r["code_key"] or r["fingerprint"]) for _, r in tmp.iterrows()]
+    out["_product_variant_key"] = [
+        f"{out.loc[idx, '_product_master_key']}::GIFT:{'|'.join(r['gift_sig'])}"
+        for idx, r in tmp.iterrows()
+    ]
+    return out
+
+
+def _same_product_master(df: pd.DataFrame, row_a_idx, row_b_idx) -> bool:
+    d = _attach_product_master_keys(df)
+    return _clean_text_value(d.loc[row_a_idx, "_product_master_key"]) == _clean_text_value(d.loc[row_b_idx, "_product_master_key"])
 
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
