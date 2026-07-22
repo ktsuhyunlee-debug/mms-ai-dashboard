@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.56-UNIFIED-PRODUCT-NAME-DISPLAY
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.57-FINAL-RUNTIME-GUARDED
 
 from __future__ import annotations
 
@@ -4605,6 +4605,36 @@ def validate_weekly_analysis_all_weeks(products_all: pd.DataFrame, sends_all: pd
                     if k in hmap.index and int(hmap.loc[k, "500만원이상"]) < 1:
                         issues.append({"연도":yr,"주차":wk,"유형":"누적성과 모순","내용":f"{r.get('상품명','')} 금주 500만원 이상이나 누적 0회"})
 
+        # 실제 주간 리포트 생성 + 최종 문자열 품질검증
+        try:
+            sg = pd.DataFrame()
+            if sends_all is not None and not sends_all.empty:
+                sg = sends_all.copy()
+                if "_date" in sg.columns:
+                    sg["_date"] = pd.to_datetime(sg["_date"], errors="coerce")
+                    if "주차" in sg.columns:
+                        sg = sg[
+                            (sg["_date"].dt.year == int(yr))
+                            & (sg["주차"].astype(str) == str(wk))
+                        ].copy()
+            report = build_weekly_analysis(
+                str(wk), int(yr), g.copy(), sg, p.copy(), sends_all
+            )
+            for item in _safe_weekly_quality_check(report):
+                issues.append({
+                    "연도": yr,
+                    "주차": wk,
+                    "유형": "출력 품질",
+                    "내용": item,
+                })
+        except Exception as e:
+            issues.append({
+                "연도": yr,
+                "주차": wk,
+                "유형": "리포트 생성 오류",
+                "내용": f"{type(e).__name__}: {str(e)[:300]}",
+            })
+
     return pd.DataFrame(issues)
 
 
@@ -4729,6 +4759,87 @@ def validate_weekly_output_quality(report: str) -> list[str]:
         if re.search(pat, s):
             issues.append(name)
     return issues
+
+
+def _build_weekly_safe_fallback(week, year, pw, sw) -> str:
+    """주간 엔진 예외 발생 시 화면 전체가 죽지 않도록 최소 안전 리포트 생성."""
+    try:
+        send_count = 0
+        order_count = 0
+        qty = 0
+        amount = 0.0
+        clicks = 0.0
+
+        if sw is not None and not sw.empty:
+            scol = first_col(sw, ["발송건수", "발송성공", "성공건수"])
+            ccol = first_col(sw, ["클릭수", "클릭"])
+            if scol:
+                send_count = float(pd.to_numeric(sw[scol], errors="coerce").fillna(0).sum())
+            if ccol:
+                clicks = float(pd.to_numeric(sw[ccol], errors="coerce").fillna(0).sum())
+            if "주문건수" in sw.columns:
+                order_count = float(pd.to_numeric(sw["주문건수"], errors="coerce").fillna(0).sum())
+            if "주문수량" in sw.columns:
+                qty = float(pd.to_numeric(sw["주문수량"], errors="coerce").fillna(0).sum())
+            if "주문금액" in sw.columns:
+                amount = float(pd.to_numeric(sw["주문금액"], errors="coerce").fillna(0).sum())
+
+        if amount == 0 and pw is not None and not pw.empty and "주문금액" in pw.columns:
+            amount = float(pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0).sum())
+
+        pcol = _weekly_product_col(pw)
+        unique_products = int(pw[pcol].nunique()) if pcol and pw is not None and not pw.empty else 0
+        ctr = clicks / send_count if send_count else 0
+        cvr = order_count / clicks if clicks else 0
+        aov = amount / order_count if order_count else 0
+        spm = amount / send_count if send_count else 0
+
+        summary = [
+            f"• 발송횟수 {len(sw) if sw is not None else 0:,}회 / 편성건수 {len(pw) if pw is not None else 0:,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
+            f"• 주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
+            f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
+            ": 상세 인사이트 생성 중 일부 데이터 조건을 확인하지 못해 기본 실적 기준으로 표시",
+        ]
+        return "\n\n".join([
+            _weekly_section_join("■ 주간 실적 요약", summary),
+            _weekly_section_join("■ 상품 운영 시사점", [
+                "• 상품 성과 점검 : 현재 주차 상품별 실적을 기준으로 핵심·저성과 상품 확인 필요"
+            ]),
+            _weekly_section_join("■ 편성 운영 시사점", [
+                "• 편성 조건 점검 : 타겟·SEG·카테고리·요일·시간대별 데이터 조건 확인 필요"
+            ]),
+            _weekly_section_join("■ 차주 운영 제안", [
+                "• 데이터 검증 후 재분석 : 누락·형식 오류 여부 확인 후 자동 인사이트 재생성 필요"
+            ]),
+        ])
+    except Exception:
+        # fallback 자체도 실패하면 절대 예외를 다시 올리지 않음
+        return (
+            "■ 주간 실적 요약\n"
+            "• 선택 주차 데이터 확인 필요\n"
+            "■ 상품 운영 시사점\n"
+            "• 데이터 형식 확인 필요\n"
+            "■ 편성 운영 시사점\n"
+            "• 데이터 형식 확인 필요\n"
+            "■ 차주 운영 제안\n"
+            "• 데이터 정합성 확인 후 재분석 필요"
+        )
+
+
+def _safe_weekly_quality_check(report: str) -> list[str]:
+    """검증 함수 자체의 예외가 앱을 중단시키지 않도록 통합 보호."""
+    issues = []
+    try:
+        issues.extend(_validate_weekly_report_text(report))
+    except Exception as e:
+        issues.append(f"기본 검증 오류: {type(e).__name__}")
+    try:
+        issues.extend(validate_weekly_output_quality(report))
+    except Exception as e:
+        issues.append(f"품질 검증 오류: {type(e).__name__}")
+    # 순서 유지 중복 제거
+    return list(dict.fromkeys(issues))
+
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     """선택 주차 기준 통합 주간 인사이트 엔진.
@@ -5718,12 +5829,22 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             "반복 고성과 조건이 확인되는 조합 중심으로 다음 편성 TEST 필요"
         ]
 
-    return "\n\n".join([
+    _final_report = "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
         _weekly_section_join("■ 상품 운영 시사점", dyn_product),
         _weekly_section_join("■ 편성 운영 시사점", dyn_op),
         _weekly_section_join("■ 차주 운영 제안", dyn_next),
     ])
+
+    # 최종 표시명 적용 이후 실제 사용자에게 보여질 문자열 기준 검증
+    _quality_issues = _safe_weekly_quality_check(_final_report)
+    if _quality_issues:
+        try:
+            print("[WEEKLY_OUTPUT_QUALITY]", year, week, _quality_issues)
+        except Exception:
+            pass
+
+    return _final_report
 
 APP_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = APP_DIR / "images"
@@ -7004,9 +7125,25 @@ elif menu == "주간실적":
     ])
 
     with tabs[0]:
-        report = build_weekly_analysis(
-            week, selected_year, pw, sw, products, sends
-        )
+        try:
+            report = build_weekly_analysis(
+                week, selected_year, pw, sw, products, sends
+            )
+        except Exception as _weekly_error:
+            try:
+                print(
+                    "[WEEKLY_ANALYSIS_ERROR]",
+                    selected_year,
+                    week,
+                    type(_weekly_error).__name__,
+                    str(_weekly_error)[:500],
+                )
+            except Exception:
+                pass
+            report = _build_weekly_safe_fallback(
+                week, selected_year, pw, sw
+            )
+            st.warning("주간 인사이트 일부 데이터 조건을 확인하지 못해 기본 실적 기준으로 표시했습니다.")
         # 4개 의사결정 섹션: 제목은 굵게, 내용은 불필요한 빈 줄 없이 한 줄씩 표시
         report_lines = [line.strip() for line in report.splitlines() if line.strip()]
         report_html = []
