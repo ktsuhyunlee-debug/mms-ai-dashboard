@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.50-WEEKLY-ENGINE-ALL-WEEKS-FINALIZED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.52-WEEKLY-ENGINE-ALL-WEEKS-UNIFIED
 
 from __future__ import annotations
 
@@ -2972,7 +2972,7 @@ def _next_week_action_candidates(pw, products_all, week_end):
             if wkrow.empty: continue
             catname=str(wkrow["대카"].iloc[0]); share=shares.get(catname,0)
             if share>=20:
-                actions.append((65,"상품 교체",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지. 카테고리 비중을 줄이기보다 동일 카테고리 내 과거 300만원 이상 성과가 반복된 검증 상품으로 교체하는 것이 적절합니다."))
+                actions.append((65,"상품 교체",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지. 과거 300만원 이상 반복 성과가 확인된 동일 카테고리 검증 상품으로 교체 검토."))
 
     seen=set(); out=[]
     for score,kind,s in sorted(actions,key=lambda x:x[0],reverse=True):
@@ -3241,7 +3241,7 @@ def _season_single_or_repeat_sentence(x: dict) -> str:
             f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회"
             + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
             + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과를 기록해 "
-              f"동시즌 반복 성과 확인. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영을 우선 검토하고, "
+              f"동시즌 반복 성과 확인. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영 우선 검토, "
               f"{action_product}으로 신규·유사신규 TEST를 확장하는 것이 적절합니다."
         )
 
@@ -4446,11 +4446,10 @@ def _weekly_normalize_product_key(name: str) -> str:
     return s
 
 
-def _weekly_short_display_name(name: str, max_len: int = 46) -> str:
+def _weekly_short_display_name(name: str, max_len: int = 52) -> str:
     """주간실적 공통 표시명 formatter.
-    - [M], ★단독 등 운영 태그 제거
-    - [필립스], [독일 보랄] 등 브랜드는 괄호만 제거하고 보존
-    - 집계/중복판정에는 사용하지 않음
+    운영 태그만 제거하고 브랜드/핵심 상품군은 보존한다.
+    긴 구성은 의미 단위로 정리한 뒤 최종 길이를 제한한다.
     """
     s = str(name or "").strip()
     s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
@@ -4458,17 +4457,38 @@ def _weekly_short_display_name(name: str, max_len: int = 46) -> str:
     s = re.sub(r"^\[([^\]]+)\]\s*", r"\1 ", s)
     s = re.sub(r"\s+", " ", s).strip()
 
+    # 보고서용 대표 축약명
     aliases = [
         ("필립스 이지프로 S2883/00 전기면도기", "필립스 이지프로 전기면도기"),
         ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
         ("비에날씬 BNR17 다이어트 유산균 체지방감소 캡슐 3개월분", "비에날씬 BNR17"),
         ("락앤락 바로한끼 밥용기 LITE 3P 320ML", "락앤락 바로한끼 밥용기"),
+        ("1+1 초경량 3단 자동 우산 양산 겸용_튼튼한 접이식 미니 우산 암막 우양산", "1+1 초경량 3단 자동 암막 우양산"),
     ]
     for src_name, dst_name in aliases:
         if src_name in s:
             return dst_name
 
-    return s if len(s) <= max_len else s[:max_len].rstrip() + "…"
+    # 제목에 불필요한 운영/상태 정보 제거
+    s = re.sub(r"\s*\(재고부족[^)]*\)", "", s)
+    s = re.sub(r"\s*\*퇴근 이후 판중.*$", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # 중복 브랜드 제거: "고디바 고디바" 등
+    words = s.split()
+    if len(words) >= 2 and words[0] == words[1]:
+        s = " ".join(words[1:])
+
+    if len(s) <= max_len:
+        return s
+
+    # 긴 상품은 괄호형 상세구성 제거 후 재확인
+    compact = re.sub(r"\s*\([^)]{8,}\)", "", s)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if len(compact) <= max_len:
+        return compact
+
+    return compact[:max_len].rstrip(" ,/_-") + "…"
 
 
 def _weekly_cutoff_history(products_all: pd.DataFrame, week_end):
@@ -4606,6 +4626,27 @@ def _weekly_selected_month(pw: pd.DataFrame, week_end=None):
     return int(d.month) if pd.notna(d) else None
 
 
+def _weekly_normalize_operation_labels(df: pd.DataFrame):
+    """상품구분 컬럼이 여러 이름/표기일 때 하나의 Series로 정규화."""
+    if df is None or df.empty:
+        return None
+    candidates = ["상품구분", "신규구분", "운영구분", "편성구분", "구분", "재편성"]
+    for c in candidates:
+        if c in df.columns:
+            vals = df[c].fillna("").astype(str).str.strip()
+            if vals.str.contains("신규|유사신규|재편성", regex=True, na=False).any():
+                return vals
+    # 이름이 달라도 실제 값으로 탐색
+    for c in df.columns:
+        try:
+            vals = df[c].fillna("").astype(str).str.strip()
+            if vals.str.contains("신규|유사신규|재편성", regex=True, na=False).any():
+                return vals
+        except Exception:
+            continue
+    return None
+
+
 def _weekly_operation_masks(labels: pd.Series):
     """신규·유사신규 / 재편성 배타 분류."""
     labels = labels.fillna("").astype(str).str.strip()
@@ -4641,6 +4682,27 @@ def _weekly_recommendation_product_key(line: str, products_all: pd.DataFrame):
         if name in s or (display and display in s):
             return _weekly_normalize_product_key(name)
     return None
+
+
+def validate_weekly_output_quality(report: str) -> list[str]:
+    """주간실적 결과 문자열 품질 회귀검증."""
+    s = str(report or "")
+    issues = []
+
+    checks = {
+        "이중 쉼표": r",,",
+        "잘린 제목": r"•\s+[^\n:]{1,80}…\s*:",
+        "문장형 제목": r"•\s+[^:\n]{10,}(?:은|는)\s+과거\s+\d+회[^:\n]*:",
+        "상품 타겟 적합도": r"상품\s+타겟\s+적합도",
+        "조사 오류": r"(?:백만원|천만원)로\s+[0-9.]+배",
+        "중복 추천": r"차주 재편성 우선 후보.*차주 재편성 우선 후보",
+        "과도한 병합": r"\s/\s.*\s/\s",
+        "파괴 토큰": r"(?:의\s*>\s*%|(?:남성|여성)\d{4}\s*>\s*회|•\s*>)",
+    }
+    for name, pat in checks.items():
+        if re.search(pat, s):
+            issues.append(name)
+    return issues
 
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
@@ -4808,8 +4870,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             _under_names = [_weekly_short_display_name(x) for x in _under["상품명"].astype(str).head(4)]
             _category_rows.append((_cat_share, _cat_name, _under_names))
 
-        # 매출 비중이 높은 카테고리부터 최대 2개만 노출해 과도한 bullet 방지
-        for _cat_share, _cat_name, _under_names in sorted(_category_rows, reverse=True)[:2]:
+        # 매출 비중과 저성과 동시 발생이 가장 큰 대표 카테고리 1개만 노출
+        for _cat_share, _cat_name, _under_names in sorted(_category_rows, reverse=True)[:1]:
             product_points.append(
                 f"• {_cat_name} 상품별 편차 확대 : {_cat_name}은 전체 주문금액의 {_cat_share:.1f}%를 차지했으나 "
                 f"{', '.join(_under_names)} 등 일부 상품은 100만원 미만 기록 > "
@@ -5080,12 +5142,17 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if (("여성 타겟" in s and "남성 평균" in s) or ("남성 타겟" in s and "여성 평균" in s)):
             mm = re.match(r"^(.+?)\s+상품은\s+", s)
             if mm:
-                return _short_product_name(mm.group(1)) + " 성별 타겟 적합도"
+                return re.sub(r"\\s+상품$", "", _short_product_name(mm.group(1))) + " 성별 타겟 적합도"
 
         # 타겟 비교
         mt = re.match(r"^(.+?)(?:은|는)\s+(?:남성|여성)\d{4}", s)
         if mt:
-            return _short_product_name(mt.group(1)) + " 타겟 적합도"
+            return re.sub(r"\\s+상품$", "", _short_product_name(mt.group(1))) + " 타겟 적합도"
+
+        # 저성과 교체 제안: 상품명만 제목으로 추출
+        ml = re.match(r"^(.+?)(?:은|는)\s+과거\s+\d+회\s+운영\s+중\s+300만원\s+이상\s+달성\s+이력이\s+없", s)
+        if ml:
+            return _short_product_name(ml.group(1))
 
         # 상품 단위 차주/운영 인사이트
         for pat in [r"^(.+?)(?:은|는)\s+금주", r"^(.+?)(?:은|는)\s+과거", r"^(.+?)\s+상품은\s+금주", r"^(.+?)\s+상품은\s+과거"]:
@@ -5130,6 +5197,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f = re.sub(r",\s*500만원 이상\s+(\d+)회 기록,\s*반면", r"·500만원 이상 \1회, ", f)
             f = re.sub(r"으로 차이가 확인", "으로 차이", f)
             f = re.sub(r"로 차이가 확인", "로 차이", f)
+            # 시퀀스형 타겟 근거도 문장형을 줄이고 핵심 수치 중심으로 통일
+            f = re.sub(
+                r"((?:남성|여성)\d{4})에서 최근 (\d+)회 주문금액이 (.+?)으로 모두 300만원 이상을 유지했고,\s*(\d+)개 SEG에서 운영",
+                lambda m: f"{m.group(1)} 최근 {m.group(2)}회 모두 300만원 이상·{m.group(4)}개 SEG 운영",
+                f,
+            )
 
         if title == "고성과 상품 × 적합 타겟 조합 강화":
             f = re.sub(r"^(.+?)은\s+", r"\1에서 ", f)
@@ -5201,7 +5274,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if title.endswith("상품별 편차 확대"):
             return "과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
         if title.endswith("상품 교체"):
-            return "카테고리 비중은 유지하되 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체"
+            return "과거 300만원 이상 반복 성과가 확인된 동일 카테고리 검증 상품으로 교체 검토"
         if title.endswith("냉방가전 신규·유사신규 발굴"):
             return "단일 사례로 반복성은 추가 검증하되 유사 가격대의 냉방가전 신규·유사신규 TEST 검토"
         if title.endswith("우양산 신규·유사신규 발굴"):
@@ -5280,12 +5353,10 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_next = [_normalize_weekly_bullet(x, "차주 운영") for x in _next_raw]
     dyn_next = _dedupe_keep_order([x for x in dyn_next if x])
 
-    # 신규·유사신규 vs 재편성: 데이터가 존재하면 모든 주차에서 항상 생성
+    # 신규·유사신규 vs 재편성: 컬럼명과 무관하게 실제 값으로 탐색해 모든 주차 공통 생성
     try:
-        type_col = _weekly_detect_operation_type_col(pw)
-        if type_col and "주문금액" in pw.columns:
-            labels = pw[type_col].fillna("").astype(str).str.strip()
-            # 배타 분류: 재편성 표기가 있으면 재편성 우선, 그 외 신규/유사신규만 신규군
+        labels = _weekly_normalize_operation_labels(pw)
+        if labels is not None and "주문금액" in pw.columns:
             new_mask, re_mask = _weekly_operation_masks(labels)
             new_df = pw[new_mask].copy()
             re_df = pw[re_mask].copy()
@@ -5307,9 +5378,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     if not dyn_op:
         try:
             # 상품구분별 성과 비교
-            type_col = first_col(pw, ["상품구분", "신규구분", "운영구분", "재편성", "구분", "편성구분"])
-            if type_col and "주문금액" in pw.columns:
-                labels = pw[type_col].fillna("").astype(str)
+            labels = _weekly_normalize_operation_labels(pw)
+            if labels is not None and "주문금액" in pw.columns:
                 new_mask, re_mask = _weekly_operation_masks(labels)
                 new_df = pw[new_mask]
                 re_df = pw[re_mask]
@@ -5350,64 +5420,103 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 따라서 과거 주차를 선택해도 다른 주차 상품/수치가 섞이지 않음.
 
     def _merge_next_by_product_key(items):
-        """원본 상품키 기준 추천 병합.
-        다른 모델은 합치지 않고, 동일 상품의 여러 추천 근거만 1개 bullet로 병합.
+        """동일 실제 상품 추천을 1개 bullet로 자연스럽게 통합.
+        금주성과 > 누적성과 > 시즌성과 순으로 근거를 우선하고,
+        액션은 핵심 1~2개만 남긴다.
         """
-        result = []
-        keyed = {}
+        standalone = []
+        grouped = {}
         order = []
+
+        def _parts(line):
+            s = str(line or "").strip()
+            body = s[2:] if s.startswith("• ") else s
+            if " : " in body:
+                title, rest = body.split(" : ", 1)
+            else:
+                title, rest = body, ""
+            if " > " in rest:
+                fact, action = rest.split(" > ", 1)
+            else:
+                fact, action = rest, ""
+            return title.strip(), fact.strip(), action.strip()
+
+        def _fact_score(f):
+            score = 0
+            if "금주" in f: score += 50
+            if "누적" in f: score += 30
+            if "동시즌" in f: score += 20
+            if "최근" in f and "미편성" in f: score += 10
+            return score
+
+        def _action_priority(a):
+            if "재편성" in a and "SEG" in a: return 50
+            if "재편성" in a: return 40
+            if "판매 가능 여부" in a: return 30
+            if "신규·유사신규" in a: return 20
+            return 10
 
         for line in items:
             s = str(line or "").strip()
             if not s:
                 continue
 
-            # 시즌 발굴/카테고리 교체는 상품 단일 추천과 별도 유지
+            # 시즌 발굴/카테고리 교체는 별도 축 유지
             if any(k in s for k in ["신규·유사신규 발굴", "상품 교체", "시즌 재운영"]):
-                result.append(s)
+                standalone.append(s)
                 continue
 
             key = _weekly_recommendation_product_key(s, weekly_context_products)
             if not key:
-                result.append(s)
+                standalone.append(s)
                 continue
 
-            if key not in keyed:
-                keyed[key] = s
+            title, fact, action = _parts(s)
+            if key not in grouped:
+                grouped[key] = {"title": title, "facts": [], "actions": []}
                 order.append(key)
-                continue
+            if fact and fact not in grouped[key]["facts"]:
+                grouped[key]["facts"].append(fact)
+            if action:
+                for part in [x.strip() for x in action.split(" / ") if x.strip()]:
+                    if part not in grouped[key]["actions"]:
+                        grouped[key]["actions"].append(part)
 
-            prev = keyed[key]
-            # 동일 상품이면 제목은 첫 문장 유지, fact/action을 중복 없이 병합
-            def _parts(x):
-                body = x[2:] if x.startswith("• ") else x
-                title, rest = (body.split(" : ", 1) + [""])[:2] if " : " in body else (body, "")
-                fact, action = (rest.split(" > ", 1) + [""])[:2] if " > " in rest else (rest, "")
-                return title.strip(), fact.strip(), action.strip()
+        merged = []
+        for key in order:
+            g = grouped[key]
+            facts = sorted(g["facts"], key=_fact_score, reverse=True)
 
-            pt, pf, pa = _parts(prev)
-            ct, cf, ca = _parts(s)
-            facts = []
-            for v in [pf, cf]:
-                if v and v not in facts:
-                    facts.append(v)
-            actions = []
-            for v in [pa, ca]:
-                if v and v not in actions:
-                    actions.append(v)
+            # 핵심 fact 1개 + 보조 fact 최대 1개만 사용
+            selected_facts = []
+            for f in facts:
+                if not selected_facts:
+                    selected_facts.append(f)
+                    continue
+                # 기준 혼선을 막기 위해 "과거 N회"와 "누적 N회"를 동시에 길게 쓰지 않음
+                if ("누적" in selected_facts[0] and "과거 " in f) or ("과거 " in selected_facts[0] and "누적" in f):
+                    continue
+                if f not in selected_facts[0]:
+                    selected_facts.append(f)
+                if len(selected_facts) >= 2:
+                    break
 
-            # 가장 정보량 많은 fact 1개를 기본으로 사용하고, 다른 fact는 완전 중복이 아닐 때만 보조 근거로 추가
-            fact = max(facts, key=len) if facts else ""
-            extras = [f for f in facts if f != fact and f not in fact]
-            if extras:
-                fact = fact + " / " + " / ".join(extras)
+            fact = ", ".join(selected_facts)
 
-            action = " / ".join(actions)
-            keyed[key] = f"• {pt} : {fact}" + (f" > {action}" if action else "")
+            # 액션은 우선순위 상위 2개까지만
+            actions = sorted(g["actions"], key=_action_priority, reverse=True)
+            selected_actions = []
+            for a in actions:
+                if any(a in x or x in a for x in selected_actions):
+                    continue
+                selected_actions.append(a)
+                if len(selected_actions) >= 2:
+                    break
 
-        # 원래 위치 순서를 최대한 유지: 일반 결과 뒤에 keyed 결과를 추가
-        result.extend(keyed[k] for k in order)
-        return result
+            action = " / ".join(selected_actions)
+            merged.append(f"• {g['title']} : {fact}" + (f" > {action}" if action else ""))
+
+        return standalone + merged
 
     dyn_next = _merge_next_by_product_key(dyn_next)
 
@@ -5452,6 +5561,10 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = s.replace("병행할 수 있습니다", "병행 가능")
             s = s.replace("순으로 구성됐습니다", "순으로 매출 구성")
             s = s.replace("운영 확대를 검토할 수 있습니다", "운영 확대 검토")
+
+            # 누적/과거 기준이 함께 쓰이면 과거 기준을 명확히 표시
+            if "누적 " in s and re.search(r"과거 \d+회", s):
+                s = re.sub(r"과거 (\d+)회", r"금주 제외 과거 \1회", s)
 
             # 구분자/공백만 정규화. 앞뒤 텍스트 내용은 보존.
             s = re.sub(r"\s*>\s*", " > ", s)
