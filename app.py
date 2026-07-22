@@ -387,29 +387,41 @@ hr {
     width: 100%;
 }
 .daily-asset-pair .asset-card {
-    height: 100%;
     min-height: 0 !important;
     margin: 0;
 }
 .daily-asset-pair .asset-image-card {
+    /* 이미지 자체 높이가 Grid 행 높이를 키우지 않도록 카드 안에 절대배치 */
     position: relative;
     overflow: hidden;
     padding: 0;
+    min-height: 0 !important;
     background: var(--surface);
 }
 .daily-asset-pair .asset-image-card img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: top center;
-    margin: 0;
-    padding: 0;
+    /* 오른쪽 MMS 문구 카드가 정한 높이 안에서만 원본 전체 노출 */
+    position: absolute !important;
+    top: 20px !important;
+    right: 20px !important;
+    bottom: 20px !important;
+    left: 20px !important;
+    width: calc(100% - 40px) !important;
+    height: calc(100% - 40px) !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: calc(100% - 40px) !important;
+    max-height: calc(100% - 40px) !important;
+    object-fit: contain !important;
+    object-position: center center !important;
+    margin: 0 !important;
+    padding: 0 !important;
     border-radius: 10px;
+    box-sizing: border-box !important;
 }
 .daily-asset-pair .asset-message-card {
+    /* 문구 내용 높이가 전체 Grid 행 높이의 기준 */
     min-height: 0 !important;
-    height: 100%;
+    height: auto !important;
     overflow: visible;
     padding: 18px 14px 14px;
 }
@@ -473,6 +485,37 @@ hr {
     .daily-asset-pair .asset-image-card img {
         height: auto;
         max-height: none;
+    }
+}
+
+
+/* V4.4.30 DESKTOP FINAL OVERRIDE: legacy selector 충돌 방지 */
+@media (min-width: 901px) {
+    .daily-asset-pair .asset-image-card {
+        position: relative !important;
+        overflow: hidden !important;
+        padding: 0 !important;
+        box-sizing: border-box !important;
+    }
+    .daily-asset-pair .asset-image-card > img {
+        position: absolute !important;
+        top: 20px !important;
+        right: 20px !important;
+        bottom: 20px !important;
+        left: 20px !important;
+        inset: 20px !important;
+        width: calc(100% - 40px) !important;
+        height: calc(100% - 40px) !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        max-width: calc(100% - 40px) !important;
+        max-height: calc(100% - 40px) !important;
+        object-fit: contain !important;
+        object-position: center center !important;
+        display: block !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        box-sizing: border-box !important;
     }
 }
 
