@@ -325,34 +325,48 @@ hr {
 }
 
 
-/* 일일실적 이미지/문구 카드: 긴 문구 기준으로 좌우 높이 자동 통일 */
-.daily-asset-row {
-    align-items: stretch;
-}
-.daily-asset-row > div {
-    display: flex;
-    flex-direction: column;
-}
-.daily-asset-row .asset-card {
-    flex: 1 1 auto;
-    width: 100%;
-}
 
+/* V4.4.28 일일실적 이미지·문구 하단선 강제 일치
+   Streamlit column 내부의 중첩 vertical-block까지 100% 높이 전달 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
+    align-self: stretch !important;
     display: flex !important;
     flex-direction: column !important;
 }
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div {
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stElementContainer"]:has(.asset-card) {
+    flex: 1 1 auto !important;
     height: 100% !important;
+    min-height: 100% !important;
 }
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card,
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card,
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
     height: 100% !important;
+    min-height: 430px !important;
+    box-sizing: border-box !important;
+}
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
+    width: 100% !important;
+    height: 100% !important;
+    max-height: none !important;
+    object-fit: contain !important;
 }
 
 @media (max-width: 900px) {
+
+    [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"],
+    [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
+    [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"] {
+        height: auto !important;
+        min-height: 0 !important;
+    }
+
     .block-container {
         padding: 1.6rem 0.75rem 2rem;
     }
