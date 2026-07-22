@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.48-UNIFIED-WEEKLY-ENGINE-REBUILD
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.50-WEEKLY-ENGINE-ALL-WEEKS-FINALIZED
 
 from __future__ import annotations
 
@@ -2498,54 +2498,7 @@ def _season_recommendations(month: int, operated_text: str):
 
 
 def _short_weekly_product_name(name: str) -> str:
-    """주간 화면용 상품명 축약. 브랜드 + 핵심 상품 + 핵심 구성은 남기고 원본 데이터는 변경하지 않음."""
-    original = str(name or "").strip()
-    s = original
-
-    # 앞쪽 운영 태그/무료배송 태그 제거
-    s = re.sub(r"^\s*(?:\[(?:M|무료배송|쇼라 단독 특가|멤버스특가)[^\]]*\]\s*)+", "", s, flags=re.I)
-    s = re.sub(r"^\s*\(M\)\s*", "", s, flags=re.I)
-
-    # 브랜드 대괄호는 텍스트로 살림
-    s = re.sub(r"\[([^\]]+)\]", r"\1", s)
-
-    # 불필요한 운영 메모만 제거
-    s = re.sub(r"\s*\((?:재고부족|편성\s*\d+회|추가\s*멤포\s*상품)[^)]*\)", "", s, flags=re.I)
-
-    # 샘플/쇼핑백/증정 부가구성 제거
-    s = re.sub(r"\s*\((?:샘플[^)]*|쇼핑백[^)]*|증정[^)]*)\)", "", s, flags=re.I)
-
-    # 슬래시 옵션은 무조건 자르지 않음. 제품 유형이 드러나도록 대표어 정리.
-    if "붕어싸만코" in s and "아이스크림" in s:
-        qty = re.search(r"(?:총\s*)?(\d+)\s*개", s)
-        s = "빙그레 붕어싸만코 아이스크림" + (f" {qty.group(1)}개" if qty else "")
-    elif "이지프로" in s and "면도기" in s:
-        s = re.sub(r"S\d+/\d+", "", s)
-        s = re.sub(r"\s+", " ", s).strip()
-    elif "디올" in s and "립" in s:
-        gram = re.search(r"(\d+(?:\.\d+)?)\s*g", s, re.I)
-        s = "디올 어딕트 립 글로우 립밤" + (f" {gram.group(1)}g" if gram else "")
-
-    # NEW/특별혜택가 등 수식어 정리
-    s = re.sub(r"\bNEW\b|\(NEW\)|특별혜택가|신형", "", s, flags=re.I)
-    s = re.sub(r"\s+", " ", s).strip(" -/")
-
-    # 너무 길 때는 핵심 수량/유형을 훼손하지 않도록 마지막 괄호 부가설명부터 제거
-    if len(s) > 48:
-        s2 = re.sub(r"\s*\([^)]{8,}\)\s*$", "", s).strip()
-        if len(s2) >= 12:
-            s = s2
-    if len(s) > 58:
-        # 최후 수단: 단어 단위 절단. ellipsis는 사용하되 제품 유형이 이미 앞에 남는 경우만.
-        cut = s[:58]
-        if " " in cut:
-            cut = cut.rsplit(" ", 1)[0]
-        s = cut.rstrip() + "…"
-
-    return s or original
-
-
-
+    return _weekly_short_display_name(name)
 
 def _extract_unit_count_from_name(name: str):
     """상품명에서 총 수량/매수 추출. 2+1, 3+3, 24롤×2팩, 본품+리필 등 복합 구성을 우선 해석."""
@@ -4357,9 +4310,7 @@ def _with_topic(text_value: str) -> str:
 
 
 def _safe_product_label(name: str) -> str:
-    """주간 화면용 축약명 + 조사 붙이기용 정리."""
-    return _short_weekly_product_name(name).strip()
-
+    return _weekly_short_display_name(name)
 
 def _clean_text_value(value) -> str:
     """nan/None/NaT/빈 문자열을 화면에 노출하지 않음."""
@@ -4444,16 +4395,7 @@ def _repeat_operation_sentence(product_name: str, pw: pd.DataFrame):
 
 
 def _weekly_short_name(name: str, max_len: int = 34) -> str:
-    """주간 보고서용 상품명 축약."""
-    name = str(name or "").strip()
-    replacements = [
-        ("[M] ", ""), ("[M]", ""), ("상품", ""),
-    ]
-    for a, b in replacements:
-        name = name.replace(a, b)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name if len(name) <= max_len else name[:max_len].rstrip() + "…"
-
+    return _weekly_short_display_name(name)
 
 def _weekly_compact_sentence(title: str, fact: str, action: str) -> str:
     title = str(title).strip()
@@ -4504,21 +4446,29 @@ def _weekly_normalize_product_key(name: str) -> str:
     return s
 
 
-def _weekly_short_display_name(name: str) -> str:
-    """보고서 표시용 상품명 축약. 브랜드 보존, 집계키에는 사용하지 않음."""
+def _weekly_short_display_name(name: str, max_len: int = 46) -> str:
+    """주간실적 공통 표시명 formatter.
+    - [M], ★단독 등 운영 태그 제거
+    - [필립스], [독일 보랄] 등 브랜드는 괄호만 제거하고 보존
+    - 집계/중복판정에는 사용하지 않음
+    """
     s = str(name or "").strip()
     s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
     s = re.sub(r"^★단독\s*", "", s)
     s = re.sub(r"^\[([^\]]+)\]\s*", r"\1 ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
     aliases = [
-        ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
         ("필립스 이지프로 S2883/00 전기면도기", "필립스 이지프로 전기면도기"),
+        ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
+        ("비에날씬 BNR17 다이어트 유산균 체지방감소 캡슐 3개월분", "비에날씬 BNR17"),
         ("락앤락 바로한끼 밥용기 LITE 3P 320ML", "락앤락 바로한끼 밥용기"),
     ]
     for src_name, dst_name in aliases:
         if src_name in s:
             return dst_name
-    return re.sub(r"\s+", " ", s).strip()
+
+    return s if len(s) <= max_len else s[:max_len].rstrip() + "…"
 
 
 def _weekly_cutoff_history(products_all: pd.DataFrame, week_end):
@@ -4632,16 +4582,66 @@ def validate_weekly_analysis_all_weeks(products_all: pd.DataFrame, sends_all: pd
 
 
 def _validate_weekly_report_text(report: str) -> list[str]:
-    """주간 리포트 출력 이상징후 검증."""
+    """주간 리포트 출력 이상징후 검증. 모든 연도/주차 공통."""
     issues = []
     s = str(report or "")
-    bad_tokens = ["\\1", "\\ >", "의 > %", "5060 > 회", "3040 > 회", " : > 에서", "• > "]
+    bad_tokens = ["\\1", "\\ >", "의 > %", " : > 에서", "• > "]
     for token in bad_tokens:
         if token in s:
             issues.append(f"비정상 토큰: {token}")
-    if re.search(r"시간대별 편성 조건 검증\s*:\s*최근 4주.*?에서\s*>\s*SPM", s):
+    if re.search(r"(?:남성|여성)\d{4}\s*>\s*회", s):
+        issues.append("타겟 운영횟수 값 누락")
+    if re.search(r"시간대별 편성 조건 검증\s*:\s*최근\s+\d+주\s+중\s+\d+주에서\s*>\s*SPM", s):
         issues.append("시간대 값 누락")
     return issues
+
+def _weekly_selected_month(pw: pd.DataFrame, week_end=None):
+    """선택 주차 기준 월. today()를 fallback으로 사용하지 않음."""
+    for c in ["_date", "발송일", "발송일자", "날짜", "일자"]:
+        if c in pw.columns:
+            d = pd.to_datetime(pw[c], errors="coerce").dropna()
+            if not d.empty:
+                return int(d.max().month)
+    d = pd.to_datetime(week_end, errors="coerce")
+    return int(d.month) if pd.notna(d) else None
+
+
+def _weekly_operation_masks(labels: pd.Series):
+    """신규·유사신규 / 재편성 배타 분류."""
+    labels = labels.fillna("").astype(str).str.strip()
+    rerun = labels.str.contains("재편성", na=False)
+    new = labels.str.contains("신규|유사신규", regex=True, na=False) & ~rerun
+    return new, rerun
+
+
+def _weekly_category_col(df: pd.DataFrame):
+    if df is None or not hasattr(df, "columns"):
+        return None
+    return first_col(df, ["대카", "대카테고리", "카테고리"])
+
+
+def _weekly_product_col(df: pd.DataFrame):
+    if df is None or not hasattr(df, "columns"):
+        return None
+    return first_col(df, ["상품명", "MMS 상품명", "상품"])
+
+
+def _weekly_recommendation_product_key(line: str, products_all: pd.DataFrame):
+    """추천 문장에서 원본 상품명을 찾아 집계용 product key 반환.
+    표시명만으로 서로 다른 모델을 병합하지 않음.
+    """
+    s = str(line or "")
+    pcol = _weekly_product_col(products_all)
+    if not pcol or products_all is None or products_all.empty:
+        return None
+    names = products_all[pcol].dropna().astype(str).drop_duplicates().tolist()
+    # 긴 이름 우선 매칭
+    for name in sorted(names, key=len, reverse=True):
+        display = _weekly_short_display_name(name)
+        if name in s or (display and display in s):
+            return _weekly_normalize_product_key(name)
+    return None
+
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     """선택 주차 기준 통합 주간 인사이트 엔진.
@@ -4649,7 +4649,10 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     선택 주차 종료일 이후 데이터는 비교/누적/추천 근거에서 제외한다.
     """
     _week_end = pd.to_datetime(pw["_date"], errors="coerce").max() if "_date" in pw.columns and not pw.empty else pd.NaT
+    # 모든 helper가 동일 cutoff context만 사용하도록 원본을 즉시 차단
     products_all = _weekly_cutoff_history(products_all, _week_end)
+    weekly_context_products = products_all
+    weekly_context_month = _weekly_selected_month(pw, _week_end)
     if sends_all is not None and not sends_all.empty and pd.notna(_week_end):
         _sdate_col = "_date" if "_date" in sends_all.columns else first_col(sends_all, ["발송일시2", "발송일", "날짜", "일자"])
         if _sdate_col:
@@ -4678,6 +4681,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         prev_sw = sends_all[(sends_all["_year"] == year) & (sends_all["주차"].astype(str) == prev_week)].copy()
         prev_pw = products_all[(products_all["_year"] == year) & (products_all["주차"].astype(str) == prev_week)].copy()
 
+    _pcol = _weekly_product_col(pw)
+    _prev_pcol = _weekly_product_col(prev_pw)
+    unique_products = int(pw[_pcol].nunique()) if _pcol and not pw.empty else len(pw)
+    prev_unique_products = int(prev_pw[_prev_pcol].nunique()) if _prev_pcol and not prev_pw.empty else len(prev_pw)
+
     if not prev_sw.empty:
         psend = float(prev_sw[send_col].sum())
         pclick = float(prev_sw[click_col].sum())
@@ -4695,14 +4703,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         send_delta = (send_count - psend) / abs(psend) if psend else 0
 
         summary = [
-            f"• 발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 상품수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
+            f"• 발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 편성건수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 고유상품 {unique_products:,}개({_weekly_plain_delta(unique_products,prev_unique_products)}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
             f"• 주문건수 {int(order_count):,}건({_weekly_plain_delta(order_count,porders)}) / 주문수량 {int(qty):,}건({_weekly_plain_delta(qty,pqty)}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) 기록",
             f"• CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
         ]
 
         # 규모 축소/확대와 성과 변화를 함께 해석해 단순 수치 반복을 피함
         if (len(sw) < len(prev_sw) or len(pw) < len(prev_pw) or send_count < psend) and amount > pamount and ctr >= pctr and cvr >= pcvr and spm > pspm:
-            summary.append(": 발송횟수·상품수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
+            summary.append(": 발송횟수·편성건수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
         elif amount > pamount and spm > pspm:
             summary.append(": 주문금액과 SPM이 함께 개선되며 전주 대비 매출 및 발송 효율 상승")
         elif amount < pamount and spm < pspm:
@@ -4718,7 +4726,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             summary.append(f": 주문금액 {amount_delta*100:+.1f}% 감소해 저성과 상품·타겟 및 반복 편성 영향 점검 필요")
     else:
         summary = [
-            f"• 발송횟수 {len(sw):,}회 / 상품수 {len(pw):,}건 / 발송건수 {int(send_count):,}건 운영",
+            f"• 발송횟수 {len(sw):,}회 / 편성건수 {len(pw):,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
             f"• 주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
             f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
             ": 전주 비교 데이터가 없어 금주 실적을 기준으로 상품·타겟·편성 효율 확인",
@@ -4780,15 +4788,32 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 f"• {_with_topic(short)} 금주 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 동일 타겟 1회 추가 검증 후 유사 성과가 유지되면 운영 확대를 검토할 수 있습니다."
             )
 
-    # 식품/건강 카테고리는 전체가 잘돼도 개별상품 부진 가능성 분리
-    food_rows = pw[pw["대카"].astype(str).str.contains("식품|건강", na=False)].copy()
-    if not food_rows.empty and amount > 0:
-        food_amount = float(food_rows["주문금액"].sum())
-        food_share = food_amount / amount * 100
-        under = _weekly_food_underperformers(pw)
-        if under:
+    # 카테고리별 성과 편차: 실제 대카테고리 row에서 동적 생성
+    _cat_col = _weekly_category_col(pw)
+    if _cat_col and amount > 0:
+        _category_rows = []
+        for _cat_name, _cg in pw.groupby(_cat_col, dropna=False):
+            _cat_name = str(_cat_name).strip()
+            if not _cat_name or _cat_name.lower() == "nan":
+                continue
+            _cat_amt = float(pd.to_numeric(_cg["주문금액"], errors="coerce").fillna(0).sum())
+            _cat_share = _cat_amt / amount * 100 if amount else 0
+            _under = (
+                _cg.groupby("상품명", as_index=False)["주문금액"].sum()
+                   .query("주문금액 < 1000000")
+                   .sort_values("주문금액")
+            )
+            if _under.empty:
+                continue
+            _under_names = [_weekly_short_display_name(x) for x in _under["상품명"].astype(str).head(4)]
+            _category_rows.append((_cat_share, _cat_name, _under_names))
+
+        # 매출 비중이 높은 카테고리부터 최대 2개만 노출해 과도한 bullet 방지
+        for _cat_share, _cat_name, _under_names in sorted(_category_rows, reverse=True)[:2]:
             product_points.append(
-                f"• 식품/건강은 전체 주문금액의 {food_share:.1f}%로 높은 비중을 차지했으나 {', '.join(under)} 등은 100만원 미만에 그쳤습니다. 카테고리 자체보다 상품 대중성·구성·가격 경쟁력에 따른 편차가 큰 만큼 식품 비중을 줄이기보다 과거 MMS 고성과 이력이 있는 검증 상품 중심으로 교체 편성이 필요합니다."
+                f"• {_cat_name} 상품별 편차 확대 : {_cat_name}은 전체 주문금액의 {_cat_share:.1f}%를 차지했으나 "
+                f"{', '.join(_under_names)} 등 일부 상품은 100만원 미만 기록 > "
+                f"카테고리 자체보다 상품 대중성·구성·가격 경쟁력 영향이 큰 만큼 과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
             )
 
     # 부진 상품 중 가격 근거를 제시할 수 있는 대표 1개
@@ -4804,13 +4829,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 if sale.empty:
                     continue
                 unit_phrase = _unit_price_phrase(pname, float(sale.iloc[-1]))
-                hist = _weekly_product_history_stats(pname, products_all, week_end)
+                hist = _weekly_product_history_stats(pname, weekly_context_products, week_end)
                 if unit_phrase and hist and hist["count"] >= 2:
                     price_text = ""
                     if hist["sale_min"] is not None and hist["sale_max"] is not None:
                         if abs(hist["sale_max"] - hist["sale_min"]) / max(hist["sale_min"],1) <= 0.1:
                             price_text = f" 과거에도 유사한 가격대({hist['sale_min']:,.0f}~{hist['sale_max']:,.0f}원)로 운영됐습니다."
-                    hp = _latest_and_high_perf_price(pname, products_all)
+                    hp = _latest_and_high_perf_price(pname, weekly_context_products)
                     hp_text = ""
                     if hp and hp["high_perf_avg_price"]:
                         hp_text = f" 과거 500만원 이상 고성과 운영 당시 평균 혜택가는 {hp['high_perf_avg_price']:,.0f}원이었습니다."
@@ -4824,7 +4849,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     if not rank.empty:
         target_sentence_added = 0
         for pname in rank.head(10)["상품명"].astype(str):
-            ta = _product_target_strength_analysis(pname, products_all, week_end)
+            ta = _product_target_strength_analysis(pname, weekly_context_products, week_end)
             sentence = _target_strength_sentence(pname, ta)
             if sentence:
                 product_points.append(sentence)
@@ -4835,7 +4860,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 프로모션 효과 분리: 일반기간에서도 성과가 유지되는지 확인
     if not rank.empty:
         for pname in rank.head(8)["상품명"].astype(str):
-            ps = _promotion_performance_stats(pname, products_all)
+            ps = _promotion_performance_stats(pname, weekly_context_products)
             if not ps or ps["promo_n"] < 1 or ps["normal_n"] < 1:
                 continue
             pa, na = ps["promo_avg"], ps["normal_avg"]
@@ -4922,7 +4947,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     # 차주 운영 제안: 개수 제한 없이 실제 근거가 있는 제안만 우선순위 순으로 노출
     nxt = []
-    ranked_actions = _next_week_action_candidates(pw, products_all, week_end)
+    ranked_actions = _next_week_action_candidates(pw, weekly_context_products, week_end)
 
     # 유형별 중복을 제한하되 전체 개수는 제한하지 않음.
     # 즉시 재편성은 상품별 최대 2건, 나머지는 유형별 1건 우선.
@@ -4941,7 +4966,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         used_kinds[kind] = used_kinds.get(kind, 0) + 1
 
     # 시즌성 실제 상품 근거는 항상 별도 축으로 노출.
-    seasonal_evidence = _seasonal_action_sentence(products_all, week_end)
+    seasonal_evidence = _seasonal_action_sentence(weekly_context_products, week_end)
     if seasonal_evidence:
         clean = seasonal_evidence.strip()
         if clean and clean not in seen_sentences:
@@ -4949,7 +4974,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             seen_sentences.add(clean)
     else:
         # 실제 과거 시즌 고성과 상품 근거가 전혀 없을 때만 편성 횟수형 fallback 사용
-        season_gap = _season_gap_action(pw, products_all, week_end)
+        season_gap = _season_gap_action(pw, weekly_context_products, week_end)
         if season_gap:
             clean = ("• " + season_gap).strip()
             if clean not in seen_sentences:
@@ -4958,7 +4983,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     # 최신 NAVER 외부 트렌드는 내부 MMS 근거까지 교차검증된 경우 별도 노출.
     # 다른 제안이 많아도 개수 제한 때문에 잘리지 않음.
-    latest_trend_action = _latest_trend_action_sentence(products_all, week_end)
+    latest_trend_action = _latest_trend_action_sentence(weekly_context_products, week_end)
     if latest_trend_action:
         clean = latest_trend_action.strip()
         if clean and clean not in seen_sentences:
@@ -4981,7 +5006,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     # 모든 주차 공통 최종 중복 제거:
     # 동일 product master가 여러 추천 규칙에 걸리면 근거를 하나로 병합해 1회만 노출
-    nxt = _merge_same_product_recommendations(nxt, products_all)
+    nxt = _merge_same_product_recommendations(nxt, weekly_context_products)
 
     
     # -------------------------------------------------
@@ -5007,44 +5032,21 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         return title
 
     def _short_product_name(name: str) -> str:
-        """주간 보고서 공통 표시명. 운영태그만 제거하고 브랜드는 보존."""
-        s = _clean_weekly_title(name)
-        s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
-        s = re.sub(r"^★단독\s*", "", s)
-        # [필립스], [독일 보랄] 등 브랜드 표기는 삭제하지 않고 괄호만 제거
-        s = re.sub(r"^\[([^\]]+)\]\s*", r"\1 ", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        aliases = [
-            ("필립스 이지프로 S2883/00 전기면도기", "필립스 이지프로 전기면도기"),
-            ("락앤락 바로한끼 밥용기 LITE 3P 320ML", "락앤락 바로한끼 밥용기"),
-            ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
-        ]
-        for src_name, dst_name in aliases:
-            if src_name in s:
-                return dst_name
-        # 모델코드는 표시명에서만 축약하되 원본 상품키에는 영향 없음
-        s = re.sub(r"\s*/\s*[A-Z0-9\-]+$", "", s).strip()
-        return s
+        return _weekly_short_display_name(name)
 
 
-    def _weekly_context_month() -> int:
-        """선택 주차 데이터에서 월을 추출. 실패 시 현재 데이터의 대표 월 사용."""
-        try:
-            if "발송일" in pw.columns and not pw.empty:
-                d = pd.to_datetime(pw["발송일"], errors="coerce").dropna()
-                if not d.empty:
-                    return int(d.max().month)
-        except Exception:
-            pass
-        return int(pd.Timestamp.today().month)
+    def _weekly_context_month():
+        return weekly_context_month
+
 
     def _seasonal_discovery_title(kind: str) -> str:
         m = _weekly_context_month()
+        prefix = f"{m}월" if m else "시즌"
         if kind == "cooling":
-            return f"{m}월 냉방가전 신규·유사신규 발굴"
+            return f"{prefix} 냉방가전 신규·유사신규 발굴"
         if kind == "umbrella":
-            return f"{m}월 우양산 신규·유사신규 발굴"
-        return f"{m}월 시즌 신규·유사신규 발굴"
+            return f"{prefix} 우양산 신규·유사신규 발굴"
+        return f"{prefix} 신규·유사신규 발굴"
 
     def _infer_weekly_title(s: str, default_title="운영 인사이트") -> str:
         s = str(s or "").strip()
@@ -5054,13 +5056,18 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             return "저성과 상품 효율 점검"
         if "대카테고리 매출" in s:
             return "카테고리보다 검증 상품 중심 편성"
-        if "식품/건강" in s and ("100만원 미만" in s or "300만원 이상 달성 이력" in s):
-            return "식품/건강 상품별 편차 확대" if "100만원 미만" in s else "식품/건강 상품 교체"
-        if "최근 4주 중" in s and "수요일" in s:
+        # 실제 카테고리명 기반 동적 제목
+        mcat = re.search(r"([가-힣A-Za-z0-9/·&]+)\s+상품별 편차 확대", s)
+        if mcat:
+            return f"{mcat.group(1)} 상품별 편차 확대"
+        mcat = re.search(r"([가-힣A-Za-z0-9/·&]+)\s+상품 교체", s)
+        if mcat:
+            return f"{mcat.group(1)} 상품 교체"
+        if re.search(r"최근\s+\d+주\s+중\s+\d+주", s) and "요일" in s and "SPM 최고" in s:
             return "요일별 편성 조건 검증"
         if "신규·유사신규" in s and "재편성" in s and ("평균" in s or "비중" in s):
             return "신규·유사신규 vs 재편성"
-        if "최근 4주 중" in s and "시간대" in s and "SPM 최고" in s:
+        if re.search(r"최근\s+\d+주\s+중\s+\d+주", s) and "시간대" in s and "SPM 최고" in s:
             return "시간대별 편성 조건 검증"
         if "SPM" in s and ("함께 편성" in s or "고성과 상품" in s):
             return "고성과 상품 × 적합 타겟 조합 강화"
@@ -5089,7 +5096,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     def _strip_subject_prefix(fact: str, title: str) -> str:
         f = str(fact or "").strip()
-        if title.endswith("상품 교체") and "/" in title:
+        if title.endswith("상품 교체"):
             return f
         base = title.replace(" 타겟 적합도", "").strip()
         # full title may be shortened; first remove exact title, then generic leading subject up to 조사
@@ -5133,14 +5140,21 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f = re.sub(r"순으로 구성됐습니다$", "순으로 매출 구성", f)
 
         if title == "시간대별 편성 조건 검증":
-            f = re.sub(r"최근 4주 중 3주에서\s+(\d{1,2}:\d{2})(?::\d{2})?\s+시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인", r"최근 4주 중 3주에서 \1 SPM 최고 기록", f)
+            f = re.sub(
+                r"최근\s+(\d+)주\s+중\s+(\d+)주에서\s+(\d{1,2}:\d{2})(?::\d{2})?\s+시간대가\s+SPM\s+최고를\s+기록해\s+시간대\s+우위가\s+반복\s+확인",
+                r"최근 \1주 중 \2주에서 \3 SPM 최고 기록",
+                f,
+            )
         if title.endswith("성별 타겟 적합도"):
             f = re.sub(r"여성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 남성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인", r"여성 \1회 평균 \2·500만원 이상 \3회, 남성 평균 \4로 \5배 차이", f)
             f = re.sub(r"남성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 여성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인", r"남성 \1회 평균 \2·500만원 이상 \3회, 여성 평균 \4로 \5배 차이", f)
 
         if title == "요일별 편성 조건 검증":
-            f = re.sub(r"최근 4주 중 3주에서 수요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인",
-                       "최근 4주 중 3주에서 수요일 SPM 최고 기록", f)
+            f = re.sub(
+                r"최근\s+(\d+)주\s+중\s+(\d+)주에서\s+(.+?)요일이\s+SPM\s+최고를\s+기록해\s+요일별\s+효율\s+차이가\s+반복\s+확인",
+                r"최근 \1주 중 \2주에서 \3요일 SPM 최고 기록",
+                f,
+            )
 
         replacements = [
             (r"의 ([0-9.]+)%를 차지해", r"의 \1% 차지,"),
@@ -5184,9 +5198,9 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             return "과거 300만원·500만원 이상 달성 횟수와 가격 경쟁력을 함께 반영해 편성 우선순위 설정 필요"
         if title == "고성과 상품 × 적합 타겟 조합 강화":
             return "반복 성과가 확인된 상품·타겟·SEG 조합을 축적해 재편성 및 미발송 SEG 확대 기준으로 활용 필요"
-        if title == "식품/건강 상품별 편차 확대":
+        if title.endswith("상품별 편차 확대"):
             return "과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
-        if title.endswith("상품 교체") and "/" in title:
+        if title.endswith("상품 교체"):
             return "카테고리 비중은 유지하되 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체"
         if title.endswith("냉방가전 신규·유사신규 발굴"):
             return "단일 사례로 반복성은 추가 검증하되 유사 가격대의 냉방가전 신규·유사신규 TEST 검토"
@@ -5272,8 +5286,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if type_col and "주문금액" in pw.columns:
             labels = pw[type_col].fillna("").astype(str).str.strip()
             # 배타 분류: 재편성 표기가 있으면 재편성 우선, 그 외 신규/유사신규만 신규군
-            re_mask = labels.str.contains("재편성", na=False)
-            new_mask = labels.str.contains("신규", na=False) & ~re_mask
+            new_mask, re_mask = _weekly_operation_masks(labels)
             new_df = pw[new_mask].copy()
             re_df = pw[re_mask].copy()
             if not new_df.empty and not re_df.empty:
@@ -5297,8 +5310,9 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             type_col = first_col(pw, ["상품구분", "신규구분", "운영구분", "재편성", "구분", "편성구분"])
             if type_col and "주문금액" in pw.columns:
                 labels = pw[type_col].fillna("").astype(str)
-                new_df = pw[labels.str.contains("신규", na=False)]
-                re_df = pw[labels.str.contains("재편성", na=False)]
+                new_mask, re_mask = _weekly_operation_masks(labels)
+                new_df = pw[new_mask]
+                re_df = pw[re_mask]
                 if not new_df.empty and not re_df.empty:
                     n_avg = float(new_df["주문금액"].mean())
                     r_avg = float(re_df["주문금액"].mean())
@@ -5335,55 +5349,68 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 특정 상품/시즌 사례는 현재 선택 주차의 원래 엔진(nxt)에 존재할 때만 출력됨.
     # 따라서 과거 주차를 선택해도 다른 주차 상품/수치가 섞이지 않음.
 
-    def _merge_next_duplicates(items):
-        merged = {}
+    def _merge_next_by_product_key(items):
+        """원본 상품키 기준 추천 병합.
+        다른 모델은 합치지 않고, 동일 상품의 여러 추천 근거만 1개 bullet로 병합.
+        """
+        result = []
+        keyed = {}
         order = []
+
         for line in items:
             s = str(line or "").strip()
-            if not s.startswith("• "):
+            if not s:
                 continue
-            body = s[2:]
-            title = body.split(" : ", 1)[0].strip() if " : " in body else body.strip()
-            key = re.sub(r"\s+", " ", title)
-            if key not in merged:
-                merged[key] = s
+
+            # 시즌 발굴/카테고리 교체는 상품 단일 추천과 별도 유지
+            if any(k in s for k in ["신규·유사신규 발굴", "상품 교체", "시즌 재운영"]):
+                result.append(s)
+                continue
+
+            key = _weekly_recommendation_product_key(s, weekly_context_products)
+            if not key:
+                result.append(s)
+                continue
+
+            if key not in keyed:
+                keyed[key] = s
                 order.append(key)
                 continue
-            prev = merged[key]
-            prev_fact = prev.split(" : ", 1)[1].split(" > ", 1)[0] if " : " in prev else ""
-            cur_fact = body.split(" : ", 1)[1].split(" > ", 1)[0] if " : " in body else ""
-            prev_action = prev.split(" > ", 1)[1] if " > " in prev else ""
-            cur_action = body.split(" > ", 1)[1] if " > " in body else ""
-            fact = prev_fact if len(prev_fact) >= len(cur_fact) else cur_fact
+
+            prev = keyed[key]
+            # 동일 상품이면 제목은 첫 문장 유지, fact/action을 중복 없이 병합
+            def _parts(x):
+                body = x[2:] if x.startswith("• ") else x
+                title, rest = (body.split(" : ", 1) + [""])[:2] if " : " in body else (body, "")
+                fact, action = (rest.split(" > ", 1) + [""])[:2] if " > " in rest else (rest, "")
+                return title.strip(), fact.strip(), action.strip()
+
+            pt, pf, pa = _parts(prev)
+            ct, cf, ca = _parts(s)
+            facts = []
+            for v in [pf, cf]:
+                if v and v not in facts:
+                    facts.append(v)
             actions = []
-            for a in [prev_action, cur_action]:
-                a = a.strip()
-                if a and a not in actions:
-                    actions.append(a)
-            merged[key] = f"• {title} : {fact}" + (f" > {' / '.join(actions)}" if actions else "")
-        return [merged[k] for k in order]
+            for v in [pa, ca]:
+                if v and v not in actions:
+                    actions.append(v)
 
-    dyn_next = _merge_next_duplicates(dyn_next)
+            # 가장 정보량 많은 fact 1개를 기본으로 사용하고, 다른 fact는 완전 중복이 아닐 때만 보조 근거로 추가
+            fact = max(facts, key=len) if facts else ""
+            extras = [f for f in facts if f != fact and f not in fact]
+            if extras:
+                fact = fact + " / " + " / ".join(extras)
 
-    # 동일 실제 상품의 재편성 추천이 여러 경로에서 중복되면 하나로 정리
-    def _dedupe_next_by_product_identity(items):
-        out = []
-        seen = set()
-        for line in items:
-            s = str(line or "").strip()
-            # 시즌 발굴은 상품 재편성과 별도 인사이트이므로 유지
-            if any(k in s for k in ["신규·유사신규 발굴", "상품 교체", "시즌 재운영"]):
-                out.append(s)
-                continue
-            title = s[2:].split(" : ",1)[0].strip() if s.startswith("• ") else s
-            key = _weekly_normalize_product_key(title)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(s)
-        return out
+            action = " / ".join(actions)
+            keyed[key] = f"• {pt} : {fact}" + (f" > {action}" if action else "")
 
-    dyn_next = _dedupe_next_by_product_identity(dyn_next)
+        # 원래 위치 순서를 최대한 유지: 일반 결과 뒤에 keyed 결과를 추가
+        result.extend(keyed[k] for k in order)
+        return result
+
+    dyn_next = _merge_next_by_product_key(dyn_next)
+
 
     # Final guard: 보수적 포매터.
     # 정상 숫자/브랜드/타겟/상품명은 절대 정규식 캡처로 치환하지 않는다.
@@ -5442,23 +5469,45 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_op = _final_clean(dyn_op)
     dyn_next = _final_clean(dyn_next)
 
-    # 통합 엔진 회귀 검증: 숫자/브랜드/타겟/시간대가 후처리에서 훼손되는 패턴 탐지
-    _weekly_sections_for_validation = [summary_lines, product_points, schedule_points, dyn_next]
-    _weekly_joined = "\n".join(str(x) for sec in _weekly_sections_for_validation for x in (sec or []))
-    _weekly_bad_patterns = [
-        r"의\s*>\s*%",
-        r"(?:남성|여성)\d{4}\s*>\s*회",
-        r"•\s*>",
-        r"최근\s*4주\s*중\s*\d주에서\s*>\s*SPM",
-        r"\\1",
-        r"\\\s*>",
-    ]
-    _weekly_issues = [pat for pat in _weekly_bad_patterns if re.search(pat, _weekly_joined)]
-    if _weekly_issues:
-        try:
-            print("[WEEKLY_ENGINE_VALIDATION]", _weekly_issues)
-        except Exception:
-            pass
+    # 통합 엔진 회귀 검증 + 자동 복구
+    def _weekly_validate_and_repair(items):
+        repaired = []
+        for raw in items:
+            s = str(raw or "").strip()
+
+            # 비정상 토큰이 있는 bullet은 안전하게 제거/복구
+            s = s.replace("\\1", "")
+            s = s.replace("\\ >", " > ")
+            s = re.sub(r"^•\s*>\s*", "• ", s)
+
+            # 숫자/타겟/시간대가 이미 유실된 형태는 신뢰할 수 없으므로 해당 bullet 제외
+            corrupt = any([
+                re.search(r"의\s*>\s*%", s),
+                re.search(r"(?:남성|여성)\d{4}\s*>\s*회", s),
+                re.search(r"최근\s+\d+주\s+중\s+\d+주에서\s*>\s*SPM", s),
+                re.search(r":\s*>\s*에서", s),
+            ])
+            if corrupt:
+                continue
+
+            repaired.append(s)
+        return repaired
+
+    dyn_product = _weekly_validate_and_repair(dyn_product)
+    dyn_op = _weekly_validate_and_repair(dyn_op)
+    dyn_next = _weekly_validate_and_repair(dyn_next)
+
+    # 섹션이 비면 현재 선택 주차 데이터만으로 안전 fallback 생성
+    if not dyn_product:
+        dyn_product = [
+            "• 상품 성과 점검 : 금주 상품별 주문금액 분포를 기준으로 핵심·저성과 상품을 재확인 > "
+            "회차별 실적과 과거 이력을 함께 비교해 재편성 우선순위 설정 필요"
+        ]
+    if not dyn_op:
+        dyn_op = [
+            "• 편성 조건 점검 : 금주 타겟·카테고리·요일·시간대별 성과를 기준으로 편성 효율 확인 > "
+            "반복 고성과 조건이 확인되는 조합 중심으로 다음 편성 TEST 필요"
+        ]
 
     return "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
