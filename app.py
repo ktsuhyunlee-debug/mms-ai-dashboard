@@ -197,7 +197,8 @@ html, body, [class*="css"] {
 }
 
 .asset-image-card {
-    height: 430px;
+    height: 100%;
+    min-height: 430px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -206,7 +207,9 @@ html, body, [class*="css"] {
 
 .asset-image-card img {
     width: 100%;
-    height: 398px;
+    height: 100%;
+    min-height: 398px;
+    max-height: none;
     object-fit: contain;
     border-radius: 10px;
 }
@@ -321,6 +324,34 @@ hr {
     padding-top: 0.25rem;
 }
 
+
+/* 일일실적 이미지/문구 카드: 긴 문구 기준으로 좌우 높이 자동 통일 */
+.daily-asset-row {
+    align-items: stretch;
+}
+.daily-asset-row > div {
+    display: flex;
+    flex-direction: column;
+}
+.daily-asset-row .asset-card {
+    flex: 1 1 auto;
+    width: 100%;
+}
+
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) {
+    align-items: stretch !important;
+}
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
+    display: flex !important;
+    flex-direction: column !important;
+}
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div {
+    height: 100% !important;
+}
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
+    height: 100% !important;
+}
+
 @media (max-width: 900px) {
     .block-container {
         padding: 1.6rem 0.75rem 2rem;
@@ -349,8 +380,14 @@ hr {
         min-height: 320px;
     }
 
+    .asset-image-card {
+        height: auto;
+        min-height: 320px;
+    }
+
     .asset-image-card img {
         height: auto;
+        min-height: 0;
         max-height: 380px;
     }
 }
@@ -5058,8 +5095,19 @@ messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명"
 promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"]))
 
 _menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"]
+_menu_slug_to_name = {
+    "home": "홈",
+    "daily": "일일실적",
+    "weekly": "주간실적",
+    "product": "상품구분",
+    "target": "타겟분석",
+    "planning": "편성 프로그램",
+}
+_menu_name_to_slug = {v: k for k, v in _menu_slug_to_name.items()}
+
 _query_menu = _get_query_param("menu").strip().lower()
-_menu_default_index = 2 if _query_menu in {"weekly", "주간실적"} else 0
+_query_menu_name = _menu_slug_to_name.get(_query_menu, "홈")
+_menu_default_index = _menu_options.index(_query_menu_name) if _query_menu_name in _menu_options else 0
 
 menu = st.sidebar.radio(
     "메뉴",
@@ -5067,15 +5115,22 @@ menu = st.sidebar.radio(
     index=_menu_default_index,
 )
 
-# 딥링크로 주간실적에 진입한 뒤 사용자가 다른 메뉴를 누르면
-# 다음 새로고침에서도 해당 메뉴 선택을 방해하지 않도록 query param을 정리합니다.
-if menu != "주간실적" and _query_menu in {"weekly", "주간실적"}:
-    try:
-        for _qp_key in ["menu", "year", "week"]:
+# 현재 메뉴를 URL에 반영하여 주소를 그대로 공유하면 해당 메뉴로 직접 진입.
+try:
+    st.query_params["menu"] = _menu_name_to_slug.get(menu, "home")
+except Exception:
+    pass
+
+# 메뉴별로 사용하지 않는 세부 query param은 정리
+try:
+    if menu != "주간실적":
+        for _qp_key in ["year", "week"]:
             if _qp_key in st.query_params:
                 del st.query_params[_qp_key]
-    except Exception:
-        pass
+    if menu != "일일실적" and "date" in st.query_params:
+        del st.query_params["date"]
+except Exception:
+    pass
 
 
 
@@ -5084,6 +5139,7 @@ if menu != "주간실적" and _query_menu in {"weekly", "주간실적"}:
 # ─────────────────────────────────────────────────────────────────────────────
 if menu == "홈":
     st.markdown('<div class="section-title">홈 · 기간별 실적</div>', unsafe_allow_html=True)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 홈 화면으로 바로 연결됩니다.")
 
     monthly_all = aggregate_send(sends, "Monthly")
     weekly_all = aggregate_send(sends, "Weekly")
@@ -5214,7 +5270,28 @@ if menu == "홈":
 elif menu == "일일실적":
     st.markdown('<div class="section-title">📊 일일실적 분석</div>', unsafe_allow_html=True)
     dates = sorted(products["_date"].dt.date.unique(), reverse=True)
-    selected_date = st.selectbox("📅 날짜 선택", dates)
+
+    _query_date_raw = _get_query_param("date").strip()
+    try:
+        _query_date = pd.to_datetime(_query_date_raw, errors="raise").date() if _query_date_raw else None
+    except Exception:
+        _query_date = None
+
+    _daily_default_index = dates.index(_query_date) if _query_date in dates else 0
+    selected_date = st.selectbox(
+        "📅 날짜 선택",
+        dates,
+        index=_daily_default_index,
+        key="daily_selected_date",
+    )
+
+    try:
+        st.query_params["menu"] = "daily"
+        st.query_params["date"] = selected_date.isoformat()
+    except Exception:
+        pass
+
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 날짜의 일일실적으로 바로 연결됩니다.")
 
     pday = products[products["_date"].dt.date == selected_date].copy()
     sday = sends[sends["_date"].dt.date == selected_date].copy()
@@ -5888,6 +5965,7 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 elif menu == "상품구분":
     st.markdown('<div class="section-title">상품구분</div>', unsafe_allow_html=True)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품구분 화면으로 바로 연결됩니다.")
 
     st.markdown('<div class="subsection-title">상품 등급 기준</div>', unsafe_allow_html=True)
     st.caption("평균 주문금액 기준")
@@ -6067,6 +6145,7 @@ elif menu == "상품구분":
 
 
 elif menu == "타겟분석":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟분석 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">타겟분석</div>', unsafe_allow_html=True)
 
     target_date_range = st.date_input(
@@ -6260,6 +6339,7 @@ elif menu == "타겟분석":
                 )
 
 elif menu == "편성 프로그램":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 편성 프로그램 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">🗓️ 편성 프로그램</div>', unsafe_allow_html=True)
     st.caption(
         "발송 슬롯과 소재를 각각 입력한 뒤, 주력 상품 안에서 과거 주문금액을 우선으로 자동 편성합니다. "
