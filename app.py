@@ -185,20 +185,23 @@ html, body, [class*="css"] {
 }
 
 .asset-card {
-    height: 430px;
+    height: auto;
+    min-height: 430px;
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--surface);
     padding: 14px;
     box-sizing: border-box;
-    overflow: hidden;
+    overflow: visible;
     box-shadow: 0 3px 12px rgba(25, 42, 70, 0.045);
 }
 
 .asset-image-card {
+    height: 430px;
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: hidden;
 }
 
 .asset-image-card img {
@@ -209,8 +212,9 @@ html, body, [class*="css"] {
 }
 
 .asset-message-card {
-    height: 430px;
-    overflow-y: auto;
+    height: auto;
+    min-height: 430px;
+    overflow-y: visible;
     white-space: pre-wrap;
     font-size: 15px;
     line-height: 1.75;
@@ -3767,6 +3771,28 @@ def _style_weekly_category_total(df: pd.DataFrame):
         return df
 
 
+
+def _get_query_param(name: str, default: str = "") -> str:
+    """Streamlit query param을 문자열로 안전하게 읽습니다."""
+    try:
+        value = st.query_params.get(name, default)
+        if isinstance(value, list):
+            return str(value[-1]) if value else default
+        return str(value) if value is not None else default
+    except Exception:
+        return default
+
+
+def _set_weekly_deeplink(year: int, week: str) -> None:
+    """현재 주간실적 선택값을 URL에 반영합니다."""
+    try:
+        st.query_params["menu"] = "weekly"
+        st.query_params["year"] = str(int(year))
+        st.query_params["week"] = str(week)
+    except Exception:
+        pass
+
+
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5031,10 +5057,25 @@ lowest = st.session_state.get("lowest", pd.DataFrame())
 messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명", "MMS문구"]))
 promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"]))
 
+_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"]
+_query_menu = _get_query_param("menu").strip().lower()
+_menu_default_index = 2 if _query_menu in {"weekly", "주간실적"} else 0
+
 menu = st.sidebar.radio(
     "메뉴",
-    ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"],
+    _menu_options,
+    index=_menu_default_index,
 )
+
+# 딥링크로 주간실적에 진입한 뒤 사용자가 다른 메뉴를 누르면
+# 다음 새로고침에서도 해당 메뉴 선택을 방해하지 않도록 query param을 정리합니다.
+if menu != "주간실적" and _query_menu in {"weekly", "주간실적"}:
+    try:
+        for _qp_key in ["menu", "year", "week"]:
+            if _qp_key in st.query_params:
+                del st.query_params[_qp_key]
+    except Exception:
+        pass
 
 
 
@@ -5453,8 +5494,26 @@ elif menu == "주간실적":
     st.markdown('<div class="section-title">📈 주간실적 분석</div>', unsafe_allow_html=True)
 
     # 연도 → 주차 순서로 선택하여 같은 주차명이 연도별로 섞이지 않도록 함
+    # 공유 URL 예: ?menu=weekly&year=2026&week=0713주차
     weekly_years = sorted(products["_year"].dropna().astype(int).unique(), reverse=True)
-    selected_year = st.selectbox("연도 선택", weekly_years)
+
+    _query_year_raw = _get_query_param("year")
+    try:
+        _query_year = int(_query_year_raw)
+    except (TypeError, ValueError):
+        _query_year = None
+
+    _year_default_index = (
+        weekly_years.index(_query_year)
+        if _query_year in weekly_years
+        else 0
+    )
+    selected_year = st.selectbox(
+        "연도 선택",
+        weekly_years,
+        index=_year_default_index,
+        key="weekly_selected_year",
+    )
 
     year_products = products[products["_year"] == selected_year].copy()
     year_sends = sends[sends["_year"] == selected_year].copy()
@@ -5467,7 +5526,24 @@ elif menu == "주간실적":
         st.info("선택한 연도의 주차 데이터가 없습니다.")
         st.stop()
 
-    week = st.selectbox("주차 선택", weeks, index=len(weeks)-1)
+    _query_week = _get_query_param("week").strip()
+    _week_default_index = (
+        weeks.index(_query_week)
+        if _query_week in weeks
+        else len(weeks) - 1
+    )
+    week = st.selectbox(
+        "주차 선택",
+        weeks,
+        index=_week_default_index,
+        key="weekly_selected_week",
+    )
+
+    # 현재 선택값을 주소창 URL에 즉시 반영.
+    # 이 주소를 그대로 복사해 공유하면 동일 연도·주차로 바로 진입합니다.
+    _set_weekly_deeplink(selected_year, week)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 주차 화면으로 바로 연결됩니다.")
+
     pw = year_products[year_products["주차"].astype(str) == week].copy()
     sw = year_sends[year_sends["주차"].astype(str) == week].copy()
 
