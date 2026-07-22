@@ -328,54 +328,52 @@ hr {
 
 
 
-/* V4.4.33 발송소재 이미지/문구 세로 길이 동일화 */
+/* V4.4.34 발송소재 좌우 영역 상단/하단 완전 일치 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
-
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
+    align-self: stretch !important;
     display: flex !important;
     flex-direction: column !important;
-    align-self: stretch !important;
 }
-
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stElementContainer"]:has(.asset-card) {
     display: flex !important;
     flex-direction: column !important;
     flex: 1 1 auto !important;
     height: 100% !important;
+    min-height: 0 !important;
 }
-
-/* 좌우 카드 외곽 높이 동일 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
+    flex: 1 1 auto !important;
     width: 100% !important;
     height: 100% !important;
     min-height: 430px !important;
     box-sizing: border-box !important;
 }
-
-/* 문구 영역 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
     height: 100% !important;
     min-height: 430px !important;
     overflow: visible !important;
 }
-
-/* 이미지 영역 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
+    position: relative !important;
     height: 100% !important;
     min-height: 430px !important;
     overflow: hidden !important;
 }
-
-/* 이미지는 카드 내부에서 비율 유지, 잘림 없음 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
-    width: calc(100% - 28px) !important;
-    height: calc(100% - 28px) !important;
-    max-width: calc(100% - 28px) !important;
-    max-height: calc(100% - 28px) !important;
+    position: absolute !important;
+    inset: 10px !important;
+    width: calc(100% - 20px) !important;
+    height: calc(100% - 20px) !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: calc(100% - 20px) !important;
+    max-height: calc(100% - 20px) !important;
     object-fit: contain !important;
     object-position: center center !important;
     transform: none !important;
@@ -5466,21 +5464,20 @@ elif menu == "일일실적":
         with asset_text_col:
             import html
             if message_text:
-                message_body = html.escape(message_text).replace("\n", "<br>")
+                clean_message_text = str(message_text).lstrip()
+                message_body = html.escape(clean_message_text).replace("\n", "<br>")
             else:
                 message_body = (
                     "로우데이터의 MMS문구 컬럼에 문구를 입력하면 "
                     "이곳에 자동으로 표시됩니다."
                 )
 
-            st.markdown(
-                f"""
-                <div class="asset-card asset-message-card" style="padding-top:18px;">
-                    {message_body}
-                </div>
-                """,
-                unsafe_allow_html=True,
+            message_html = (
+                '<div class="asset-card asset-message-card" style="padding-top:18px;">'
+                + message_body
+                + '</div>'
             )
+            st.markdown(message_html, unsafe_allow_html=True)
 
         # 발송 통계: 요청 컬럼만 표시
         send_count = float(send_row.get(send_col, 0)) if send_col else 0
