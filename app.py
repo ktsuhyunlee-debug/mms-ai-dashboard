@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.58-FINAL-RUNTIME-GUARDED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.59-FINAL-LOCKED-WEEKLY-INSIGHT
 
 from __future__ import annotations
 
@@ -4509,6 +4509,9 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
         ("보랄 더 데일리 스탠드 에어서큘레이터 HNZ-ACF700M", "보랄 스탠드 에어서큘레이터"),
         ("독일 보랄 프리미엄 스탠드 3D 에어써큘팬(전자식)", "보랄 3D 스탠드 에어써큘팬"),
         ("보랄 프리미엄 스탠드 3D 에어써큘팬(전자식)", "보랄 3D 스탠드 에어써큘팬"),
+        ("오아 에어쿨핸디맥스 휴대용 미니 급속 냉각 BLDC 핸디 손풍기", "오아 휴대용 냉각 손풍기"),
+        ("필립스 남성그루밍 풀세트 여행용면도기 + 코털제거기", "필립스 남성그루밍 풀세트"),
+        ("아디다스 컴뱃스포츠 반팔티셔츠 트레이닝 S23ATMTS1 5종 택1", "아디다스 컴뱃스포츠 반팔티셔츠"),
         ("독일 보랄 보이는 에어프라이어 5L", "보랄 보이는 에어프라이어 5L"),
         ("1+1 초경량 3단 자동 우산 양산 겸용_튼튼한 접이식 미니 우산 암막 우양산", "1+1 초경량 3단 자동 암막 우양산"),
         ("하얀 겨울 따라 떠나는, 유람선+BIG5 관광+4대특식 제주도 3박 4일", "제주도 3박 4일 여행상품"),
@@ -4789,6 +4792,9 @@ def validate_weekly_output_quality(report: str) -> list[str]:
         "중복 추천": r"차주 재편성 우선 후보.*차주 재편성 우선 후보",
         "과도한 병합": r"\s/\s.*\s/\s",
         "파괴 토큰": r"(?:의\s*>\s*%|(?:남성|여성)\d{4}\s*>\s*회|•\s*>)",
+        "기계적 의사결정 prefix": r"(?m)^(?:재편성|조건 개선 후 재TEST|교체|신규·유사신규 발굴)\s*:\s*•",
+        "구형 교체 근거": r"300만원 이상 달성 이력이 없지만.+카테고리는 금주 전체 주문금액",
+        "과도한 상품명 모델코드": r"(?m)^•.*(?:HNZ-|BDC-|BR-)[A-Z0-9\-]+",
         "nan 타겟": r"\bnan(?:에서|\s|$)",
         "비문 유지했고했습니다": r"유지했고했습니다",
         "비문 확인검토": r"확인\s*검토",
@@ -5327,7 +5333,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if re.search(r"최근\s+\d+주\s+중\s+\d+주", s) and "요일" in s and "SPM 최고" in s:
             return "요일별 편성 조건 검증"
         if "신규·유사신규" in s and "재편성" in s and ("평균" in s or "비중" in s):
-            return "신규·유사신규 vs 재편성"
+            return "신규·유사신규 성과 비교"
         if re.search(r"최근\s+\d+주\s+중\s+\d+주", s) and "시간대" in s and "SPM 최고" in s:
             return "시간대별 편성 조건 검증"
         if "SPM" in s and ("함께 편성" in s or "고성과 상품" in s):
@@ -5467,22 +5473,29 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if title == "요일별 편성 조건 검증":
             return "상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
         if title == "카테고리보다 검증 상품 중심 편성":
-            return "과거 300만원·500만원 이상 달성 횟수와 가격 경쟁력을 함께 반영해 편성 우선순위 설정 필요"
+            return (
+                "특정 카테고리의 높은 매출 비중을 카테고리 적합도로 단정하지 않고, "
+                "카테고리 내 300만원·500만원 이상 반복 달성 상품과 가격·타겟 조건을 중심으로 편성 우선순위 설정 필요"
+            )
         if title == "고성과 상품 × 적합 타겟 조합 강화":
             return "반복 성과가 확인된 상품·타겟·SEG 조합을 축적해 재편성 및 미발송 SEG 확대 기준으로 활용 필요"
         if title.endswith("상품별 편차 확대"):
-            return "과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
-        if title.endswith("상품 교체"):
-            f = re.sub(
-                r"^(.+?)(?:은|는)\s+과거\s+(\d+)회\s+운영\s+중\s+300만원\s+이상\s+달성\s+이력이\s+없지만.+$",
-                r"과거 \2회 운영 모두 300만원 미만으로 반복 부진",
-                f,
+            return (
+                "카테고리 자체의 성과보다 개별 상품의 검증 이력·가격 경쟁력·타겟 적합도에 따른 성과 차이를 우선 확인하고 "
+                "반복 저성과 상품은 검증 상품 중심으로 교체 편성 필요"
             )
-            return "과거 300만원 이상 반복 성과가 확인된 동일 카테고리 검증 상품으로 교체 검토"
+        if title.endswith("상품 교체"):
+            return "동일 카테고리 내 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체 검토"
         if title.endswith("냉방가전 신규·유사신규 발굴"):
-            return "단일 사례로 반복성은 추가 검증하되 유사 가격대의 냉방가전 신규·유사신규 TEST 검토"
+            return (
+                "단일 사례로 반복성을 단정하기보다 3~5만원대·스탠드형·공기순환·리모컨 등 "
+                "사용 편의성이 명확한 냉방가전 중심으로 신규·유사신규 상품 우선 발굴 및 TEST 검토"
+            )
         if title.endswith("우양산 신규·유사신규 발굴"):
-            return "장마·폭염 시즌을 고려해 1만원 내외 경량·휴대성·암막 기능 우양산 신규·유사신규 TEST 검토"
+            return (
+                "장마·폭염 시즌 수요를 고려해 1만원 내외·초경량·휴대성·암막·자동 개폐 등 "
+                "기능성이 명확한 우양산 중심으로 신규·유사신규 상품 발굴 및 TEST 검토"
+            )
         if title.endswith("타겟 적합도"):
             m = re.search(r"평균매출이\s*([0-9.]+)배\s*높은\s*((?:남성|여성)\d{4})", a)
             if m:
@@ -5491,11 +5504,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
         # Product recommendation actions
         if "동일 SEG 과다 반복" in a:
-            return "최근 고성과 타겟 중심 재편성하되 동일 SEG 과다 반복을 피하고 미발송 SEG 확대 TEST 검토"
+            return "최근 고성과 타겟 중심으로 재편성하되 동일 SEG 반복을 피하고 미발송 SEG까지 순차 확대 TEST"
         if "판매 가능 여부" in a and "최신 가격" in a:
             return "판매 가능 여부와 최신 가격 확인 후 유사 조건 유지 시 재편성 검토"
         if "2회 이상 연속 하락" in a:
-            return "고성과 타겟 중심 단기 재편성하되 2회 이상 연속 하락 시 휴지기 적용 검토"
+            return "반복 편성에도 성과가 유지되고 있어 현재 고성과 타겟 적합도와 반복 운영 안정성 확인"
         if "고성과 SEG" in a and "미발송 SEG" in a:
             return re.sub(r"하는 것이 적절합니다$", "검토", a)
 
@@ -5567,10 +5580,33 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             if not new_df.empty and not re_df.empty:
                 n_amt = pd.to_numeric(new_df["주문금액"], errors="coerce").fillna(0)
                 r_amt = pd.to_numeric(re_df["주문금액"], errors="coerce").fillna(0)
+                _n_avg = float(n_amt.mean())
+                _r_avg = float(r_amt.mean())
+                _n_hit = float((n_amt >= 3_000_000).mean()) * 100
+                _r_hit = float((r_amt >= 3_000_000).mean()) * 100
+
+                if _n_avg > _r_avg and _n_hit > _r_hit:
+                    _op_action = (
+                        f"신규·유사신규가 평균매출 {compact_money(_n_avg-_r_avg)} 높고 "
+                        f"300만원 이상 성공률도 {_n_hit-_r_hit:.1f}%p 우위 > "
+                        "검증 상품 재편성으로 안정적인 매출을 확보하면서 신규·유사신규 TEST를 지속해 차기 핵심 상품군 확대 필요"
+                    )
+                elif _r_avg > _n_avg and _r_hit > _n_hit:
+                    _op_action = (
+                        f"재편성이 평균매출 {compact_money(_r_avg-_n_avg)} 높고 "
+                        f"300만원 이상 성공률도 {_r_hit-_n_hit:.1f}%p 우위 > "
+                        "검증 상품 중심 재편성 비중을 유지하되 신규·유사신규는 선별 TEST해 신규 매출원 발굴 필요"
+                    )
+                else:
+                    _op_action = (
+                        "평균매출과 300만원 이상 성공률의 우위 방향이 엇갈려 "
+                        "검증 상품 재편성과 신규·유사신규 TEST를 병행하며 추가 데이터 축적 필요"
+                    )
+
                 line = (
-                    f"• 신규·유사신규 vs 재편성 : 신규·유사신규 {len(new_df)}건 평균 {compact_money(float(n_amt.mean()))}·300만원 이상 비중 {(n_amt>=3_000_000).mean()*100:.1f}%, "
-                    f"재편성 {len(re_df)}건 평균 {compact_money(float(r_amt.mean()))}·300만원 이상 비중 {(r_amt>=3_000_000).mean()*100:.1f}% > "
-                    "평균매출과 300만원 이상 성공률을 함께 비교해 검증 상품 재편성과 신규 후보 TEST 병행 필요"
+                    f"• 신규·유사신규 성과 비교 : 신규·유사신규 {len(new_df)}건 평균 {compact_money(_n_avg)}·300만원 이상 비중 {_n_hit:.1f}%, "
+                    f"재편성 {len(re_df)}건 평균 {compact_money(_r_avg)}·300만원 이상 비중 {_r_hit:.1f}% > "
+                    f"{_op_action}"
                 )
                 if not any("신규·유사신규 vs 재편성" in x for x in dyn_op):
                     dyn_op.insert(0, line)
@@ -5592,10 +5628,27 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     r_avg = float(re_df["주문금액"].mean())
                     n_hit = float((new_df["주문금액"] >= 3_000_000).mean()) * 100
                     r_hit = float((re_df["주문금액"] >= 3_000_000).mean()) * 100
+                    if n_avg > r_avg and n_hit > r_hit:
+                        op_action = (
+                            f"신규·유사신규가 평균매출 {compact_money(n_avg-r_avg)} 높고 "
+                            f"300만원 이상 성공률도 {n_hit-r_hit:.1f}%p 우위 > "
+                            "검증 상품 재편성으로 안정적인 매출을 확보하면서 신규·유사신규 TEST를 지속해 차기 핵심 상품군 확대 필요"
+                        )
+                    elif r_avg > n_avg and r_hit > n_hit:
+                        op_action = (
+                            f"재편성이 평균매출 {compact_money(r_avg-n_avg)} 높고 "
+                            f"300만원 이상 성공률도 {r_hit-n_hit:.1f}%p 우위 > "
+                            "검증 상품 중심 재편성 비중을 유지하되 신규·유사신규는 선별 TEST해 신규 매출원 발굴 필요"
+                        )
+                    else:
+                        op_action = (
+                            "평균매출과 300만원 이상 성공률의 우위 방향이 엇갈려 "
+                            "검증 상품 재편성과 신규·유사신규 TEST를 병행하며 추가 데이터 축적 필요"
+                        )
                     dyn_op.append(
-                        f"• 신규·유사신규 vs 재편성 : 신규·유사신규 {len(new_df)}건 평균 {compact_money(n_avg)}·300만원 이상 비중 {n_hit:.1f}%, "
-                        f"재편성 {len(re_df)}건 평균 {compact_money(r_avg)}·300만원 이상 비중 {r_hit:.1f}% 기록 > "
-                        "평균매출과 300만원 이상 성공률을 함께 비교해 검증 상품 재편성과 신규 후보 TEST 병행 필요"
+                        f"• 신규·유사신규 성과 비교 : 신규·유사신규 {len(new_df)}건 평균 {compact_money(n_avg)}·300만원 이상 비중 {n_hit:.1f}%, "
+                        f"재편성 {len(re_df)}건 평균 {compact_money(r_avg)}·300만원 이상 비중 {r_hit:.1f}% > "
+                        f"{op_action}"
                     )
         except Exception:
             pass
@@ -5871,11 +5924,28 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             "반복 고성과 조건이 확인되는 조합 중심으로 다음 편성 TEST 필요"
         ]
 
+    def _lock_final_weekly_style(items):
+        out = []
+        for raw in items:
+            s = str(raw or "").strip()
+            if not s:
+                continue
+            s = re.sub(r"^(재편성|조건 개선 후 재TEST|교체|신규·유사신규 발굴)\s*:\s*", "", s)
+            s = re.sub(r"^•\s*", "", s).strip()
+            s = s.replace(",,", ",")
+            s = re.sub(r"\s+", " ", s).strip()
+            out.append("• " + s)
+        return out
+
+    dyn_product = _lock_final_weekly_style(dyn_product)
+    dyn_op = _lock_final_weekly_style(dyn_op)
+    dyn_next = _lock_final_weekly_style(dyn_next)
+
     _final_report = "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
         _weekly_section_join("■ 상품 운영 시사점", dyn_product),
         _weekly_section_join("■ 편성 운영 시사점", dyn_op),
-        _weekly_section_join("■ 차주 운영 제안", [_md_action_prefix(x) for x in dyn_next]),
+        _weekly_section_join("■ 차주 운영 제안", dyn_next),
     ])
 
     # 최종 표시명 적용 이후 실제 사용자에게 보여질 문자열 기준 검증
