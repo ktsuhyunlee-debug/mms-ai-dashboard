@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.71-WEEKLY-DETAIL-ENGINE-FINALIZED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.77-DAILY-INSIGHT-POLISH
 
 from __future__ import annotations
 
@@ -1731,7 +1731,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_evidence = "발송일 최저가 대비 1% 초과 가격 열위"
     elif summary["운영횟수"] == 0 and amount < 1_000_000:
         if price_eval and price_eval.get("level") in {"same","moderate"}:
-            action_sentence = "신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외"
+            action_sentence = "신규 첫 TEST에서 초기 구매 반응이 낮게 확인돼 1회 결과만으로 상품 자체 부진을 단정하기보다 가격·구성·타겟 조건 점검 필요 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외"
             action_evidence = "신규 첫 운영 + 100만원 미만 + 가격 차별화 제한"
         else:
             action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요"
@@ -1833,9 +1833,44 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         "type": "action",
     })
 
+    # V4.4.77: daily insight semantic polish
+    # 신규 첫 TEST / 가격 경쟁력 확보 관찰상품 / 시즌 저성과 문장의 액션 정합성 보강
+    _is_first_run_final = bool(summary.get("운영횟수", 0) <= 1)
+    _amount_final = float(amount or 0)
+    _has_price_advantage_final = any(
+        ("최저가보다" in str(x.get("sentence", "")) and "저렴" in str(x.get("sentence", "")))
+        for x in selected
+    )
+    _is_seasonal_final = any(
+        any(k in str(x.get("sentence", "")) for k in ["시즌", "휴가철", "보양식", "냉방", "장마", "폭염"])
+        for x in selected
+    )
+
+    for _item in selected:
+        _sent = str(_item.get("sentence", ""))
+
+        if _is_first_run_final and _amount_final < 1_000_000 and _item.get("type") != "action":
+            if ("금번" in _sent and ("구매 반응" in _sent or "그치" in _sent)) and "신규 첫 TEST" not in _sent:
+                _sent = f"신규 첫 TEST에서 {compact_money(_amount_final)}으로 초기 구매 반응 제한적"
+
+        if _item.get("type") == "action":
+            if 1_000_000 <= _amount_final < 2_000_000 and _has_price_advantage_final:
+                _sent = "다음 운영 제안: 가격 경쟁력은 유지하고 타겟 또는 전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 여부 확인 후 추가 편성 판단"
+            elif _is_first_run_final and _amount_final < 1_000_000:
+                if _is_seasonal_final:
+                    _sent = "다음 운영 제안: 시즌 수요가 유지되는 기간 내 가격 또는 구성 혜택을 보강하고 타겟을 변경해 1회 재TEST > 재차 100만원 미만 시 시즌 내 추가 편성 우선순위 하향 검토"
+                else:
+                    _sent = "다음 운영 제안: 가격 또는 구성 혜택을 보강하고 타겟 조건을 변경해 1회 재TEST > 재차 100만원 미만 시 재편성 우선순위 하향 검토"
+            _item["evidence"] = _item.get("evidence") or "상품등급·운영횟수·가격 경쟁력·시즌성 통합 판단"
+
+        _item["sentence"] = _sent
+
     # V4.4.64: report tone is applied to every actual daily insight sentence.
     for _item in selected:
         _s = _v4464_report_tone(_item.get("sentence", ""))
+        _s = _s.replace("다소 아쉬운 실적입니다.", "다소 아쉬운 실적 확인")
+        _s = _s.replace("구매 반응이 충분히 확보되지 않았습니다.", "구매 반응 확보 제한")
+        _s = _s.replace("가격 민감도가 낮은 흐름입니다.", "가격 민감도가 낮은 흐름 확인")
         _s = re.sub(r"연속 성장했습니다\.?$", "연속 성장 확인", _s)
         _s = re.sub(r"추가 운영 여력이 있습니다\.?$", "추가 운영 여력 확인", _s)
         _s = re.sub(r"검토할 수 있습니다\.?$", "검토 가능", _s)
@@ -7038,9 +7073,11 @@ elif menu == "주간실적":
         year_sends.groupby("주차")["_date"].min().sort_values().index
     )]
     prev_sw = pd.DataFrame()
+    prev_pw = pd.DataFrame()
     if week in year_week_names and year_week_names.index(week) > 0:
         prev_week = year_week_names[year_week_names.index(week) - 1]
         prev_sw = year_sends[year_sends["주차"].astype(str) == prev_week]
+        prev_pw = year_products[year_products["주차"].astype(str) == prev_week]
 
     def prev_metric(column, default=0):
         return float(prev_sw[column].sum()) if not prev_sw.empty and column in prev_sw.columns else default
@@ -7056,7 +7093,7 @@ elif menu == "주간실적":
 
     cards = [
         ("발송횟수", f"{len(sw):,}회", weekly_delta(len(sw), len(prev_sw)) if not prev_sw.empty else "-"),
-        ("상품수", f"{len(pw):,}건", "-"),
+        ("상품수", f"{len(pw):,}건", weekly_delta(len(pw), len(prev_pw)) if not prev_pw.empty else "-"),
         ("발송건수", f"{int(send_count):,}", weekly_delta(send_count, prev_send) if prev_sw is not None and not prev_sw.empty else "-"),
         ("주문건수", f"{int(order_count):,}건", weekly_delta(order_count, prev_orders) if not prev_sw.empty else "-"),
         ("주문금액", f"{int(amount):,}원", weekly_delta(amount, prev_amount) if not prev_sw.empty else "-"),
