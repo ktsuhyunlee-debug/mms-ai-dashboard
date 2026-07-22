@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.70 WEEKLY LOGIC GLOBAL GUARD
+# V4.4.71 WEEKLY DETAIL ENGINE FINALIZED
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.70-WEEKLY-LOGIC-GLOBAL-GUARD
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.71-WEEKLY-DETAIL-ENGINE-FINALIZED
 
 from __future__ import annotations
 
@@ -1502,7 +1502,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         elif amount < 2_000_000:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.",
-                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준에는 다소 미치지 못했습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 대비 다소 미달",
                 f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한",
                 f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요",
             ])
@@ -1535,7 +1535,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if amount > past_max and amount >= 3_000_000:
             add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적 경신", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
-            add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액이 크게 성장했습니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
+            add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액 성장 확인", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount <= past_avg * 0.7:
             decline_pct = (1 - amount / past_avg) * 100
             decline_sentence = stable_variant(sentence_key + "|decline", [
@@ -1552,7 +1552,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         vals = recent3["주문금액"].astype(float).tolist()
         growth = vals[2] / vals[0] - 1 if vals[0] > 0 else 0
         if vals[0] < vals[1] < vals[2] and growth >= 0.15:
-            add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장했습니다.", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
+            add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장 확인", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
         elif vals[0] > vals[1] > vals[2] and vals[0] > 0 and vals[2] <= vals[0] * 0.8:
             add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
             risks.append("최근 3회 연속 하락")
@@ -1576,7 +1576,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             unique_keys = [c for c in ["_date", "시간대", "캠페인명", "소재", "성별", "연령", "SEG"] if c in week_rows.columns]
             week_unique = week_rows.drop_duplicates(unique_keys) if unique_keys else week_rows
             if len(week_unique) >= 2 and (week_unique["주문금액"] >= 3_000_000).all():
-                add(96, "성과", f"금주 총 {len(week_unique)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록.", "주차 내 고유 발송 기준", "높음")
+                add(96, "성과", f"금주 총 {len(week_unique)}회 편성, 모든 운영에서 300만원 이상 주문금액 기록", "주차 내 고유 발송 기준", "높음")
 
     # 타겟 적합도 및 확장성
     if not prior.empty:
@@ -1594,9 +1594,9 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if not same_base_prior.empty:
                 seg_value = clean_identifier_value(row.get("SEG", ""))
                 seg_text = f"SEG{seg_value}" if seg_value else "신규 SEG"
-                add(86, "타겟 확장성", f"{current_base_target} 내 {seg_text} 첫 TEST에서 {compact_money(amount)}을 기록해 동일 타겟군 내 미발송 SEG 확장 가능성이 확인", f"동일 성별·연령 과거 운영 {len(same_base_prior)}회 / 해당 SEG 첫 운영", "참고")
+                add(86, "타겟 확장성", f"{current_base_target} 내 {seg_text} 첫 TEST에서 {compact_money(amount)}을 기록해 추가 SEG 검증 근거 확보", f"동일 성별·연령 과거 운영 {len(same_base_prior)}회 / 해당 SEG 첫 운영", "참고")
             else:
-                add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인", "신규 타겟 1회", "참고")
+                add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 추가 검증 근거 확보", "신규 타겟 1회", "참고")
         if len(target_stats) >= 2 and target_stats["sum"].sum() > 0:
             top = target_stats.iloc[0]
             second = target_stats.iloc[1]
@@ -1632,14 +1632,14 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
                 add(90, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}에 그쳐, 가격 외 상품·타겟 적합도 점검이 필요", "발송일 최저가 및 현재 주문금액 기준", "높음")
             elif not prior.empty and float(prior["주문금액"].mean()) > 0 and amount <= float(prior["주문금액"].mean()) * 0.7:
                 past_avg_price_cross = float(prior["주문금액"].mean())
-                add(90, "가격·성과", f"발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}으로 과거 평균 {compact_money(past_avg_price_cross)} 대비 성과가 낮아, 추가 할인보다 운영 간격·타겟 적합도 점검이 우선입니다.", "가격 경쟁력 + 과거 평균 성과 교차 기준", "높음")
+                add(90, "가격·성과", f"발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}으로 과거 평균 {compact_money(past_avg_price_cross)} 대비 성과가 낮아 추가 할인보다 운영 간격·타겟 적합도 점검 우선", "가격 경쟁력 + 과거 평균 성과 교차 기준", "높음")
             else:
                 add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 높은 가격 경쟁력을 확보", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "moderate":
-            add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 가격 우위는 있으나 차별화 폭은 제한적입니다.", "발송일 최저가 기준", "높음")
+            add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 가격 우위는 있으나 차별화 폭 제한", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "same":
             diff_abs = abs(price_diff)
-            add(84 if amount < 2_000_000 else 72, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가와 {fmt_num(diff_abs)}원 차이로 사실상 동일한 수준이어서 가격 차별화는 제한적입니다.", "발송일 최저가 ±1% 이내", "높음")
+            add(84 if amount < 2_000_000 else 72, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가와 {fmt_num(diff_abs)}원 차이로 사실상 동일한 수준, 가격 차별화 제한", "발송일 최저가 ±1% 이내", "높음")
             if amount < 2_000_000:
                 risks.append("가격 차별화 제한")
         elif amount < 2_000_000:
@@ -1649,7 +1649,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         last = prior.iloc[-1]
         last_price, last_amount = float(last.get("멤버십혜택가", 0) or 0), float(last.get("주문금액", 0) or 0)
         if last_price > 0 and last_amount > 0 and current_price > last_price and amount >= last_amount * 0.9:
-            add(85, "가격 탄력성", f"직전 대비 혜택가가 {fmt_num(current_price-last_price)}원 상승했으나 주문금액은 직전의 {amount/last_amount*100:.0f}% 수준을 유지해 가격 민감도가 낮은 흐름입니다.", "직전 운영 비교", "보통")
+            _price_ratio = amount / last_amount
+            if _price_ratio >= 1.2:
+                _price_msg = f"직전 대비 혜택가가 {fmt_num(current_price-last_price)}원 상승했음에도 주문금액은 직전 대비 {(_price_ratio-1)*100:.0f}% 증가해 가격 인상 영향 제한 가능성 확인"
+            else:
+                _price_msg = f"직전 대비 혜택가가 {fmt_num(current_price-last_price)}원 상승했으나 주문금액은 직전의 {_price_ratio*100:.0f}% 수준으로 유지돼 가격 인상 영향 제한 가능성 확인"
+            add(85, "가격 탄력성", _price_msg, "직전 운영 비교", "보통")
         price_rows = cumulative[(pd.to_numeric(cumulative.get("멤버십혜택가", 0), errors="coerce") > 0) & (cumulative["주문금액"] > 0)] if "멤버십혜택가" in cumulative.columns else pd.DataFrame()
         if len(price_rows) >= 4 and price_rows["멤버십혜택가"].nunique() >= 2:
             corr = price_rows[["멤버십혜택가", "주문금액"]].corr().iloc[0,1]
@@ -1665,7 +1670,11 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             ratio = amount / last_amount
             past_avg_for_fatigue = float(prior["주문금액"].mean()) if not prior.empty else 0
             if ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
-                add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 단기 반복에 따른 추가 하락은 제한적입니다.", "직전 운영 비교", "보통")
+                if ratio >= 1.2:
+                    _fatigue_msg = f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전 대비 {(ratio-1)*100:.0f}% 증가해 단기 반복 편성에서도 성과 확대 확인"
+                else:
+                    _fatigue_msg = f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준으로 유지돼 단기 반복에 따른 추가 하락 제한"
+                add(80, "운영 피로도", _fatigue_msg, "직전 운영 비교", "보통")
             elif ratio < 0.75:
                 add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요", "직전 운영 비교", "보통")
                 risks.append("단기 반복 피로도")
@@ -1673,17 +1682,17 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인", "재편성 간격 기준", "보통")
     recent90 = cumulative[cumulative["_date"] >= current_date-pd.Timedelta(days=90)] if pd.notna(current_date) else cumulative
     if summary["운영횟수"] >= 1 and 2 <= len(recent90) <= 3 and float(recent90["주문금액"].mean()) >= 3_000_000:
-        add(78, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력이 있습니다.", "최근 90일 기준", "보통")
+        add(78, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력 확인", "최근 90일 기준", "보통")
 
     # 시즌·생애주기·포지션
     season_words = ["선풍기", "에어컨", "서큘레이터", "우양산", "래쉬가드", "삼계탕", "장어", "아이스크림", "제습기", "냉감"]
     if any(word in name for word in season_words) and grade in ["핵심 상품", "우수 상품"]:
-        add(71, "시즌", "시즌 수요가 반영된 우수 성과로 수요가 유지되는 기간 내 추가 운영을 검토할 수 있습니다.", "상품명 시즌 키워드 기준", "참고")
+        add(71, "시즌", "시즌 수요가 반영된 우수 성과로 수요 유지 기간 내 추가 운영 검토", "상품명 시즌 키워드 기준", "참고")
     avg_all = float(cumulative["주문금액"].mean()) if not cumulative.empty else amount
     if len(cumulative) >= 5:
         trend = linear_trend_rate(cumulative.tail(8)["주문금액"])
         if trend >= 0.08:
-            add(79, "생애주기", "중기 추세가 상승하는 성장기 상품으로 운영 비중 확대 검토가 가능합니다.", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
+            add(79, "생애주기", "중기 추세 상승 확인, 운영 비중 확대 검토", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
         elif trend <= -0.08:
             add(77, "생애주기", "중기 추세가 하락하는 성숙·하락 전환 구간으로 운영 조건 재설계가 필요", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
             risks.append("생애주기 하락 전환")
@@ -1696,13 +1705,13 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     if not critical_issue and len(cumulative) >= 3:
         recent_normal = cumulative[~cumulative.apply(is_promotional, axis=1)].tail(3)
         if len(recent_normal) >= 3 and float(recent_normal["주문금액"].mean()) < 1_000_000:
-            add(108, "상품 적합도", f"최근 일반기간 3회 평균이 {compact_money(recent_normal['주문금액'].mean())}으로 반복 운영에서도 성과 개선이 제한적이어서 MMS 메인 상품으로는 적합도가 낮은 것으로 판단됩니다.", "일반기간 최근 3회", "높음")
+            add(108, "상품 적합도", f"최근 일반기간 3회 평균이 {compact_money(recent_normal['주문금액'].mean())}으로 반복 운영에서도 성과 개선이 제한적이어서 MMS 메인 상품 적합도 낮음", "일반기간 최근 3회", "높음")
             risks.append("MMS 메인 적합도 낮음")
 
     # 시즌성·마케팅 캘린더
     if season_ctx:
         add(86 if summary["운영횟수"] == 0 else 78, "시즌성",
-            f"{season_ctx['context']}에 해당하는 상품 {season_ctx['attributes']} 중심으로 상품 매력을 강화해 운영하는 것이 적절합니다.",
+            f"{season_ctx['context']} 해당 상품으로 실제 상품 속성 기준 매력 강화 후 운영 검토",
             f"{pd.to_datetime(current_date).month if pd.notna(current_date) else '-'}월 마케팅 캘린더 및 상품 속성 기준", "보통")
 
     # 다음 운영 제안: 분석 결과를 실제 편성 액션으로 연결합니다.
@@ -1826,7 +1835,17 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
     # V4.4.64: report tone is applied to every actual daily insight sentence.
     for _item in selected:
-        _item["sentence"] = _v4464_report_tone(_item.get("sentence", ""))
+        _s = _v4464_report_tone(_item.get("sentence", ""))
+        _s = re.sub(r"연속 성장했습니다\.?$", "연속 성장 확인", _s)
+        _s = re.sub(r"추가 운영 여력이 있습니다\.?$", "추가 운영 여력 확인", _s)
+        _s = re.sub(r"검토할 수 있습니다\.?$", "검토 가능", _s)
+        _s = re.sub(r"가능합니다\.?$", "가능", _s)
+        _s = re.sub(r"필요합니다\.?$", "필요", _s)
+        _s = re.sub(r"적절합니다\.?$", "적절", _s)
+        _s = re.sub(r"확인됩니다\.?$", "확인", _s)
+        _s = re.sub(r"판단됩니다\.?$", "판단", _s)
+        _s = re.sub(r"기록\.$", "기록", _s)
+        _item["sentence"] = _s
 
     return {
         "상품명": name,
@@ -2498,9 +2517,32 @@ def build_weekly_detail_analysis(
     best_day = weekday.loc[weekday["SPM"].idxmax()]
     best_time = time_df.loc[time_df["SPM"].idxmax()]
 
-    product_insights = "\n".join(
-        make_insight(r, products_history) for _, r in pw.sort_values("주문금액", ascending=False).head(6).iterrows()
-    )
+    # 상품별 상세 인사이트는 동일 주차 동일 상품을 1개로 통합.
+    # 원본 회차 집계는 유지하고, 대표행은 주간 최고 주문금액 회차를 사용하며 주간 다회 편성 성과를 앞에 요약.
+    _weekly_product_groups = []
+    for _pname, _pg in pw.groupby("상품명", sort=False):
+        _pg = _pg.sort_values("주문금액", ascending=False)
+        _weekly_total = float(pd.to_numeric(_pg["주문금액"], errors="coerce").fillna(0).sum())
+        _weekly_product_groups.append((_pname, _weekly_total, _pg))
+    _weekly_product_groups.sort(key=lambda x: x[1], reverse=True)
+
+    _detail_lines = []
+    for _pname, _weekly_total, _pg in _weekly_product_groups[:6]:
+        _rep = _pg.iloc[0].copy()
+        _base = make_insight(_rep, products_history)
+        if len(_pg) >= 2:
+            _vals = pd.to_numeric(_pg["주문금액"], errors="coerce").fillna(0).tolist()
+            _seq = " → ".join(compact_money(v) for v in _vals)
+            _all3 = all(v >= 3_000_000 for v in _vals)
+            _all5 = all(v >= 5_000_000 for v in _vals)
+            _status = "모두 500만원 이상 반복 고성과" if _all5 else ("모두 300만원 이상 안정 성과" if _all3 else "회차별 성과 편차 확인")
+            _prefix = f"[{_pname}] 금주 총 {len(_pg)}회 편성, 회차별 주문금액 {_seq}·{_status}"
+            if _base.startswith(f"[{_pname}] "):
+                _base = _prefix + " > " + _base[len(f"[{_pname}] "):]
+            else:
+                _base = _prefix + " > " + _base
+        _detail_lines.append(_base)
+    product_insights = "\n".join(_detail_lines)
 
     price_df = merge_lowest_price(pw)
     unavailable = price_df[price_df["최저가 확보"] == "미확보"]["상품명"].dropna().astype(str).unique().tolist()
