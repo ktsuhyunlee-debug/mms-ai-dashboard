@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.67 WEEKLY LOGIC HARDENING
+# V4.4.68 WEEKLY FINAL HARDENING
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.67-WEEKLY-LOGIC-HARDENING
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.68-WEEKLY-FINAL-HARDENING
 
 from __future__ import annotations
 
@@ -3694,6 +3694,110 @@ def _v4467_guard_season_conflicts(sentences, products_all: pd.DataFrame, week_en
         guarded.append(s)
     return guarded
 
+
+def _v4468_ensure_recommendation_action(sentences):
+    """재편성 우선 후보가 액션 없이 끝나는 경우 최소 실행 액션을 보장."""
+    out = []
+    for raw in sentences or []:
+        s = str(raw or "").strip()
+        if "차주 재편성 우선 후보" in s and ">" not in s:
+            s += " > 최근 고성과 조건 유지 후 1회 추가 편성해 성과 재현 여부 확인 필요"
+        out.append(s)
+    return out
+
+def _v4468_similarity_tokens(name: str):
+    """유사상품 충돌 판정용 핵심 토큰."""
+    s = _weekly_short_display_name(name or "", max_len=120)
+    s = re.sub(r"[\[\]\(\)\/_,+\-]", " ", s)
+    stop = {
+        "상품","세트","택1","증정","총","리미티드","에디션","단독","특가","남성","여성",
+        "공용","외","및","겸용","신규","유사신규","발굴","과거","동시점","운영","기록"
+    }
+    toks = []
+    for tok in re.split(r"\s+", s):
+        tok = tok.strip()
+        if len(tok) < 2 or tok in stop:
+            continue
+        toks.append(tok)
+    return set(toks)
+
+def _v4468_similar_product_name(a: str, b: str) -> bool:
+    """exact key 외 alias/token 기준 유사상품 판정."""
+    ta, tb = _v4468_similarity_tokens(a), _v4468_similarity_tokens(b)
+    if not ta or not tb:
+        return False
+    inter = ta & tb
+    ratio = len(inter) / max(1, min(len(ta), len(tb)))
+    return len(inter) >= 2 and ratio >= 0.6
+
+def _v4468_repeated_underperformer_names(products_all: pd.DataFrame, week_end):
+    """기준일 이전 누적 2회 이상, 300만원 이상 0회인 반복부진 상품명."""
+    if products_all is None or products_all.empty:
+        return []
+    d = _attach_product_master_keys(products_all.copy())
+    d["_date_guard"] = pd.to_datetime(d["_date"], errors="coerce")
+    d = d[d["_date_guard"].notna() & (d["_date_guard"] <= pd.to_datetime(week_end))]
+    names = []
+    for _, g in d.groupby("_product_master_key"):
+        vals = pd.to_numeric(g["주문금액"], errors="coerce").fillna(0)
+        if len(vals) >= 2 and int((vals >= 3_000_000).sum()) == 0:
+            pcol = _weekly_product_col(g)
+            if pcol:
+                n = str(g.iloc[-1].get(pcol, "") or "")
+                if n:
+                    names.append(n)
+    return names
+
+def _v4468_guard_season_conflicts(sentences, products_all: pd.DataFrame, week_end):
+    """반복부진 유사상품을 시즌 추천의 동일상품 성공사례로 다시 추천하는 충돌 방지."""
+    bad_names = _v4468_repeated_underperformer_names(products_all, week_end)
+    if not bad_names:
+        return list(sentences or [])
+    out = []
+    for raw in sentences or []:
+        s = str(raw or "")
+        if any(k in s for k in ("신규·유사신규 발굴", "동시즌", "시즌")):
+            conflict = any(_v4468_similar_product_name(s, bad) for bad in bad_names)
+            if conflict:
+                s = s.replace(
+                    "단일 사례로 반복성을 단정하기보다",
+                    "이후 반복 성과까지 함께 고려해 동일 상품의 재현성을 단정하지 않고"
+                )
+                s = re.sub(
+                    r"동일 상품 재운영(?:을)? 우선 검토",
+                    "동일 상품 재운영보다 당시 가격·기능 조건을 참고한 신규·유사신규 TEST 검토",
+                    s
+                )
+        out.append(s)
+    return out
+
+def _v4468_compact_report_text(text: str) -> str:
+    """모든 보고서 출력 경로에 표시용 상품명 축약을 공통 적용."""
+    s = str(text or "")
+    rules = [
+        (r"빙그레\s+붕어싸만코[^\n,·]*?\(총\s*12개\)", "빙그레 붕어싸만코 아이스크림 12개"),
+        (r"메디트리\s+이뮨원샷\s+올인원\s+멀티비타민\s+앰플\s+2박스", "메디트리 이뮨원샷 멀티비타민 2박스"),
+        (r"마켓임당\s+병천\s+순대국밥\s+180g\s*[xX×]\s*8봉", "병천 순대국밥 8봉"),
+        (r"1\+1\s+초경량\s+3단\s+자동\s+우산\s+양산\s+겸용[_\s-]*접이식\s+암막\s+우양산", "1+1 초경량 3단 자동 암막 우양산"),
+        (r"CJ\s+햇반\s+윤기가득쌀밥\s+210g\s*[xX×]\s*36개", "CJ 햇반 윤기가득쌀밥 36개"),
+    ]
+    for pat, repl in rules:
+        s = re.sub(pat, repl, s, flags=re.I)
+    return s
+
+def _v4468_naturalize_report_text(text: str) -> str:
+    """조사 오류와 일부 어색한 보고체만 보수적으로 정리."""
+    s = str(text or "")
+    s = re.sub(r"(만원|천만원|백만원|원)로\s+([0-9.]+배)", r"\1으로 \2", s)
+    s = s.replace("반복 고성과가 확인", "반복 고성과 확인")
+    s = s.replace(
+        "해당 타겟 내 운영 안정성이 확인된 상품으로,",
+        "동일 타겟 내 반복 성과 및 운영 안정성 확인 >"
+    )
+    s = s.replace("병행할 수 있습니다.", "병행 가능")
+    s = s.replace("검토하는 것이 적절합니다.", "검토 필요")
+    return s
+
 def _merge_same_product_recommendations(sentences, products_all: pd.DataFrame):
     """
     모든 주차 공통:
@@ -5009,6 +5113,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 모든 주차 공통 최종 중복 제거:
     # 동일 product master가 여러 추천 규칙에 걸리면 근거를 하나로 병합해 1회만 노출
     nxt = _merge_same_product_recommendations(nxt, weekly_context_products)
+    nxt = _v4468_guard_season_conflicts(nxt, weekly_context_products, _week_end)
 
     
     # -------------------------------------------------
@@ -5712,6 +5817,22 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if "신규·유사신규 발굴" in s:
             return (40, s)
         return (25, s)
+
+    dyn_next = _v4468_guard_season_conflicts(dyn_next, weekly_context_products, _week_end)
+    dyn_next = _v4468_ensure_recommendation_action(dyn_next)
+
+    dyn_product = [
+        _v4468_naturalize_report_text(_v4468_compact_report_text(x))
+        for x in dyn_product
+    ]
+    dyn_op = [
+        _v4468_naturalize_report_text(_v4468_compact_report_text(x))
+        for x in dyn_op
+    ]
+    dyn_next = [
+        _v4468_naturalize_report_text(_v4468_compact_report_text(x))
+        for x in dyn_next
+    ]
 
     dyn_next = sorted(dyn_next, key=_weekly_next_priority)
 
