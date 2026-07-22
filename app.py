@@ -4793,40 +4793,127 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # - 모든 bullet을 "항목명 : 근거 > 액션" 형식으로 정규화
     # -------------------------------------------------
 
+    def _split_embedded_bullets(raw):
+        """한 문자열 안에 붙어버린 '•'를 실제 개별 항목으로 분리."""
+        s = str(raw or "").strip()
+        if not s:
+            return []
+        parts = re.split(r"\s*•\s*", s)
+        return [p.strip() for p in parts if p.strip()]
+
+    def _clean_weekly_title(title: str) -> str:
+        title = re.sub(r"^•\s*", "", str(title or "")).strip()
+        title = re.sub(r"\s+", " ", title)
+        title = re.sub(r"(?:은|는|이|가|에서|의)$", "", title).strip()
+        # 상품명 뒤 불필요한 '상품' 제거
+        title = re.sub(r"\s+상품$", "", title).strip()
+        return title
+
+    def _remove_title_repeat(title: str, fact: str) -> str:
+        """제목이 본문 첫머리에 반복되는 현상 제거."""
+        t = _clean_weekly_title(title)
+        f = str(fact or "").strip()
+        if not t or not f:
+            return f
+        # '[상품명]은/는/이/가/에서/의 ...' 형태 제거
+        patterns = [
+            rf"^{re.escape(t)}\s*(?:은|는|이|가)\s*",
+            rf"^{re.escape(t)}\s*(?:에서|의)\s*",
+            rf"^{re.escape(t)}\s*",
+        ]
+        for p in patterns:
+            nf = re.sub(p, "", f, count=1)
+            if nf != f:
+                return nf.strip()
+        return f
+
+    def _infer_weekly_title(text_value: str, default_title="운영 인사이트") -> str:
+        s = str(text_value or "").strip()
+
+        # 유형별 제목 자동 지정
+        if "500만원 이상 핵심 상품" in s or "핵심 성과" in s:
+            return "핵심 상품 매출 집중"
+        if "100만원 미만" in s and ("고유 상품" in s or "저성과" in s):
+            return "저성과 상품 효율 점검"
+        if "식품/건강" in s and ("100만원 미만" in s or "검증 상품" in s):
+            return "식품/건강 상품별 편차 확대"
+        if "최근 4주 중" in s and "수요일" in s:
+            return "요일별 편성 조건 검증"
+        if "대카테고리 매출" in s or "카테고리 비중" in s:
+            return "카테고리보다 검증 상품 중심 편성"
+        if "신규·유사신규" in s and "재편성" in s:
+            return "신규·유사신규 vs 재편성"
+        if "SPM" in s and ("고성과 상품" in s or "함께 편성" in s):
+            return "고성과 상품 × 적합 타겟 조합 강화"
+        if "전년 동시점" in s and any(k in s for k in ["써큘", "서큘", "선풍기", "냉방"]):
+            return "7월 냉방가전 신규·유사신규 발굴"
+        if "전년 동시점" in s and any(k in s for k in ["우양산", "양산", "우산"]):
+            return "7월 우양산 신규·유사신규 발굴"
+        if "300만원 이상 달성 이력" in s and "카테고리" in s:
+            return "저성과 상품 교체"
+
+        # 상품/타겟형: 조사 앞까지 상품명 추출
+        patterns = [
+            r"^(.+?)(?:은|는)\s+금주",
+            r"^(.+?)(?:은|는)\s+과거",
+            r"^(.+?)(?:은|는)\s+누적",
+            r"^(.+?)(?:은|는)\s+(남성|여성)\d{4}",
+            r"^(.+?)(?:에서)\s+\d+회",
+        ]
+        for pat in patterns:
+            mm = re.match(pat, s)
+            if mm:
+                cand = _clean_weekly_title(mm.group(1))
+                if 1 < len(cand) <= 60:
+                    # 타겟 비교는 제목에 적합도 명시
+                    if re.search(r"(남성|여성)\d{4}", s):
+                        short = re.sub(r"\s+", " ", cand)
+                        return f"{short} 타겟 적합도"
+                    return cand
+
+        return default_title
+
     def _normalize_weekly_bullet(raw, default_title="운영 인사이트"):
+        """
+        문장형을 모두 '• 항목명 : 근거 > 액션'으로 통일.
+        - 제목 중복 제거
+        - 내부 bullet 분리
+        - 문장형 종결어미 압축
+        """
         s = re.sub(r"^•\s*", "", str(raw or "").strip())
         if not s:
             return ""
 
-        # 이미 압축형이면 그대로 사용
+        # 이미 구조화된 경우도 제목/본문 중복 정리
         if " : " in s and " > " in s:
-            return "• " + s
+            title, rest = s.split(" : ", 1)
+            fact, action = rest.split(" > ", 1)
+            title = _clean_weekly_title(title)
+            fact = _remove_title_repeat(title, fact)
+            action = action.strip().rstrip(".")
+            return f"• {title} : {fact.rstrip('.')} > {action}"
 
-        # 문장형을 근거/액션으로 분리
+        # 첫 문장 = 근거, 이후 문장 = 액션/해석
         sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", s) if x.strip()]
         if not sentences:
             return ""
 
-        first = sentences[0].rstrip(".")
+        title = _infer_weekly_title(s, default_title)
+        first = _remove_title_repeat(title.replace(" 타겟 적합도", ""), sentences[0].rstrip("."))
         rest = " ".join(sentences[1:]).strip().rstrip(".")
 
-        # 제목 추출: 상품명/주제의 첫 구절을 보수적으로 사용
-        title = default_title
-        patterns = [
-            r"^(.+?)(?:은|는) 금주",
-            r"^(.+?)(?:은|는) 과거",
-            r"^(.+?)(?:은|는) 전체",
-            r"^(.+?)(?:에서|의) ",
-        ]
-        for pat in patterns:
-            mm = re.match(pat, first)
-            if mm:
-                cand = mm.group(1).strip()
-                if 1 < len(cand) <= 55:
-                    title = cand
-                    break
+        # 문장형 표현을 보고용 압축형으로 정리
+        first = re.sub(r"기록했습니다$", "기록", first)
+        first = re.sub(r"차지했습니다$", "차지", first)
+        first = re.sub(r"확인됐습니다$", "확인", first)
+        first = re.sub(r"그쳤습니다$", "기록", first)
+        first = re.sub(r"상태입니다$", "상태", first)
+        first = re.sub(r"후보입니다$", "후보", first)
 
-        # 액션 문장이 없으면 원문 자체를 근거로 두고 일반 액션을 억지 생성하지 않음
+        rest = re.sub(r"하는 것이 적절합니다$", "검토", rest)
+        rest = re.sub(r"할 필요가 있습니다$", "필요", rest)
+        rest = re.sub(r"하는 것이 좋습니다$", "활용 필요", rest)
+
         if rest:
             return f"• {title} : {first} > {rest}"
         return f"• {title} : {first}"
@@ -4842,13 +4929,16 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         return out
 
     # 기존 엔진이 현재 선택 주차로 계산한 결과만 사용
-    dyn_product = [_normalize_weekly_bullet(x, "상품 운영") for x in product_points]
+    _product_raw = [p for x in product_points for p in _split_embedded_bullets(x)]
+    dyn_product = [_normalize_weekly_bullet(x, "상품 운영") for x in _product_raw]
     dyn_product = _dedupe_keep_order([x for x in dyn_product if x])
 
-    dyn_op = [_normalize_weekly_bullet(x, "편성 운영") for x in op]
+    _op_raw = [p for x in op for p in _split_embedded_bullets(x)]
+    dyn_op = [_normalize_weekly_bullet(x, "편성 운영") for x in _op_raw]
     dyn_op = _dedupe_keep_order([x for x in dyn_op if x])
 
-    dyn_next = [_normalize_weekly_bullet(x, "차주 운영") for x in nxt]
+    _next_raw = [p for x in nxt for p in _split_embedded_bullets(x)]
+    dyn_next = [_normalize_weekly_bullet(x, "차주 운영") for x in _next_raw]
     dyn_next = _dedupe_keep_order([x for x in dyn_next if x])
 
     # 편성 운영 시사점 fallback:
