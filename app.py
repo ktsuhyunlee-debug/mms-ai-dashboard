@@ -185,43 +185,44 @@ html, body, [class*="css"] {
 }
 
 .asset-card {
-    height: auto;
-    min-height: 430px;
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--surface);
     padding: 14px;
     box-sizing: border-box;
-    overflow: visible;
     box-shadow: 0 3px 12px rgba(25, 42, 70, 0.045);
 }
 
-.asset-image-card {
-    height: 100%;
-    min-height: 430px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-}
-
-.asset-image-card img {
-    width: 100%;
-    height: 100%;
-    min-height: 398px;
-    max-height: none;
-    object-fit: contain;
-    border-radius: 10px;
-}
-
+/* 문구 카드가 좌우 전체 높이의 기준이 됨 */
 .asset-message-card {
     height: auto;
-    min-height: 430px;
-    overflow-y: visible;
+    min-height: 320px;
+    overflow: visible;
     white-space: pre-wrap;
     font-size: 15px;
     line-height: 1.75;
     background: #fbfcfe;
+}
+
+/* 이미지 자체 높이가 row를 늘리지 않도록 카드 안에 absolute 배치 */
+.asset-image-card {
+    position: relative;
+    height: 100%;
+    min-height: 320px;
+    overflow: hidden;
+    background: var(--surface);
+}
+
+.asset-image-card img {
+    position: absolute;
+    inset: 14px;
+    width: calc(100% - 28px);
+    height: calc(100% - 28px);
+    min-height: 0;
+    max-height: none;
+    object-fit: contain;
+    object-position: center center;
+    border-radius: 10px;
 }
 
 .asset-empty {
@@ -326,36 +327,55 @@ hr {
 
 
 
-/* V4.4.28 일일실적 이미지·문구 하단선 강제 일치
-   Streamlit column 내부의 중첩 vertical-block까지 100% 높이 전달 */
+/* V4.4.29 일일실적 이미지·문구 시작/끝선 정확히 일치
+   문구 콘텐츠 높이가 row를 결정하고 이미지는 동일 높이 안에서 contain */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
+
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
     align-self: stretch !important;
     display: flex !important;
     flex-direction: column !important;
 }
+
+/* Streamlit 중첩 wrapper까지 같은 높이 전달 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stElementContainer"]:has(.asset-card) {
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
     flex: 1 1 auto !important;
     height: 100% !important;
-    min-height: 100% !important;
 }
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card,
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card,
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
-    height: 100% !important;
-    min-height: 430px !important;
-    box-sizing: border-box !important;
-}
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
+
+/* 이미지/문구 카드의 외곽 시작·끝선을 완전히 동일하게 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
     width: 100% !important;
     height: 100% !important;
-    max-height: none !important;
+    box-sizing: border-box !important;
+}
+
+/* 오른쪽 문구가 실제 높이를 결정 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
+    min-height: 320px !important;
+    height: auto !important;
+}
+
+/* 왼쪽 이미지는 문구가 만든 높이에만 맞춤 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
+    min-height: 320px !important;
+    height: 100% !important;
+}
+
+/* 세로형 원본 이미지도 카드 높이를 밀어내지 않음 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
+    position: absolute !important;
+    inset: 14px !important;
+    width: calc(100% - 28px) !important;
+    height: calc(100% - 28px) !important;
+    max-width: calc(100% - 28px) !important;
+    max-height: calc(100% - 28px) !important;
     object-fit: contain !important;
+    object-position: center center !important;
 }
 
 @media (max-width: 900px) {
