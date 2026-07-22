@@ -327,8 +327,7 @@ hr {
 
 
 
-
-/* V4.4.34 발송소재 좌우 영역 상단/하단 완전 일치 */
+/* V4.4.35 발송소재 실제 이미지 하단을 MMS 문구 [KT] 하단과 동기화 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
@@ -339,16 +338,11 @@ hr {
 }
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stElementContainer"]:has(.asset-card) {
-    display: flex !important;
-    flex-direction: column !important;
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
     flex: 1 1 auto !important;
     height: 100% !important;
-    min-height: 0 !important;
 }
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
-    flex: 1 1 auto !important;
     width: 100% !important;
     height: 100% !important;
     min-height: 430px !important;
@@ -363,20 +357,24 @@ hr {
     position: relative !important;
     height: 100% !important;
     min-height: 430px !important;
+    padding: 0 !important;
     overflow: hidden !important;
 }
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
     position: absolute !important;
-    inset: 10px !important;
-    width: calc(100% - 20px) !important;
-    height: calc(100% - 20px) !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
     min-width: 0 !important;
     min-height: 0 !important;
-    max-width: calc(100% - 20px) !important;
-    max-height: calc(100% - 20px) !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
     object-fit: contain !important;
-    object-position: center center !important;
+    object-position: top center !important;
     transform: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block !important;
 }
 
 @media (max-width: 900px) {
