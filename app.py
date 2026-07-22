@@ -188,15 +188,14 @@ html, body, [class*="css"] {
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--surface);
-    padding: 14px;
+    padding: 10px;
     box-sizing: border-box;
     box-shadow: 0 3px 12px rgba(25, 42, 70, 0.045);
 }
 
-/* 문구 카드가 좌우 전체 높이의 기준이 됨 */
 .asset-message-card {
     height: auto;
-    min-height: 320px;
+    min-height: 420px;
     overflow: visible;
     white-space: pre-wrap;
     font-size: 15px;
@@ -204,29 +203,27 @@ html, body, [class*="css"] {
     background: #fbfcfe;
 }
 
-/* 이미지 자체 높이가 row를 늘리지 않도록 카드 안에 absolute 배치 */
 .asset-image-card {
     position: relative;
     height: 100%;
-    min-height: 320px;
+    min-height: 420px;
     overflow: hidden;
-    background: var(--surface);
+    background: #ffffff;
 }
 
 .asset-image-card img {
     position: absolute;
-    inset: 8px;
-    width: calc(100% - 16px);
-    height: calc(100% - 16px);
+    inset: 0;
+    width: 100%;
+    height: 100%;
     min-height: 0;
     max-height: none;
     object-fit: contain;
     object-position: center center;
-    border-radius: 10px;
-    transform: scale(1.08);
+    border-radius: 8px;
+    transform: scale(1.28);
     transform-origin: center center;
 }
-
 .asset-empty {
     height: 398px;
     display: flex;
@@ -329,8 +326,7 @@ hr {
 
 
 
-/* V4.4.29 일일실적 이미지·문구 시작/끝선 정확히 일치
-   문구 콘텐츠 높이가 row를 결정하고 이미지는 동일 높이 안에서 contain */
+/* V4.4.31 발송소재: 예시 이미지처럼 좌우 카드 상·하단 동일 + 이미지 크게 채움 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
@@ -341,7 +337,6 @@ hr {
     flex-direction: column !important;
 }
 
-/* Streamlit 중첩 wrapper까지 같은 높이 전달 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
@@ -349,40 +344,41 @@ hr {
     height: 100% !important;
 }
 
-/* 이미지/문구 카드의 외곽 시작·끝선을 완전히 동일하게 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
     width: 100% !important;
     height: 100% !important;
+    min-height: 420px !important;
     box-sizing: border-box !important;
 }
 
-/* 오른쪽 문구가 실제 높이를 결정 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
-    min-height: 320px !important;
-    height: auto !important;
-}
-
-/* 왼쪽 이미지는 문구가 만든 높이에만 맞춤 */
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
-    min-height: 320px !important;
     height: 100% !important;
+    min-height: 420px !important;
 }
 
-/* 세로형 원본 이미지도 카드 높이를 밀어내지 않음 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
+    height: 100% !important;
+    min-height: 420px !important;
+}
+
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
     position: absolute !important;
-    inset: 8px !important;
-    width: calc(100% - 16px) !important;
-    height: calc(100% - 16px) !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
     max-width: none !important;
     max-height: none !important;
     object-fit: contain !important;
     object-position: center center !important;
-    transform: scale(1.08) !important;
+    transform: scale(1.28) !important;
     transform-origin: center center !important;
 }
 
 @media (max-width: 900px) {
+    [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
+        transform: scale(1.0) !important;
+    }
+
 
     [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"],
     [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
@@ -3869,12 +3865,9 @@ def _set_weekly_deeplink(year: int, week: str) -> None:
 
 
 def _normalize_mms_message_text(value) -> str:
-    """MMS 문구 표시용: 첫 줄 시작의 불필요한 공백/개행만 제거합니다."""
+    """MMS 문구 맨 앞 공백/개행만 제거하고 내부 줄바꿈은 유지."""
     s = "" if value is None else str(value)
-    # 전체 문구의 맨 앞 공백/개행만 제거하고 내부 줄바꿈/공백은 유지
-    s = s.lstrip()
-    # '( 광고)' 같은 비정상 첫 토큰이 아니라 '(광고)' 앞 공백 제거가 목적
-    return s
+    return s.lstrip()
 
 
 
