@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.77-DAILY-INSIGHT-POLISH
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.79-NEW-PRODUCT-INSIGHT-FIX
 
 from __future__ import annotations
 
@@ -1487,6 +1487,29 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     same_target = summary["동일타겟이력"].copy()
     cumulative = product_history_including_current(row, history).copy().sort_values("_date")
     insights: list[tuple[int, str, str, str, str]] = []
+
+    # V4.4.79: 신규/유사신규 판정은 상품구분 값을 우선 사용하고,
+    # 값이 없을 때만 과거 동일상품 운영이력 0회를 신규 첫 TEST 보조 기준으로 사용.
+    _ptype_raw = str(
+        row.get("상품구분",
+            row.get("편성구분",
+                row.get("운영구분",
+                    row.get("신규구분", "")
+                )
+            )
+        ) or ""
+    ).strip()
+    _ptype_norm = _ptype_raw.replace(" ", "")
+    _is_similar_new = "유사신규" in _ptype_norm
+    _is_new = ("신규" in _ptype_norm and not _is_similar_new)
+    if not _ptype_norm and int(summary.get("운영횟수", 0) or 0) == 0:
+        _is_new = True
+
+    _new_product_insight = _build_new_product_grade_insight(
+        amount,
+        is_new=_is_new,
+        is_similar_new=_is_similar_new,
+    )
     risks: list[str] = []
     issue = issue or {}
     issue_types = set(issue.get("유형", []))
@@ -1504,6 +1527,16 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             sentence += f" ({detail})"
         add(120, "운영 이슈", sentence, "운영 이슈 등록", "높음")
 
+    # 신규/유사신규 첫 TEST 인사이트는 일반 등급 문구보다 우선 노출
+    if _new_product_insight:
+        add(
+            99,
+            "신규 상품",
+            _new_product_insight,
+            f"{_ptype_raw or '과거 동일상품 운영이력 0회'} 기준",
+            "높음" if _ptype_raw else "참고",
+        )
+
     # 현재 주문금액 등급에 따른 기본 평가
     # 같은 의미라도 상품·타겟 조건별로 표현을 달리해 문장 반복을 줄입니다.
     sentence_key = f"{name}|{current_target}|{grade}|{int(amount)}"
@@ -1518,12 +1551,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(97, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 2_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.",
+                f"금번 {compact_money(amount)}으로 관찰 상품 수준 기록 > 추가 성과 확대 가능성 검증 필요",
                 f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 대비 다소 미달",
                 f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한",
                 f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요",
             ])
-            add(91, "금번 성과", sentence, "현재 주문금액 기준", "높음")
+            add(84 if _new_product_insight else 91, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 3_000_000:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과",
