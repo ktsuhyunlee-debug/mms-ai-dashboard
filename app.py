@@ -1144,6 +1144,11 @@ def target_label(row: pd.Series, include_seg: bool = True) -> str:
     return " ".join(values).strip()
 
 
+def base_target_label(row: pd.Series) -> str:
+    """SEG를 제외한 성별·연령 기준 타겟 라벨."""
+    return target_label(row, include_seg=False)
+
+
 def product_history_summary(row: pd.Series, history: pd.DataFrame) -> dict:
     prior = product_history_rows(row, history)
     if prior.empty:
@@ -1501,21 +1506,31 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
     # 타겟 적합도 및 확장성
     if not prior.empty:
-        target_df = prior.assign(_target=prior.apply(target_label, axis=1))
+        target_df = prior.assign(
+            _target=prior.apply(target_label, axis=1),
+            _base_target=prior.apply(base_target_label, axis=1),
+        )
         target_stats = target_df.groupby("_target")["주문금액"].agg(["mean", "sum", "count"]).sort_values("mean", ascending=False)
         overall_avg = float(prior["주문금액"].mean())
+        current_base_target = base_target_label(row)
         if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= overall_avg * 1.15:
             add(93, "타겟 적합도", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 평균보다 높아 핵심 타겟 적합도가 확인됩니다.", f"동일 타겟 {len(same_target)}회", insight_confidence(len(same_target)))
         elif same_target.empty and amount >= 3_000_000:
-            add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.", "신규 타겟 1회", "참고")
+            same_base_prior = target_df[target_df["_base_target"].eq(current_base_target)] if current_base_target else target_df.iloc[0:0]
+            if not same_base_prior.empty:
+                seg_value = clean_identifier_value(row.get("SEG", ""))
+                seg_text = f"SEG{seg_value}" if seg_value else "신규 SEG"
+                add(86, "타겟 확장성", f"{current_base_target} 내 {seg_text} 첫 TEST에서 {compact_money(amount)}을 기록해 동일 타겟군 내 미발송 SEG 확장 가능성이 확인됩니다.", f"동일 성별·연령 과거 운영 {len(same_base_prior)}회 / 해당 SEG 첫 운영", "참고")
+            else:
+                add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.", "신규 타겟 1회", "참고")
         if len(target_stats) >= 2 and target_stats["sum"].sum() > 0:
             top = target_stats.iloc[0]
             second = target_stats.iloc[1]
             if top["count"] >= 2 and second["count"] >= 2 and top["mean"] >= second["mean"] * 1.5:
                 add(92, "타겟 적합도", f"{target_stats.index[0]} 회당 평균이 {compact_money(top['mean'])}으로 차순위 타겟보다 압도적으로 높아 타겟 확장보다 핵심 타겟 집중 운영이 효율적입니다.", f"차순위 평균 {compact_money(second['mean'])}", "높음")
             top_share = float(target_stats.iloc[0]["sum"] / target_stats["sum"].sum())
-            if top_share >= 0.7:
-                add(67, "타겟 위험", f"누적 주문금액의 {top_share*100:.0f}%가 {target_stats.index[0]}에 집중되어 타겟 편중 여부를 함께 관리해야 합니다.", f"운영횟수 {int(target_stats.iloc[0]['count'])}회", insight_confidence(int(target_stats.iloc[0]["count"])))
+            if len(prior) >= 3 and int(top["count"]) >= 2 and top_share >= 0.7:
+                add(67, "타겟 위험", f"누적 주문금액의 {top_share*100:.0f}%가 {target_stats.index[0]}에 집중되어 타겟 편중 여부를 함께 관리해야 합니다.", f"동일 상품 과거 {len(prior)}회 / 해당 타겟 {int(top['count'])}회", insight_confidence(int(top["count"])))
                 risks.append("특정 타겟 편중")
 
     # 프로모션 의존도: 발송일 기준 실제 프로모션명과 일반기간을 비교
@@ -1533,20 +1548,28 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
                 add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품입니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
 
-    # 가격 경쟁력 및 탄력성: 절대 1원 차이가 아닌 최저가 대비 차이율 판정
+    # 가격 경쟁력 및 탄력성: 비율보다 고객 체감 차액을 우선 표시하고 성과와 교차 해석
     lowest = float(row.get("발송일 최저가", 0) or 0)
     price_eval = _daily_price_competitiveness(current_price, lowest)
     if price_eval:
-        price_rate = abs(price_eval["rate"]) * 100
+        price_diff = lowest - current_price
         if price_eval["level"] == "strong":
-            add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 대비 약 {price_rate:.1f}% 낮아 유의미한 가격 경쟁력을 확보했습니다.", "발송일 최저가 기준", "높음")
+            if amount < 2_000_000:
+                add(90, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}에 그쳐, 가격 외 상품·타겟 적합도 점검이 필요합니다.", "발송일 최저가 및 현재 주문금액 기준", "높음")
+            elif not prior.empty and float(prior["주문금액"].mean()) > 0 and amount <= float(prior["주문금액"].mean()) * 0.7:
+                past_avg_price_cross = float(prior["주문금액"].mean())
+                add(90, "가격·성과", f"발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}으로 과거 평균 {compact_money(past_avg_price_cross)} 대비 성과가 낮아, 추가 할인보다 운영 간격·타겟 적합도 점검이 우선입니다.", "가격 경쟁력 + 과거 평균 성과 교차 기준", "높음")
+            else:
+                add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 높은 가격 경쟁력을 확보했습니다.", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "moderate":
-            add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원 대비 약 {price_rate:.1f}% 낮아 가격 우위는 있으나 차별화 폭은 제한적입니다.", "발송일 최저가 기준", "높음")
+            add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 가격 우위는 있으나 차별화 폭은 제한적입니다.", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "same":
-            add(84 if amount < 2_000_000 else 72, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원과 사실상 동일한 수준으로 가격 차별화는 제한적입니다.", "발송일 최저가 ±1% 이내", "높음")
-            if amount < 2_000_000: risks.append("가격 차별화 제한")
+            diff_abs = abs(price_diff)
+            add(84 if amount < 2_000_000 else 72, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가와 {fmt_num(diff_abs)}원 차이로 사실상 동일한 수준이어서 가격 차별화는 제한적입니다.", "발송일 최저가 ±1% 이내", "높음")
+            if amount < 2_000_000:
+                risks.append("가격 차별화 제한")
         elif amount < 2_000_000:
-            add(80, "가격 위험", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원보다 약 {price_rate:.1f}% 높고 성과도 제한적이어서 가격 조건 재점검이 필요합니다.", "발송일 최저가 대비 1% 초과", "높음")
+            add(80, "가격 위험", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(abs(price_diff))}원 높고 성과도 제한적이어서 가격 조건 재점검이 필요합니다.", "발송일 최저가 대비 가격 열위", "높음")
             risks.append("가격 경쟁력 미확보")
     if not prior.empty and current_price > 0:
         last = prior.iloc[-1]
@@ -1644,8 +1667,16 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_evidence = "최근 운영 간격 및 성과 하락 기준"
     elif amount >= 5_000_000:
         if same_target.empty:
-            action_sentence = f"금번 {current_target or '신규 타겟'}의 우수 반응을 바탕으로 동일 타겟 1회 추가 검증 후 미발송 SEG 확대를 검토하는 것이 좋습니다."
-            action_evidence = "신규 타겟 핵심 상품 성과"
+            current_base_target = base_target_label(row)
+            same_base_prior = prior[prior.apply(base_target_label, axis=1).eq(current_base_target)] if (not prior.empty and current_base_target) else prior.iloc[0:0]
+            if not same_base_prior.empty:
+                seg_value = clean_identifier_value(row.get("SEG", ""))
+                seg_text = f"SEG{seg_value}" if seg_value else "신규 SEG"
+                action_sentence = f"금번 {current_base_target} 내 {seg_text}의 우수 반응을 바탕으로 동일 SEG 1회 추가 검증 후 다른 미발송 SEG 확대를 검토하는 것이 좋습니다."
+                action_evidence = "동일 타겟군 내 신규 SEG 핵심 상품 성과"
+            else:
+                action_sentence = f"금번 {current_target or '신규 타겟'}의 우수 반응을 바탕으로 동일 타겟 1회 추가 검증 후 미발송 SEG 확대를 검토하는 것이 좋습니다."
+                action_evidence = "신규 타겟 핵심 상품 성과"
         else:
             action_sentence = f"{current_target or '현재 우수 타겟'} 중심의 핵심 재편성 상품으로 유지하고, 운영 간격을 관리하며 미발송 SEG 확대를 검토하는 것이 좋습니다."
             action_evidence = "핵심 상품 및 타겟 실적 기준"
@@ -1667,6 +1698,13 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_evidence = "부진 상품 기준"
 
     # 중요도·중복 제어: 분석 5개 + 다음 운영 제안 1개로 최대 6개를 유지합니다.
+    # 역대 최고/연속 성장처럼 더 강한 성과 해석이 있으면 단순 "금번 성과" 문장은 중복 제거
+    has_strong_performance_story = any(
+        category in {"성과", "성장 추세"} and ("역대 최고" in sentence or "연속 성장" in sentence)
+        for _, category, sentence, _, _ in insights
+    )
+    if has_strong_performance_story:
+        insights = [item for item in insights if item[1] != "금번 성과"]
     insights = sorted(insights, key=lambda x: (-x[0], x[1]))
     selected, category_count = [], {}
     for _, category, sentence, evidence, confidence in insights:
@@ -4408,16 +4446,40 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         pcvr = porders / pclick if pclick else 0
         paov = pamount / porders if porders else 0
         pspm = pamount / psend if psend else 0
+        # 주간 요약은 KPI 3행(•) + 핵심 해석 2행(:)으로 고정
+        order_delta = (order_count - porders) / abs(porders) if porders else 0
+        amount_delta = (amount - pamount) / abs(pamount) if pamount else 0
+        spm_delta = (spm - pspm) / abs(pspm) if pspm else 0
+        send_delta = (send_count - psend) / abs(psend) if psend else 0
+
         summary = [
-            f"발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 상품수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
-            f"주문건수 {int(order_count):,}건({_weekly_plain_delta(order_count,porders)}) / 주문수량 {int(qty):,}건({_weekly_plain_delta(qty,pqty)}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) 기록",
-            f"CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
+            f"• 발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 상품수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
+            f"• 주문건수 {int(order_count):,}건({_weekly_plain_delta(order_count,porders)}) / 주문수량 {int(qty):,}건({_weekly_plain_delta(qty,pqty)}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) 기록",
+            f"• CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
         ]
+
+        # 규모 축소/확대와 성과 변화를 함께 해석해 단순 수치 반복을 피함
+        if (len(sw) < len(prev_sw) or len(pw) < len(prev_pw) or send_count < psend) and amount > pamount and ctr >= pctr and cvr >= pcvr and spm > pspm:
+            summary.append(": 발송횟수·상품수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
+        elif amount > pamount and spm > pspm:
+            summary.append(": 주문금액과 SPM이 함께 개선되며 전주 대비 매출 및 발송 효율 상승")
+        elif amount < pamount and spm < pspm:
+            summary.append(": 주문금액과 SPM이 함께 감소해 전주 대비 매출 및 발송 효율 둔화")
+        else:
+            summary.append(": 발송 규모와 주요 성과지표의 증감이 혼재해 상품·타겟별 기여도 추가 확인 필요")
+
+        if order_delta > 0 and spm_delta > 0:
+            summary.append(f": 특히 주문건수 {order_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 발송 규모 {'축소' if send_delta < 0 else '변화'} 대비 구매전환 및 매출 효율 크게 개선")
+        elif amount_delta > 0:
+            summary.append(f": 주문금액 {amount_delta*100:+.1f}% 증가를 기록해 매출 성장 기여 상품과 타겟 중심의 재현 조건 확인 필요")
+        elif amount_delta < 0:
+            summary.append(f": 주문금액 {amount_delta*100:+.1f}% 감소해 저성과 상품·타겟 및 반복 편성 영향 점검 필요")
     else:
         summary = [
-            f"발송횟수 {len(sw):,}회 / 상품수 {len(pw):,}건 / 발송건수 {int(send_count):,}건 운영",
-            f"주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
-            f"CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
+            f"• 발송횟수 {len(sw):,}회 / 상품수 {len(pw):,}건 / 발송건수 {int(send_count):,}건 운영",
+            f"• 주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
+            f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
+            ": 전주 비교 데이터가 없어 금주 실적을 기준으로 상품·타겟·편성 효율 확인",
         ]
 
     week_end = pd.to_datetime(pw["_date"], errors="coerce").max()
