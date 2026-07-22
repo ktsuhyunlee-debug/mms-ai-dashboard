@@ -394,18 +394,28 @@ hr {
 .daily-asset-pair .asset-image-card {
     position: relative;
     overflow: hidden;
-    padding: 0;
+    /* 상단과 하단에 동일한 실제 여백을 확보 */
+    padding: 14px !important;
+    box-sizing: border-box;
     background: var(--surface);
 }
 .daily-asset-pair .asset-image-card img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: top center;
-    margin: 0;
-    padding: 0;
+    /* 원본 전체를 카드 안쪽 여백 내에서 표시하여 하단 클리핑 방지 */
+    position: static !important;
+    inset: auto !important;
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    object-fit: contain !important;
+    object-position: center center !important;
+    margin: 0 !important;
+    padding: 0 !important;
     border-radius: 10px;
+    box-sizing: border-box !important;
 }
 .daily-asset-pair .asset-message-card {
     min-height: 0 !important;
