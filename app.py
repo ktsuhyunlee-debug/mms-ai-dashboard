@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.80-DAILY-OUTPUT-CLEANUP
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.81-SEASON-MATCHING-HARDENING
 
 from __future__ import annotations
 
@@ -1484,6 +1484,94 @@ def _build_new_product_grade_insight(amount, is_new=False, is_similar_new=False)
         return f"{label} 첫 TEST에서 {amt} 기록 > 우수 상품 수준의 초기 성과 확인, 타겟·SEG 확장 TEST 검토"
     return f"{label} 첫 TEST에서 {amt} 기록 > 핵심 상품 수준의 초기 성과 확인, 차기 핵심상품 후보로 우선 재편성 및 타겟·SEG 확장 검토"
 
+
+def _v4481_match_season_context(row: pd.Series, month: int | None = None) -> dict:
+    """시즌 인사이트 false positive/negative 방지용 교차판정.
+    - 월/시즌 시점
+    - 핵심 상품군 alias
+    - 보조 속성
+    - 카테고리
+    를 함께 사용하며, 단일 범용 키워드만으로는 매칭하지 않음.
+    """
+    name = str(row.get("상품명", "") or "").lower().replace(" ", "")
+    category = str(
+        row.get("카테고리",
+            row.get("대분류",
+                row.get("중분류", "")
+            )
+        ) or ""
+    ).lower().replace(" ", "")
+    if month is None:
+        dt = pd.to_datetime(row.get("_date", row.get("발송일", None)), errors="coerce")
+        month = int(dt.month) if pd.notna(dt) else None
+
+    rules = [
+        {
+            "key": "여름냉방가전",
+            "months": {6, 7, 8},
+            "product_any": [
+                "선풍기","손풍기","핸디팬","미니팬","써큘레이터","서큘레이터",
+                "에어써큘레이터","냉풍기","에어컨"
+            ],
+            "support_any": ["냉각","에어쿨","쿨링","bldc","휴대용","스탠드","탁상용"],
+            "category_any": ["가전","디지털"],
+            "exclude_any": ["샴푸","치약","화장품","침구","이불","패드","매트","티셔츠","의류","음료"],
+            "context": "폭염·휴가철 휴대용 냉방가전 수요가 확대되는 여름 시즌",
+        },
+        {
+            "key": "여름냉감침구",
+            "months": {6, 7, 8},
+            "product_any": ["침구","이불","패드","매트","토퍼"],
+            "support_any": ["냉감","쿨링","시원","여름"],
+            "category_any": ["침구","생활"],
+            "exclude_any": ["샴푸","치약","화장품","선풍기","손풍기","써큘레이터","서큘레이터","티셔츠","음료"],
+            "context": "폭염·열대야 수요가 집중되는 여름 냉감 침구 시즌",
+        },
+        {
+            "key": "여름보양식",
+            "months": {6, 7, 8},
+            "product_any": ["삼계탕","갈치","장어","추어탕","보양","국밥","탕","전복"],
+            "support_any": ["여수","순살","간편식","가정식","보양식"],
+            "category_any": ["식품","건강"],
+            "exclude_any": ["샴푸","화장품","가전","선풍기","침구"],
+            "context": "여름 휴가철·보양식 수요가 형성되는 시즌",
+        },
+    ]
+
+    for rule in rules:
+        if month not in rule["months"]:
+            continue
+        if any(tok in name for tok in rule["exclude_any"]):
+            continue
+
+        product_match = any(tok in name for tok in rule["product_any"])
+        support_match = any(tok in name for tok in rule["support_any"])
+        category_match = any(tok in category for tok in rule["category_any"])
+
+        # 핵심 상품군 일치는 필수. 범용 키워드(쿨링 등) 단독 매칭 금지.
+        if not product_match:
+            continue
+
+        score = 2
+        if support_match:
+            score += 1
+        if category_match:
+            score += 2
+
+        # 핵심 상품군 + (보조속성 또는 카테고리) 이상일 때만 시즌 인정
+        if score >= 3:
+            return {
+                "matched": True,
+                "key": rule["key"],
+                "context": rule["context"],
+                "score": score,
+                "product_match": product_match,
+                "support_match": support_match,
+                "category_match": category_match,
+            }
+
+    return {"matched": False, "key": "", "context": "", "score": 0}
+
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
     name = str(row.get("상품명", "")).strip()
@@ -1493,6 +1581,24 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     current_price = float(row.get("멤버십혜택가", 0) or 0)
     grade = product_grade(amount)
     season_ctx = _daily_marketing_season_context(name, current_date)
+    # V4.4.81: 기존 시즌 판정 결과를 상품군/속성/카테고리 교차검증으로 재검증.
+    # 잘못 붙는 시즌(false positive)은 제거하고, 손풍기/핸디팬 등 누락(false negative)은 보완.
+    _month_for_season = None
+    try:
+        _dt_for_season = pd.to_datetime(row.get("_date", row.get("발송일", None)), errors="coerce")
+        _month_for_season = int(_dt_for_season.month) if pd.notna(_dt_for_season) else None
+    except Exception:
+        _month_for_season = None
+    _season_guard = _v4481_match_season_context(row, _month_for_season)
+    if _season_guard.get("matched"):
+        season_ctx = dict(season_ctx or {})
+        season_ctx["context"] = _season_guard["context"]
+        season_ctx["matched"] = True
+        season_ctx["key"] = _season_guard["key"]
+    else:
+        # 기존 시즌문구가 있더라도 교차검증 실패 시 시즌 인사이트 생성을 막음
+        season_ctx = {}
+
     summary = product_history_summary(row, history)
     prior = summary["과거이력"].copy().sort_values("_date")
     same_target = summary["동일타겟이력"].copy()
@@ -1772,7 +1878,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     # 시즌성·마케팅 캘린더
     if season_ctx:
         add(86 if summary["운영횟수"] == 0 else 78, "시즌성",
-            f"{season_ctx['context']} 해당 상품으로 실제 상품 속성 기준 매력 강화 후 운영 검토",
+            f"{season_ctx['context']} 상품이나 금번 {compact_money(amount)}으로 시즌 수요가 실제 구매로 충분히 연결되지 않은 흐름 확인" if amount < 1_000_000 else f"{season_ctx['context']} 상품으로 시즌 수요 활용 가능성 확인",
             f"{pd.to_datetime(current_date).month if pd.notna(current_date) else '-'}월 마케팅 캘린더 및 상품 속성 기준", "보통")
 
     # 다음 운영 제안: 분석 결과를 실제 편성 액션으로 연결합니다.
