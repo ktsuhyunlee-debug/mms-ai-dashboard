@@ -1456,6 +1456,23 @@ def _v4464_weekly_category_line(text):
     return _v4464_report_tone(s)
 
 
+
+def _build_new_product_grade_insight(amount, is_new=False, is_similar_new=False):
+    """신규/유사신규 상품의 첫 TEST 성과를 5단계 등급별로 해석."""
+    if not (is_new or is_similar_new):
+        return ""
+    label = "신규" if is_new else "유사신규"
+    amt = compact_money(amount)
+    if amount < 1_000_000:
+        return f"{label} 첫 TEST에서 {amt} 기록 > 초기 구매 반응은 제한적이나 단일 결과만으로 상품 경쟁력을 단정하기 어려워 조건 변경 후 추가 검증 필요"
+    if amount < 2_000_000:
+        return f"{label} 첫 TEST에서 {amt} 기록 > 관찰 상품 수준으로 초기 판매 가능성 확인, 200만원 이상 확장 가능성 추가 검증 필요"
+    if amount < 3_000_000:
+        return f"{label} 첫 TEST에서 {amt} 기록 > 안정 상품 수준 진입, 300만원 이상 성장 가능성 추가 검증 필요"
+    if amount < 5_000_000:
+        return f"{label} 첫 TEST에서 {amt} 기록 > 우수 상품 수준의 초기 성과 확인, 타겟·SEG 확장 TEST 검토"
+    return f"{label} 첫 TEST에서 {amt} 기록 > 핵심 상품 수준의 초기 성과 확인, 차기 핵심상품 후보로 우선 재편성 및 타겟·SEG 확장 검토"
+
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
     name = str(row.get("상품명", "")).strip()
