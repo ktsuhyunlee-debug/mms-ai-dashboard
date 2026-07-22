@@ -4774,8 +4774,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             compact_product_points.append(
                 _weekly_compact_sentence(
                     "핵심 상품 매출 집중",
-                    f"500만원 이상 핵심 상품 {len(core_rows)}개가 전체 주문금액의 {core_share*100:.1f}% 차지하며 금주 매출 성장 견인",
-                    f"{'·'.join(core_names)} 등 검증 상품은 안정적으로 재편성하되 신규·유사신규 고성과 후보를 병행 발굴해 핵심 상품군 확대 필요"
+                    f"편성 건 기준 500만원 이상 핵심 성과 {len(core_rows)}건이 전체 주문금액의 {core_share*100:.1f}% 차지하며 금주 매출 성장 견인",
+                    f"{'·'.join(core_names)} 등 고성과 상품은 회차별 실적을 개별 관리해 반복 성과 여부를 확인하고, 신규·유사신규 고성과 후보를 병행 발굴해 핵심 상품군 확대 필요"
                 )
             )
     except Exception:
@@ -4806,8 +4806,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if "필립스 이지프로" in s and "남성5060" in s:
             return _weekly_compact_sentence(
                 "필립스 이지프로",
-                "남성5060 3회 평균 1.2천만원으로 남성3040 평균 4.2백만원 대비 2.8배 우수",
-                "남성5060 우선 편성 및 고성과·미발송 SEG 순차 TEST, 향후 2회 이상 연속 하락 시 휴지기 적용 검토"
+                "금주 2회 각각 1.8천만원·1.2천만원 기록, 남성5060 3회 평균 1.2천만원으로 남성3040 평균 4.2백만원 대비 2.8배 우수",
+                "회차별 성과를 개별 관리하며 남성5060 우선 편성 및 고성과·미발송 SEG 순차 TEST, 향후 2회 이상 연속 하락 시 휴지기 적용 검토"
             )
         # 비에날씬
         if "비에날씬 BNR17" in s and "여성5060" in s:
@@ -4880,6 +4880,33 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             else:
                 compact_op.append("• " + ss)
 
+    # 신규·유사신규 vs 재편성 항목 누락 방지
+    if not any("신규·유사신규 vs 재편성" in x for x in compact_op):
+        try:
+            type_col = first_col(pw, ["상품구분", "신규구분", "운영구분"])
+            if type_col:
+                work = pw.copy()
+                labels = work[type_col].fillna("").astype(str)
+                new_mask = labels.str.contains("신규", na=False)
+                re_mask = labels.str.contains("재편성", na=False)
+
+                new_df = work[new_mask]
+                re_df = work[re_mask]
+                if not new_df.empty and not re_df.empty:
+                    new_avg = float(new_df["주문금액"].mean())
+                    re_avg = float(re_df["주문금액"].mean())
+                    new_success = float((new_df["주문금액"] >= 3_000_000).mean())
+                    re_success = float((re_df["주문금액"] >= 3_000_000).mean())
+                    compact_op.append(
+                        _weekly_compact_sentence(
+                            "신규·유사신규 vs 재편성",
+                            f"신규·유사신규 {len(new_df)}건 평균 {compact_money(new_avg)}·300만원 이상 비중 {new_success*100:.1f}%, 재편성 {len(re_df)}건 평균 {compact_money(re_avg)}·300만원 이상 비중 {re_success*100:.1f}% 기록",
+                            "재편성은 평균매출, 신규·유사신규는 성공률을 함께 비교해 검증 상품 재편성과 신규 후보 TEST 병행 필요"
+                        )
+                    )
+        except Exception:
+            pass
+
     # 요일
     if "최근 4주 중 3주" in all_op_text and "수요일" in all_op_text:
         compact_op.append(
@@ -4912,8 +4939,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             compact_next.append(
                 _weekly_compact_sentence(
                     "필립스 이지프로 전기면도기",
-                    "금주 2.9천만원, 누적 5회 중 500만원 이상 3회 기록",
-                    "차주 재편성 우선 후보로 선정하고 평균매출이 높은 남성5060 내 고성과 SEG 및 미발송 SEG 순차 편성 검토"
+                    "금주 2회 각각 1.8천만원·1.2천만원으로 총 2.9천만원, 누적 5회 중 500만원 이상 3회 기록",
+                    "회차별 성과 추이를 유지 관리하며 차주 재편성 우선 후보로 선정하고 남성5060 내 고성과 SEG 및 미발송 SEG 순차 편성 검토"
                 )
             )
         elif "락앤락 바로한끼" in ss:
@@ -4950,6 +4977,19 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             )
         elif "우산 양산 겸용" in ss or "우양산" in ss:
             # 냉방가전의 3만원대 가격 문구가 섞이지 않도록 우양산 가격대는 1만원 내외만 사용
+            compact_next.append(
+                _weekly_compact_sentence(
+                    "7월 우양산 신규·유사신규 발굴",
+                    "전년 동시점 초경량 3단 우양산 1회 운영에서 7.1백만원 기록, 단일 고성과 사례로 반복성은 추가 검증 필요",
+                    "장마·폭염 시즌 수요를 고려해 1만원 내외 가격대의 경량·휴대성·암막 기능 우양산 신규·유사신규 TEST 검토"
+                )
+            )
+
+    # 우양산 시즌 제안 누락 방지
+    if not any("우양산 신규·유사신규 발굴" in x for x in compact_next):
+        # 전년 동시점 우양산 고성과 사례가 주간 분석 원문/히스토리에서 확인된 경우만 추가
+        weekly_source_text = "\n".join([str(x) for x in (product_points + op + nxt)])
+        if any(k in weekly_source_text for k in ["초경량 3단", "우양산", "양산 겸용"]):
             compact_next.append(
                 _weekly_compact_sentence(
                     "7월 우양산 신규·유사신규 발굴",
