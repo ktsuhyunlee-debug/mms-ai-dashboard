@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.57-FINAL-RUNTIME-GUARDED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.58-FINAL-RUNTIME-GUARDED
 
 from __future__ import annotations
 
@@ -2959,27 +2959,58 @@ def _next_week_action_candidates(pw, products_all, week_end):
                 if diff>10: continue
             actions.append((80+r["고성과횟수"]*2,"최근 미편성",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {int(r['운영횟수'])}회 중 {int(r['고성과횟수'])}회 500만원 이상, 평균 {compact_money(r['평균매출'])}을 기록했고 최근 {int(r['미편성일수'])}일간 미편성 상태입니다. 현재 판매 가능 여부와 최신 가격 조건을 확인한 뒤, 과거 고성과 당시와 유사한 조건이 유지되면 차주 재편성 후보로 검토하는 것이 적절합니다."))
 
-    # 반복 부진 상품이지만 카테고리는 강한 경우 → 상품 교체
-    total=float(pw["주문금액"].sum())
-    cat=pw.groupby("대카",as_index=False)["주문금액"].sum()
-    shares={str(r["대카"]):float(r["주문금액"])/total*100 for _,r in cat.iterrows()} if total else {}
+    # 반복 부진 상품 → 상품 자체의 누적 성과를 직접 근거로 동일 카테고리 검증상품 교체
+    # 카테고리 매출 비중은 교체의 직접 근거로 사용하지 않는다.
     for pname,h in products_all.groupby("상품명"):
         pname=str(pname)
-        if pname not in current: continue
+        if pname not in current:
+            continue
         hh=h[pd.to_datetime(h["_date"],errors="coerce")<=week_end]
         vals=pd.to_numeric(hh["주문금액"],errors="coerce").fillna(0)
-        if len(vals)>=2 and int((vals>=3_000_000).sum())==0:
+        if len(vals) < 2:
+            continue
+        ge3 = int((vals>=3_000_000).sum())
+        if ge3 == 0:
             wkrow=pw[pw["상품명"].astype(str)==pname]
-            if wkrow.empty: continue
-            catname=str(wkrow["대카"].iloc[0]); share=shares.get(catname,0)
-            if share>=20:
-                actions.append((65,"상품 교체",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지. 과거 300만원 이상 반복 성과가 확인된 동일 카테고리 검증 상품으로 교체 검토."))
+            if wkrow.empty:
+                continue
+            catname=str(wkrow["대카"].iloc[0]).strip()
+            short_name=_short_weekly_product_name(pname)
+            actions.append((
+                65,
+                "상품 교체",
+                f"{_with_topic(short_name)} 과거 {len(vals)}회 모두 300만원 미만으로 반복 부진 확인 > "
+                f"동일 카테고리 내 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체 검토"
+            ))
 
     seen=set(); out=[]
     for score,kind,s in sorted(actions,key=lambda x:x[0],reverse=True):
         if s in seen: continue
         seen.add(s); out.append((score,kind,s))
     return out
+
+
+
+def _md_decision_type(sentence: str) -> str:
+    """차주 운영 제안을 MD가 바로 판단할 수 있는 4개 의사결정 유형으로 분류."""
+    s = str(sentence or "")
+    if any(k in s for k in ["교체 검토", "반복 부진", "우선순위 제외"]):
+        return "교체"
+    if any(k in s for k in ["가격·구성", "조건을 조정", "재TEST", "추가 검증"]) and "신규·유사신규" not in s:
+        return "조건 개선 후 재TEST"
+    if any(k in s for k in ["신규·유사신규", "신규 TEST", "우선 소싱", "발굴"]):
+        return "신규·유사신규 발굴"
+    return "재편성"
+
+
+def _md_action_prefix(sentence: str) -> str:
+    """기존 문장 내용은 보존하고 MD 의사결정 유형만 앞에 부여."""
+    s = str(sentence or "").strip()
+    if not s:
+        return s
+    if re.match(r"^(재편성|조건 개선 후 재TEST|교체|신규·유사신규 발굴)\s*:", s):
+        return s
+    return f"{_md_decision_type(s)} : {s}"
 
 
 def _season_gap_action(pw, products_all, week_end):
@@ -4475,6 +4506,9 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
         ("맛춤상회 특수부위 소 토시살 600g + 소 안창살 400g 총 1kg", "맛춤상회 소 토시살+안창살 1kg"),
         ("종근당건강 락토핏 생유산균 골드 120포 3통", "종근당건강 락토핏 생유산균 골드"),
         ("독일 보랄 날개없는 선풍기(리모컨형)", "보랄 날개없는 선풍기"),
+        ("보랄 더 데일리 스탠드 에어서큘레이터 HNZ-ACF700M", "보랄 스탠드 에어서큘레이터"),
+        ("독일 보랄 프리미엄 스탠드 3D 에어써큘팬(전자식)", "보랄 3D 스탠드 에어써큘팬"),
+        ("보랄 프리미엄 스탠드 3D 에어써큘팬(전자식)", "보랄 3D 스탠드 에어써큘팬"),
         ("독일 보랄 보이는 에어프라이어 5L", "보랄 보이는 에어프라이어 5L"),
         ("1+1 초경량 3단 자동 우산 양산 겸용_튼튼한 접이식 미니 우산 암막 우양산", "1+1 초경량 3단 자동 암막 우양산"),
         ("하얀 겨울 따라 떠나는, 유람선+BIG5 관광+4대특식 제주도 3박 4일", "제주도 3박 4일 여행상품"),
@@ -4482,6 +4516,14 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
     for src_name, dst_name in aliases:
         if src_name in s:
             return dst_name
+
+    # 브랜드 + 핵심 상품군 + 중요한 규격 중심으로 축약
+    s = re.sub(r"^(?:독일\s+)?보랄\s+더\s+데일리\s+", "보랄 ", s)
+    s = re.sub(r"^(?:독일\s+)?보랄\s+프리미엄\s+", "보랄 ", s)
+    s = re.sub(r"\b(?:전자식|기계식)\b", "", s)
+    s = re.sub(r"\bHNZ-[A-Z0-9\-]+\b", "", s, flags=re.I)
+    s = re.sub(r"\bBR-[A-Z0-9\-]+\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
 
     # 모델번호/상태/증정/긴 옵션 제거
     s = re.sub(r"\s*/\s*[A-Z]{1,6}-?[A-Z0-9\-]+$", "", s)
@@ -5833,7 +5875,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         _weekly_section_join("■ 주간 실적 요약", summary),
         _weekly_section_join("■ 상품 운영 시사점", dyn_product),
         _weekly_section_join("■ 편성 운영 시사점", dyn_op),
-        _weekly_section_join("■ 차주 운영 제안", dyn_next),
+        _weekly_section_join("■ 차주 운영 제안", [_md_action_prefix(x) for x in dyn_next]),
     ])
 
     # 최종 표시명 적용 이후 실제 사용자에게 보여질 문자열 기준 검증
