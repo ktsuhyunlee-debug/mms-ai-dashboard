@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.59-FINAL-LOCKED-WEEKLY-INSIGHT
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.64-DAILY-CONNECTED-CATEGORY-STYLE
 
 from __future__ import annotations
 
@@ -1382,6 +1382,138 @@ def _daily_price_competitiveness(current_price: float, lowest: float) -> dict:
     return {"level":"weak","rate":advantage}
 
 
+
+# ============================================================================
+# V4.4.64 EARLY RUNTIME BRIDGE
+# Daily decision rules + report-style normalization available before UI runtime.
+# Weekly scope is strictly limited to category insight lines.
+# ============================================================================
+
+def _v4464_num(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        x = float(v)
+        if pd.isna(x):
+            return default
+        return x
+    except Exception:
+        return default
+
+def _v4464_report_tone(text):
+    """Conservative Korean report-tone normalizer for generated insight text."""
+    if text is None:
+        return text
+    s = str(text).strip()
+    if not s:
+        return s
+
+    # Phrase-level fixes first so output does not become awkward intermediate Korean.
+    phrase_rules = [
+        ("역대 최고 실적을 경신했습니다.", "역대 최고 실적 경신"),
+        ("재TEST가 필요합니다.", "재TEST 필요"),
+        ("재TEST가 필요", "재TEST 필요"),
+        ("교체 편성이 필요합니다.", "교체 편성 필요"),
+        ("교체 편성이 필요", "교체 편성 필요"),
+        ("가격 차별화가 제한적입니다.", "가격 차별화 제한"),
+        ("가격 차별화가 제한적", "가격 차별화 제한"),
+        ("검토하는 것이 좋습니다.", "검토 필요"),
+        ("검토하는 것이 필요합니다.", "검토 필요"),
+        ("검토하는 것이 적절합니다.", "검토 필요"),
+        ("확인하는 것이 필요합니다.", "확인 필요"),
+        ("확인할 필요가 있습니다.", "확인 필요"),
+        ("병행할 수 있습니다.", "병행 가능"),
+    ]
+    for a, b in phrase_rules:
+        s = s.replace(a, b)
+
+    # Segment-level endings.
+    ending_rules = [
+        (r"확인됩니다\.?$", "확인"),
+        (r"확인되었습니다\.?$", "확인"),
+        (r"확인했습니다\.?$", "확인"),
+        (r"기록했습니다\.?$", "기록"),
+        (r"기록되었습니다\.?$", "기록"),
+        (r"유지했습니다\.?$", "유지"),
+        (r"유지되었습니다\.?$", "유지"),
+        (r"확보했습니다\.?$", "확보"),
+        (r"개선되었습니다\.?$", "개선"),
+        (r"감소했습니다\.?$", "감소"),
+        (r"증가했습니다\.?$", "증가"),
+        (r"필요합니다\.?$", "필요"),
+        (r"적절합니다\.?$", "적절"),
+        (r"가능합니다\.?$", "가능"),
+        (r"제한적입니다\.?$", "제한"),
+        (r"제한적이었습니다\.?$", "제한"),
+        (r"어렵습니다\.?$", "어려움"),
+        (r"보입니다\.?$", "보임"),
+        (r"판단됩니다\.?$", "판단"),
+        (r"예상됩니다\.?$", "예상"),
+        (r"좋습니다\.?$", "권장"),
+    ]
+    parts = re.split(r"(\s*>\s*)", s)
+    for i in range(0, len(parts), 2):
+        seg = parts[i].strip()
+        for pat, repl in ending_rules:
+            new_seg = re.sub(pat, repl, seg)
+            if new_seg != seg:
+                seg = new_seg
+                break
+        parts[i] = seg
+    return "".join(parts).strip()
+
+def _v4464_daily_action(*, order_amount, is_first_run=False,
+                        benefit_price=None, compare_lowest=None,
+                        historical_avg=None, run_count=0,
+                        issue_text=None):
+    """Daily action precedence agreed in the working standard."""
+    amount = _v4464_num(order_amount)
+    bp = _v4464_num(benefit_price, None)
+    low = _v4464_num(compare_lowest, None)
+
+    issue_s = str(issue_text or "")
+    if any(k in issue_s for k in ["판매중단", "판매 중단", "재고부족", "재고 부족",
+                                  "품절", "가격오류", "가격 오류", "링크오류", "노출오류"]):
+        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과로 단정하지 않고 "
+                "정상 판매 조건 확보 후 재검증 필요")
+
+    price_limited = False
+    if bp is not None and low is not None and low > 0:
+        price_limited = abs(low - bp) / low <= 0.01
+
+    if is_first_run and amount < 1_000_000:
+        if price_limited:
+            return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인"
+                    " > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, "
+                    "재차 100만원 미만 시 재편성 우선순위 제외")
+        return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려움"
+                " > 가격·타겟·구성 중 핵심 조건을 조정해 1회 재TEST 후 재편성 여부 판단")
+
+    if 1_000_000 <= amount < 2_000_000:
+        return ("가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 "
+                "200만원 이상 회복 여부 확인 필요")
+
+    avg = _v4464_num(historical_avg)
+    if int(_v4464_num(run_count)) >= 2 and amount < 1_000_000 and avg > 0 and amount <= avg * 0.7:
+        return ("절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한"
+                " > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외")
+
+    if amount >= 5_000_000:
+        return "고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
+    if amount >= 3_000_000:
+        return "동일 조건 1회 추가 검증 후 500만원 이상 확장 가능성 확인"
+    if amount >= 2_000_000:
+        return "가격·타겟·전시 조건별 성과를 비교해 재편성 우선순위 판단"
+    return "가격·타겟·상품 적합도 조건 재점검 후 선택적 재TEST"
+
+def _v4464_weekly_category_line(text):
+    """Weekly style change ONLY for product/category insight lines."""
+    s = "" if text is None else str(text)
+    if not any(tok in s for tok in ("상품별 편차", "카테고리보다 검증 상품 중심 편성")):
+        return text
+    return _v4464_report_tone(s)
+
+
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
     name = str(row.get("상품명", "")).strip()
@@ -1420,38 +1552,38 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if amount < 1_000_000:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적입니다.",
-                f"금번 주문금액은 {compact_money(amount)}으로, MMS 메인 상품으로 활용하기에는 반응이 제한적이었습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로, MMS 메인 상품으로 활용하기에는 반응이 제한",
                 f"금번 {compact_money(amount)}에 그치며 가격·타겟 조건 대비 구매 반응이 충분히 확보되지 않았습니다.",
-                f"금번 주문금액이 {compact_money(amount)}으로 100만원 미만에 머물러 상품 적합도 재검토가 필요합니다.",
+                f"금번 주문금액이 {compact_money(amount)}으로 100만원 미만에 머물러 상품 적합도 재검토가 필요",
             ])
             add(97, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 2_000_000:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.",
                 f"금번 주문금액은 {compact_money(amount)}으로 목표 수준에는 다소 미치지 못했습니다.",
-                f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한적이었습니다.",
-                f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요합니다.",
+                f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한",
+                f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요",
             ])
             add(91, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 3_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과입니다.",
-                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 전후의 안정적인 성과를 확보했습니다.",
-                f"금번 {compact_money(amount)}을 기록해 추가 운영 여부를 판단할 수 있는 기본 성과를 확보했습니다.",
+                f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 전후의 안정적인 성과를 확보",
+                f"금번 {compact_money(amount)}을 기록해 추가 운영 여부를 판단할 수 있는 기본 성과를 확보",
             ])
             add(75, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 5_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보했습니다.",
+                f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보",
                 f"금번 주문금액은 {compact_money(amount)}으로 목표를 상회하는 양호한 판매 성과를 기록.",
-                f"금번 {compact_money(amount)}을 기록해 재편성 검토가 가능한 우수 성과를 확인했습니다.",
+                f"금번 {compact_money(amount)}을 기록해 재편성 검토가 가능한 우수 성과를 확인",
             ])
             add(80, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         else:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록.",
-                f"금번 주문금액은 {compact_money(amount)}으로 핵심 매출 견인 상품 수준의 성과를 확보했습니다.",
-                f"금번 {compact_money(amount)}을 기록하며 차주 핵심 편성 후보로 검토할 수 있는 성과를 확인했습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 핵심 매출 견인 상품 수준의 성과를 확보",
+                f"금번 {compact_money(amount)}을 기록하며 차주 핵심 편성 후보로 검토할 수 있는 성과를 확인",
             ])
             add(90, "금번 성과", sentence, "현재 주문금액 기준", "높음")
 
@@ -1459,16 +1591,16 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     if not prior.empty:
         past_max, past_avg = float(prior["주문금액"].max()), float(prior["주문금액"].mean())
         if amount > past_max and amount >= 3_000_000:
-            add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적을 경신했습니다.", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
+            add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적 경신", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
             add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액이 크게 성장했습니다.", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount <= past_avg * 0.7:
             decline_pct = (1 - amount / past_avg) * 100
             decline_sentence = stable_variant(sentence_key + "|decline", [
-                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인됩니다.",
-                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화되었습니다.",
-                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한적이었습니다.",
-                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요합니다.",
+                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인",
+                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화",
+                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한",
+                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요",
             ])
             add(88, "성과", decline_sentence, f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
             risks.append("최근 성과 둔화")
@@ -1480,18 +1612,18 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if vals[0] < vals[1] < vals[2] and growth >= 0.15:
             add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장했습니다.", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
         elif vals[0] > vals[1] > vals[2] and vals[0] > 0 and vals[2] <= vals[0] * 0.8:
-            add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요합니다.", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
+            add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
             risks.append("최근 3회 연속 하락")
         elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.25:
-            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인됩니다.", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
+            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
 
     if len(cumulative) >= 5:
         recent5 = cumulative.tail(5)
         cv = coefficient_of_variation(recent5["주문금액"])
         if float(recent5["주문금액"].mean()) >= 3_000_000 and cv <= 0.30:
-            add(87, "운영 안정성", f"최근 5회 평균 {compact_money(recent5['주문금액'].mean())}을 기록하고 변동성이 낮아 반복 검증된 안정형 상품입니다.", f"5회 변동계수 {cv:.2f}", "높음")
+            add(87, "운영 안정성", f"최근 5회 평균 {compact_money(recent5['주문금액'].mean())}을 기록하고 변동성이 낮아 반복 검증된 안정형 상품", f"5회 변동계수 {cv:.2f}", "높음")
         elif cv >= 0.75:
-            add(70, "운영 위험", "회차별 주문금액 편차가 커 편성 조건에 따른 성과 변동성이 높은 상품입니다.", f"5회 변동계수 {cv:.2f}", "높음")
+            add(70, "운영 위험", "회차별 주문금액 편차가 커 편성 조건에 따른 성과 변동성이 높은 상품", f"5회 변동계수 {cv:.2f}", "높음")
             risks.append("성과 변동성 높음")
 
     # 동일 주차 중복 제거 후 편성 횟수
@@ -1514,20 +1646,20 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         overall_avg = float(prior["주문금액"].mean())
         current_base_target = base_target_label(row)
         if len(same_target) >= 2 and float(same_target["주문금액"].mean()) >= overall_avg * 1.15:
-            add(93, "타겟 적합도", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 평균보다 높아 핵심 타겟 적합도가 확인됩니다.", f"동일 타겟 {len(same_target)}회", insight_confidence(len(same_target)))
+            add(93, "타겟 적합도", f"{current_target} 과거 평균은 {compact_money(same_target['주문금액'].mean())}으로 전체 평균보다 높아 핵심 타겟 적합도가 확인", f"동일 타겟 {len(same_target)}회", insight_confidence(len(same_target)))
         elif same_target.empty and amount >= 3_000_000:
             same_base_prior = target_df[target_df["_base_target"].eq(current_base_target)] if current_base_target else target_df.iloc[0:0]
             if not same_base_prior.empty:
                 seg_value = clean_identifier_value(row.get("SEG", ""))
                 seg_text = f"SEG{seg_value}" if seg_value else "신규 SEG"
-                add(86, "타겟 확장성", f"{current_base_target} 내 {seg_text} 첫 TEST에서 {compact_money(amount)}을 기록해 동일 타겟군 내 미발송 SEG 확장 가능성이 확인됩니다.", f"동일 성별·연령 과거 운영 {len(same_base_prior)}회 / 해당 SEG 첫 운영", "참고")
+                add(86, "타겟 확장성", f"{current_base_target} 내 {seg_text} 첫 TEST에서 {compact_money(amount)}을 기록해 동일 타겟군 내 미발송 SEG 확장 가능성이 확인", f"동일 성별·연령 과거 운영 {len(same_base_prior)}회 / 해당 SEG 첫 운영", "참고")
             else:
-                add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인됩니다.", "신규 타겟 1회", "참고")
+                add(86, "타겟 확장성", f"{current_target} 첫 TEST에서 {compact_money(amount)}을 기록해 신규 타겟 확장 가능성이 확인", "신규 타겟 1회", "참고")
         if len(target_stats) >= 2 and target_stats["sum"].sum() > 0:
             top = target_stats.iloc[0]
             second = target_stats.iloc[1]
             if top["count"] >= 2 and second["count"] >= 2 and top["mean"] >= second["mean"] * 1.5:
-                add(92, "타겟 적합도", f"{target_stats.index[0]} 회당 평균이 {compact_money(top['mean'])}으로 차순위 타겟보다 압도적으로 높아 타겟 확장보다 핵심 타겟 집중 운영이 효율적입니다.", f"차순위 평균 {compact_money(second['mean'])}", "높음")
+                add(92, "타겟 적합도", f"{target_stats.index[0]} 회당 평균이 {compact_money(top['mean'])}으로 차순위 타겟보다 압도적으로 높아 타겟 확장보다 핵심 타겟 집중 운영이 효율적", f"차순위 평균 {compact_money(second['mean'])}", "높음")
             top_share = float(target_stats.iloc[0]["sum"] / target_stats["sum"].sum())
             if len(prior) >= 3 and int(top["count"]) >= 2 and top_share >= 0.7:
                 add(67, "타겟 위험", f"누적 주문금액의 {top_share*100:.0f}%가 {target_stats.index[0]}에 집중되어 타겟 편중 여부를 함께 관리해야 합니다.", f"동일 상품 과거 {len(prior)}회 / 해당 타겟 {int(top['count'])}회", insight_confidence(int(top["count"])))
@@ -1543,10 +1675,10 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             current_promo = promotion_label(row)
             promo_name = current_promo if current_promo != "-" else str(promo_rows["프로모션명"].mode().iloc[0])
             if normal_avg > 0 and promo_avg >= normal_avg * 1.3:
-                add(84, "프로모션", f"{promo_name} 평균 {compact_money(promo_avg)} 대비 일반 운영 기간 평균은 {compact_money(normal_avg)}으로 프로모션 의존도가 높은 상품입니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "보통")
+                add(84, "프로모션", f"{promo_name} 평균 {compact_money(promo_avg)} 대비 일반 운영 기간 평균은 {compact_money(normal_avg)}으로 프로모션 의존도가 높은 상품", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "보통")
                 risks.append("프로모션 의존")
             elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
-                add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품입니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
+                add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
 
     # 가격 경쟁력 및 탄력성: 비율보다 고객 체감 차액을 우선 표시하고 성과와 교차 해석
     lowest = float(row.get("발송일 최저가", 0) or 0)
@@ -1555,12 +1687,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         price_diff = lowest - current_price
         if price_eval["level"] == "strong":
             if amount < 2_000_000:
-                add(90, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}에 그쳐, 가격 외 상품·타겟 적합도 점검이 필요합니다.", "발송일 최저가 및 현재 주문금액 기준", "높음")
+                add(90, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}에 그쳐, 가격 외 상품·타겟 적합도 점검이 필요", "발송일 최저가 및 현재 주문금액 기준", "높음")
             elif not prior.empty and float(prior["주문금액"].mean()) > 0 and amount <= float(prior["주문금액"].mean()) * 0.7:
                 past_avg_price_cross = float(prior["주문금액"].mean())
                 add(90, "가격·성과", f"발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}으로 과거 평균 {compact_money(past_avg_price_cross)} 대비 성과가 낮아, 추가 할인보다 운영 간격·타겟 적합도 점검이 우선입니다.", "가격 경쟁력 + 과거 평균 성과 교차 기준", "높음")
             else:
-                add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 높은 가격 경쟁력을 확보했습니다.", "발송일 최저가 기준", "높음")
+                add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 높은 가격 경쟁력을 확보", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "moderate":
             add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴해 가격 우위는 있으나 차별화 폭은 제한적입니다.", "발송일 최저가 기준", "높음")
         elif price_eval["level"] == "same":
@@ -1569,7 +1701,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if amount < 2_000_000:
                 risks.append("가격 차별화 제한")
         elif amount < 2_000_000:
-            add(80, "가격 위험", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(abs(price_diff))}원 높고 성과도 제한적이어서 가격 조건 재점검이 필요합니다.", "발송일 최저가 대비 가격 열위", "높음")
+            add(80, "가격 위험", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가보다 {fmt_num(abs(price_diff))}원 높고 성과도 제한적이어서 가격 조건 재점검이 필요", "발송일 최저가 대비 가격 열위", "높음")
             risks.append("가격 경쟁력 미확보")
     if not prior.empty and current_price > 0:
         last = prior.iloc[-1]
@@ -1593,10 +1725,10 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
                 add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 단기 반복에 따른 추가 하락은 제한적입니다.", "직전 운영 비교", "보통")
             elif ratio < 0.75:
-                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요합니다.", "직전 운영 비교", "보통")
+                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요", "직전 운영 비교", "보통")
                 risks.append("단기 반복 피로도")
         elif gap >= 45 and amount >= 3_000_000:
-            add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인됩니다.", "재편성 간격 기준", "보통")
+            add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인", "재편성 간격 기준", "보통")
     recent90 = cumulative[cumulative["_date"] >= current_date-pd.Timedelta(days=90)] if pd.notna(current_date) else cumulative
     if summary["운영횟수"] >= 1 and 2 <= len(recent90) <= 3 and float(recent90["주문금액"].mean()) >= 3_000_000:
         add(78, "운영 희소성", f"최근 3개월간 {len(recent90)}회 제한적으로 운영했음에도 평균 {compact_money(recent90['주문금액'].mean())}을 기록해 추가 운영 여력이 있습니다.", "최근 90일 기준", "보통")
@@ -1611,12 +1743,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if trend >= 0.08:
             add(79, "생애주기", "중기 추세가 상승하는 성장기 상품으로 운영 비중 확대 검토가 가능합니다.", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
         elif trend <= -0.08:
-            add(77, "생애주기", "중기 추세가 하락하는 성숙·하락 전환 구간으로 운영 조건 재설계가 필요합니다.", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
+            add(77, "생애주기", "중기 추세가 하락하는 성숙·하락 전환 구간으로 운영 조건 재설계가 필요", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
             risks.append("생애주기 하락 전환")
     if len(cumulative) >= 5 and avg_all >= 5_000_000:
-        add(91, "상품 포지션", f"누적 {len(cumulative)}회 평균 {compact_money(avg_all)}을 기록한 반복 검증형 대표 매출 견인 상품입니다.", f"누적 {len(cumulative)}회", "높음")
+        add(91, "상품 포지션", f"누적 {len(cumulative)}회 평균 {compact_money(avg_all)}을 기록한 반복 검증형 대표 매출 견인 상품", f"누적 {len(cumulative)}회", "높음")
     elif summary["운영횟수"] == 0 and amount >= 3_000_000:
-        add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요합니다.", "신규 1회", "참고")
+        add(83, "상품 포지션", "첫 운영에서 우수한 주문금액을 기록한 신규 성장 상품으로 추가 TEST가 필요", "신규 1회", "참고")
 
     # MMS 메인 상품 적합도는 반복 부진 근거가 충분할 때만 강하게 판단
     if not critical_issue and len(cumulative) >= 3:
@@ -1628,7 +1760,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     # 시즌성·마케팅 캘린더
     if season_ctx:
         add(86 if summary["운영횟수"] == 0 else 78, "시즌성",
-            f"{season_ctx['context']}에 해당하는 상품입니다. {season_ctx['attributes']} 중심으로 상품 매력을 강화해 운영하는 것이 적절합니다.",
+            f"{season_ctx['context']}에 해당하는 상품 {season_ctx['attributes']} 중심으로 상품 매력을 강화해 운영하는 것이 적절합니다.",
             f"{pd.to_datetime(current_date).month if pd.notna(current_date) else '-'}월 마케팅 캘린더 및 상품 속성 기준", "보통")
 
     # 다음 운영 제안: 분석 결과를 실제 편성 액션으로 연결합니다.
@@ -1638,32 +1770,32 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         recent_gap = int((current_date - prior.iloc[-1]["_date"]).days)
 
     if critical_issue:
-        action_sentence = "운영 이슈 해소 후 동일 상품·동일 타겟으로 재TEST하여 정상 성과를 다시 확인하는 것이 필요합니다."
+        action_sentence = "운영 이슈 해소 후 동일 상품·동일 타겟으로 재TEST하여 정상 성과를 다시 확인하는 것이 필요"
         action_evidence = "운영 이슈 영향으로 성과 판단 보류"
     elif "MMS 메인 적합도 낮음" in risks:
-        action_sentence = "반복 부진이 확인된 만큼 MMS 메인 편성은 축소하고, 가격·구성 또는 타겟 조건이 개선된 경우에만 선택적으로 재TEST하는 것이 필요합니다."
+        action_sentence = "반복 부진이 확인된 만큼 MMS 메인 편성은 축소하고, 가격·구성 또는 타겟 조건이 개선된 경우에만 선택적으로 재TEST하는 것이 필요"
         action_evidence = "일반기간 최근 3회 반복 부진"
     elif "가격 경쟁력 미확보" in risks:
-        action_sentence = "현재 가격 조건에서는 재편성 우선순위를 낮추고, 발송일 비교 최저가 대비 유의미한 가격 경쟁력 또는 구성 혜택을 확보한 뒤 재TEST하는 것이 필요합니다."
+        action_sentence = "현재 가격 조건에서는 재편성 우선순위를 낮추고, 발송일 비교 최저가 대비 유의미한 가격 경쟁력 또는 구성 혜택을 확보한 뒤 재TEST하는 것이 필요"
         action_evidence = "발송일 최저가 대비 1% 초과 가격 열위"
     elif summary["운영횟수"] == 0 and amount < 1_000_000:
         if price_eval and price_eval.get("level") in {"same","moderate"}:
             action_sentence = "신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외"
             action_evidence = "신규 첫 운영 + 100만원 미만 + 가격 차별화 제한"
         else:
-            action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요합니다."
+            action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요"
             action_evidence = "신규 첫 운영 100만원 미만"
     elif summary["운영횟수"] == 0 and amount >= 2_000_000 and season_ctx:
-        action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인했습니다. {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
+        action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인 {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
         action_evidence = "신규 첫 운영 + 안정 이상 성과 + 시즌 적합성"
     elif "프로모션 의존" in risks:
-        action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요합니다."
+        action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요"
         action_evidence = "프로모션·일반기간 평균 비교"
     elif "최근 성과 둔화" in risks and amount < 2_000_000:
         action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외"
         action_evidence = "절대 성과 + 과거 평균 동시 부진"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
-        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
+        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요"
         action_evidence = "최근 운영 간격 및 성과 하락 기준"
     elif amount >= 5_000_000:
         if same_target.empty:
@@ -1694,7 +1826,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = "관찰 수준으로 즉시 반복 편성보다 가격·타겟·전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 시 재편성 확대, 미달 시 우선순위 하향"
         action_evidence = "관찰 상품 기준"
     else:
-        action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요합니다."
+        action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요"
         action_evidence = "부진 상품 기준"
 
     # 중요도·중복 제어: 분석 5개 + 다음 운영 제안 1개로 최대 6개를 유지합니다.
@@ -1716,7 +1848,31 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if len(selected) >= 5:
             break
     if not selected:
-        selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 판단이 필요합니다.", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
+        selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 판단이 필요", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
+
+    # V4.4.64: agreed daily decision engine is connected to the ACTUAL output path.
+    # Rich facts above are preserved; only the final action is overridden when the
+    # agreed precedence produces a more specific decision.
+    _compare_lowest = None
+    for _c in ["발송일 비교 최저가", "비교최저가", "네이버최저가", "최저가"]:
+        if _c in row.index:
+            _compare_lowest = row.get(_c)
+            break
+    _prior_amounts = pd.to_numeric(prior["주문금액"], errors="coerce").dropna() if (not prior.empty and "주문금액" in prior.columns) else pd.Series(dtype=float)
+    _historical_avg = float(_prior_amounts.mean()) if not _prior_amounts.empty else 0.0
+    _issue_text = " ".join(sorted(issue_types)) + " " + str(issue.get("메모", "") or "")
+    _v4464_action = _v4464_daily_action(
+        order_amount=amount,
+        is_first_run=(summary["운영횟수"] == 0),
+        benefit_price=current_price,
+        compare_lowest=_compare_lowest,
+        historical_avg=_historical_avg,
+        run_count=summary["운영횟수"],
+        issue_text=_issue_text,
+    )
+    if _v4464_action:
+        action_sentence = _v4464_action
+        action_evidence = action_evidence or "일일 인사이트 통합 판단 기준"
 
     selected.append({
         "category": "다음 운영 제안",
@@ -1725,6 +1881,10 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         "confidence": "높음" if critical_issue or summary["운영횟수"] >= 3 else "참고",
         "type": "action",
     })
+
+    # V4.4.64: report tone is applied to every actual daily insight sentence.
+    for _item in selected:
+        _item["sentence"] = _v4464_report_tone(_item.get("sentence", ""))
 
     return {
         "상품명": name,
@@ -2907,7 +3067,9 @@ def _target_strength_sentence(product_name: str, analysis):
 
 def _next_week_action_candidates(pw, products_all, week_end):
     """근거가 충분한 차주 운영 제안 후보를 점수화. 타겟/가격/성과/미편성/카테고리 근거 사용."""
-    actions=[]; current=set(pw["상품명"].dropna().astype(str))
+    actions=[]
+    current=set(pw["상품명"].dropna().astype(str))
+    current_keys={_weekly_normalize_product_key(x) for x in current if str(x).strip()}
     wk=pw.groupby("상품명",as_index=False).agg(주문금액=("주문금액","sum"),금주운영횟수=("상품명","size")).sort_values("주문금액",ascending=False)
 
     # 즉시 재편성 + 타겟 강세
@@ -2932,7 +3094,7 @@ def _next_week_action_candidates(pw, products_all, week_end):
     # 가격 회복 시 재운영
     for pname,h in histdf.groupby("상품명"):
         pname=str(pname)
-        if pname in current: continue
+        if pname in current or _weekly_normalize_product_key(pname) in current_keys: continue
         h=h[h["_date2"].notna()&(h["_date2"]<=week_end)]
         amt=pd.to_numeric(h["주문금액"],errors="coerce").fillna(0)
         if len(h)<2 or (amt>=5_000_000).sum()<1: continue
@@ -4512,6 +4674,8 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
         ("오아 에어쿨핸디맥스 휴대용 미니 급속 냉각 BLDC 핸디 손풍기", "오아 휴대용 냉각 손풍기"),
         ("필립스 남성그루밍 풀세트 여행용면도기 + 코털제거기", "필립스 남성그루밍 풀세트"),
         ("아디다스 컴뱃스포츠 반팔티셔츠 트레이닝 S23ATMTS1 5종 택1", "아디다스 컴뱃스포츠 반팔티셔츠"),
+        ("다니엘크레뮤 프렌치린넨 100% 카라티셔츠 1종 DCTHMC0120N", "다니엘크레뮤 프렌치린넨 카라티"),
+        ("브리츠 액티브 노이즈캔슬링 무선충전 블루투스 5.4 이어폰 BZ-EV7", "브리츠 노이즈캔슬링 블루투스 이어폰"),
         ("독일 보랄 보이는 에어프라이어 5L", "보랄 보이는 에어프라이어 5L"),
         ("1+1 초경량 3단 자동 우산 양산 겸용_튼튼한 접이식 미니 우산 암막 우양산", "1+1 초경량 3단 자동 암막 우양산"),
         ("하얀 겨울 따라 떠나는, 유람선+BIG5 관광+4대특식 제주도 3박 4일", "제주도 3박 4일 여행상품"),
@@ -4526,6 +4690,11 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
     s = re.sub(r"\b(?:전자식|기계식)\b", "", s)
     s = re.sub(r"\bHNZ-[A-Z0-9\-]+\b", "", s, flags=re.I)
     s = re.sub(r"\bBR-[A-Z0-9\-]+\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\b[A-Z]{2,}[A-Z0-9\-]{5,}\b", "", s)  # 모델코드
+    s = re.sub(r"\b블루투스\s*\d+(?:\.\d+)?\b", "블루투스", s)
+    s = re.sub(r"\b1종\b", "", s)
+    s = re.sub(r"\b\d+종\s*택\s*1\b", "", s)
     s = re.sub(r"\s+", " ", s).strip()
 
     # 모델번호/상태/증정/긴 옵션 제거
@@ -4795,6 +4964,8 @@ def validate_weekly_output_quality(report: str) -> list[str]:
         "기계적 의사결정 prefix": r"(?m)^(?:재편성|조건 개선 후 재TEST|교체|신규·유사신규 발굴)\s*:\s*•",
         "구형 교체 근거": r"300만원 이상 달성 이력이 없지만.+카테고리는 금주 전체 주문금액",
         "과도한 상품명 모델코드": r"(?m)^•.*(?:HNZ-|BDC-|BR-)[A-Z0-9\-]+",
+        "금주편성-미편성 모순": r"금주 .*?(?:누적|기록).*?/.*?미편성 상태",
+        "타겟 반복성과 오분류": r"타겟 적합도\s*:.*최근 \d+회.*SEG.*(?!평균|반면)",
         "nan 타겟": r"\bnan(?:에서|\s|$)",
         "비문 유지했고했습니다": r"유지했고했습니다",
         "비문 확인검토": r"확인\s*검토",
@@ -4976,11 +5147,44 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             summary.append(": 발송 규모와 주요 성과지표의 증감이 혼재해 상품·타겟별 기여도 추가 확인 필요")
 
         if order_delta > 0 and spm_delta > 0:
-            summary.append(f": 특히 주문건수 {order_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 발송건수 {'축소' if send_delta < 0 else '변화'} 대비 구매전환 및 매출 효율 크게 개선")
+            if send_delta < -0.0005:
+                summary.append(
+                    f": 특히 주문건수 {order_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 "
+                    f"발송건수 {send_delta*100:+.1f}% 축소에도 구매전환 및 매출 효율 크게 개선"
+                )
+            elif send_delta > 0.0005:
+                summary.append(
+                    f": 발송건수 {send_delta*100:+.1f}% 증가 대비 주문건수 {order_delta*100:+.1f}%, "
+                    f"SPM {spm_delta*100:+.1f}%로 구매전환 및 매출 효율 크게 개선"
+                )
+            else:
+                summary.append(
+                    f": 발송건수 동일 수준에서 주문건수 {order_delta*100:+.1f}%, "
+                    f"SPM {spm_delta*100:+.1f}%로 구매전환 및 매출 효율 크게 개선"
+                )
         elif amount_delta > 0:
             summary.append(f": 주문금액 {amount_delta*100:+.1f}% 증가를 기록해 매출 성장 기여 상품과 타겟 중심의 재현 조건 확인 필요")
         elif amount_delta < 0:
-            summary.append(f": 주문금액 {amount_delta*100:+.1f}% 감소해 저성과 상품·타겟 및 반복 편성 영향 점검 필요")
+            # 실제 확인된 하락 근거만 구체화
+            _decline_evidence = []
+            try:
+                _weekly_amounts = pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0)
+                _low_share = float((_weekly_amounts < 1_000_000).mean()) if len(_weekly_amounts) else 0
+                if _low_share >= 0.25:
+                    _decline_evidence.append(f"100만원 미만 편성 비중 {_low_share*100:.1f}%")
+            except Exception:
+                pass
+
+            if _decline_evidence:
+                summary.append(
+                    f": 주문금액 {amount_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 매출 효율이 함께 둔화되고 "
+                    f"{'·'.join(_decline_evidence)}가 확인돼 저성과 상품 구성 점검 필요"
+                )
+            else:
+                summary.append(
+                    f": 주문금액 {amount_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 매출 효율이 함께 둔화돼 "
+                    "상품·타겟·편성 조건별 하락 요인 점검 필요"
+                )
     else:
         summary = [
             f"• 발송횟수 {len(sw):,}회 / 편성건수 {len(pw):,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
@@ -5123,12 +5327,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             pa, na = ps["promo_avg"], ps["normal_avg"]
             if na > 0 and pa / na >= 1.8:
                 product_points.append(
-                    f"• {_with_topic(_short_weekly_product_name(pname))} 프로모션 기간 평균 {compact_money(pa)} 대비 일반기간 평균 {compact_money(na)}으로 성과 차이가 커 프로모션 의존도가 높은 상품입니다. 일반기간에는 동일 수준의 재편성을 지양하고 프로모션 연계 운영을 우선 검토하는 것이 적절합니다."
+                    f"• {_with_topic(_short_weekly_product_name(pname))} 프로모션 기간 평균 {compact_money(pa)} 대비 일반기간 평균 {compact_money(na)}으로 성과 차이가 커 프로모션 의존도가 높은 상품 일반기간에는 동일 수준의 재편성을 지양하고 프로모션 연계 운영을 우선 검토하는 것이 적절합니다."
                 )
                 break
             elif na >= 3_000_000:
                 product_points.append(
-                    f"• {_with_topic(_short_weekly_product_name(pname))} 프로모션 기간 평균 {compact_money(pa)}, 일반기간 평균 {compact_money(na)}으로 일반 운영에서도 안정적인 성과가 확인됩니다. 프로모션 여부와 무관하게 고성과 타겟 중심의 재편성 후보로 활용할 수 있습니다."
+                    f"• {_with_topic(_short_weekly_product_name(pname))} 프로모션 기간 평균 {compact_money(pa)}, 일반기간 평균 {compact_money(na)}으로 일반 운영에서도 안정적인 성과가 확인 프로모션 여부와 무관하게 고성과 타겟 중심의 재편성 후보로 활용할 수 있습니다."
                 )
                 break
 
@@ -5464,14 +5668,20 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if title == "핵심 상품 매출 집중":
             return "검증 상품 재편성과 신규·유사신규 후보 발굴을 병행해 핵심 상품군 확대 필요"
         if title == "시간대별 편성 조건 검증":
-            return "해당 시간대의 상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
+            return (
+                "해당 시간대의 고성과 회차 상품·타겟·SEG·발송모수 공통 조건을 비교하고, "
+                "반복 조합이 확인될 경우 핵심 상품 우선 발송 시간대로 활용 검토"
+            )
         if title.endswith("성별 타겟 적합도"):
             if "여성 중심" in a:
                 return "여성 중심 편성 후 연령·SEG별 성과를 비교해 세부 타겟 확대 검토"
             if "남성 중심" in a:
                 return "남성 중심 편성 후 연령·SEG별 성과를 비교해 세부 타겟 확대 검토"
         if title == "요일별 편성 조건 검증":
-            return "상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
+            return (
+                "해당 요일의 고성과 회차 상품·타겟·SEG·발송모수 공통 조건을 비교하고, "
+                "반복 조합이 확인될 경우 핵심 상품 우선 편성 요일로 활용 검토"
+            )
         if title == "카테고리보다 검증 상품 중심 편성":
             return (
                 "특정 카테고리의 높은 매출 비중을 카테고리 적합도로 단정하지 않고, "
@@ -5496,6 +5706,9 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 "장마·폭염 시즌 수요를 고려해 1만원 내외·초경량·휴대성·암막·자동 개폐 등 "
                 "기능성이 명확한 우양산 중심으로 신규·유사신규 상품 발굴 및 TEST 검토"
             )
+        if title.endswith("타겟 내 반복 성과"):
+            return "동일 성별·연령에서 반복 고성과가 확인돼 고성과 SEG 순환 및 미발송 SEG 확대 TEST 가능"
+
         if title.endswith("타겟 적합도"):
             m = re.search(r"평균매출이\s*([0-9.]+)배\s*높은\s*((?:남성|여성)\d{4})", a)
             if m:
@@ -5760,8 +5973,17 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
             fact = ", ".join(selected_facts)
 
+            # 현재주차 성과/누적성과가 존재하면 장기 미편성·판매가능 여부 액션은 제외
+            _has_current_fact = any(("금주" in f or "누적" in f) for f in selected_facts)
+            _candidate_actions = list(g["actions"])
+            if _has_current_fact:
+                _candidate_actions = [
+                    a for a in _candidate_actions
+                    if not any(k in a for k in ["최근 ", "미편성", "판매 가능 여부", "최신 가격 확인"])
+                ]
+
             # 액션은 우선순위 상위 2개까지만
-            actions = sorted(g["actions"], key=_action_priority, reverse=True)
+            actions = sorted(_candidate_actions, key=_action_priority, reverse=True)
             selected_actions = []
             for a in actions:
                 if any(a in x or x in a for x in selected_actions):
@@ -5931,6 +6153,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             if not s:
                 continue
             s = re.sub(r"^(재편성|조건 개선 후 재TEST|교체|신규·유사신규 발굴)\s*:\s*", "", s)
+            if " 타겟 적합도 :" in s and "최근 " in s and "SEG" in s and " 평균 " not in s and "반면" not in s:
+                s = s.replace(" 타겟 적합도 :", " 타겟 내 반복 성과 :", 1)
             s = re.sub(r"^•\s*", "", s).strip()
             s = s.replace(",,", ",")
             s = re.sub(r"\s+", " ", s).strip()
@@ -5940,6 +6164,25 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_product = _lock_final_weekly_style(dyn_product)
     dyn_op = _lock_final_weekly_style(dyn_op)
     dyn_next = _lock_final_weekly_style(dyn_next)
+
+    # V4.4.64: ONLY weekly product/category insight lines receive report-tone normalization.
+    # Target-fit, new-vs-repeat, weekday/time, and next-week recommendation lines remain untouched.
+    dyn_product = [_v4464_weekly_category_line(x) for x in dyn_product]
+    dyn_op = [_v4464_weekly_category_line(x) for x in dyn_op]
+
+    def _weekly_next_priority(line):
+        s = str(line or "")
+        if "금주 " in s and "차주 재편성 우선 후보" in s:
+            return (10, s)
+        if "미편성 상태" in s or "판매 가능 여부" in s:
+            return (20, s)
+        if "반복 부진" in s or "교체 검토" in s:
+            return (30, s)
+        if "신규·유사신규 발굴" in s:
+            return (40, s)
+        return (25, s)
+
+    dyn_next = sorted(dyn_next, key=_weekly_next_priority)
 
     _final_report = "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
@@ -8146,4 +8389,297 @@ elif menu == "편성 프로그램":
                         for c in ["정상가", "행사가", "평균주문금액"]:
                             view[c] = view[c].map(format_integer_price)
                         st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+# ============================================================================
+# V4.4.61 DAILY INSIGHT ENGINE HARDENING LAYER
+# - Daily-only decision rules.
+# - Weekly engine/output intentionally untouched.
+# ============================================================================
+
+def _daily_v4461_num(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        x = float(v)
+        if x != x:
+            return default
+        return x
+    except Exception:
+        return default
+
+def _daily_v4461_grade(order_amount):
+    """Daily performance grade by current order amount (KRW)."""
+    a = _daily_v4461_num(order_amount)
+    if a < 1_000_000:
+        return "부진 상품"
+    if a < 2_000_000:
+        return "관찰 상품"
+    if a < 3_000_000:
+        return "검토 상품"
+    if a < 5_000_000:
+        return "우수 상품"
+    return "핵심 상품"
+
+def _daily_v4461_price_signal(benefit_price, compare_lowest):
+    """Separate real price differentiation from effectively-same-price cases."""
+    p = _daily_v4461_num(benefit_price, None)
+    q = _daily_v4461_num(compare_lowest, None)
+    if p is None or q is None or q <= 0:
+        return {"status": "unknown", "gap": None, "gap_rate": None}
+    gap = q - p
+    rate = gap / q
+    if abs(rate) <= 0.01:
+        status = "가격 차별화 제한"
+    elif gap > 0:
+        status = "가격 경쟁력 확보"
+    else:
+        status = "가격 경쟁력 열위"
+    return {"status": status, "gap": gap, "gap_rate": rate}
+
+def _daily_v4461_trend(current, history):
+    """Keep previous/average/recent-3 interpretations separate."""
+    vals = [_daily_v4461_num(x, None) for x in (history or [])]
+    vals = [x for x in vals if x is not None]
+    cur = _daily_v4461_num(current)
+    out = {"previous_ratio": None, "historical_avg_ratio": None,
+           "recent3": [], "record_high": False, "previous_high": None}
+    if vals:
+        out["previous_ratio"] = cur / vals[-1] if vals[-1] else None
+        avg = sum(vals) / len(vals)
+        out["historical_avg_ratio"] = cur / avg if avg else None
+        out["recent3"] = (vals + [cur])[-3:]
+        out["previous_high"] = max(vals)
+        out["record_high"] = cur > max(vals)
+    return out
+
+def _daily_v4461_repeat_fatigue(days_since_last, current, previous, recent_values=None):
+    """
+    Never infer fatigue from short interval alone.
+    Fatigue requires short repeat + actual deterioration evidence.
+    """
+    if days_since_last is None or previous in (None, 0):
+        return False
+    short_repeat = _daily_v4461_num(days_since_last, 999) <= 21
+    ratio = _daily_v4461_num(current) / _daily_v4461_num(previous, 1)
+    recent = [_daily_v4461_num(x, None) for x in (recent_values or [])]
+    recent = [x for x in recent if x is not None]
+    consecutive_decline = len(recent) >= 3 and recent[-1] < recent[-2] < recent[-3]
+    return bool(short_repeat and (ratio < 0.7 or consecutive_decline))
+
+def _daily_v4461_issue_guard(issue_text):
+    """Operational issues suppress unsupported product-performance conclusions."""
+    s = str(issue_text or "").lower()
+    keys = ["판매중단", "판매 중단", "재고부족", "재고 부족", "품절", "가격오류", "가격 오류",
+            "링크오류", "링크 오류", "노출오류", "노출 오류"]
+    return any(k.lower() in s for k in keys)
+
+def _daily_v4461_first_run_action(order_amount, price_status):
+    """
+    First run exception:
+    do not conclude product failure from one low result.
+    """
+    a = _daily_v4461_num(order_amount)
+    if a >= 1_000_000:
+        return None
+    if price_status == "가격 차별화 제한":
+        return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인"
+                " > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외")
+    return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려움"
+            " > 가격·타겟·구성 중 핵심 조건을 조정해 1회 재TEST 후 재편성 여부 판단")
+
+def _daily_v4461_observation_action(order_amount):
+    a = _daily_v4461_num(order_amount)
+    if 1_000_000 <= a < 2_000_000:
+        return ("가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 "
+                "200만원 이상 회복 여부 확인 필요")
+    return None
+
+def _daily_v4461_low_repeat_action(order_amount, historical_avg, run_count):
+    """Absolute low + historical deterioration => avoid identical short-repeat."""
+    cur = _daily_v4461_num(order_amount)
+    avg = _daily_v4461_num(historical_avg)
+    n = int(_daily_v4461_num(run_count))
+    if n >= 2 and cur < 1_000_000 and avg > 0 and cur <= avg * 0.7:
+        return ("절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한"
+                " > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외")
+    return None
+
+def _daily_v4461_target_seg_signal(records, current_gender_age=None, current_seg=None):
+    """
+    Quantify target/SEG evidence without overclaiming.
+    records: list of dicts with gender_age, seg, order_amount.
+    """
+    rows = records or []
+    same = [r for r in rows if r.get("gender_age") == current_gender_age]
+    same_seg = [r for r in same if r.get("seg") == current_seg]
+    seg_first = len(same_seg) == 0
+    amounts = [_daily_v4461_num(r.get("order_amount")) for r in same]
+    strong = [x for x in amounts if x >= 3_000_000]
+    return {
+        "same_target_runs": len(same),
+        "same_target_avg": (sum(amounts)/len(amounts)) if amounts else None,
+        "same_target_3m_plus": len(strong),
+        "seg_first_test": seg_first,
+        "seg_expansion_action": (
+            "동일 SEG 1회 추가 검증 후 다른 미발송 SEG 확대 검토"
+            if seg_first and _daily_v4461_num(rows[-1].get("order_amount") if rows else 0) >= 5_000_000
+            else None
+        )
+    }
+
+def _daily_v4461_promo_dependency(promo_amounts, normal_amounts):
+    """
+    Promotion dependence requires both samples; avoid one-off overclaim.
+    """
+    p = [_daily_v4461_num(x, None) for x in (promo_amounts or [])]
+    n = [_daily_v4461_num(x, None) for x in (normal_amounts or [])]
+    p = [x for x in p if x is not None]
+    n = [x for x in n if x is not None]
+    if not p or not n:
+        return {"level": "판단 보류", "ratio": None}
+    pa, na = sum(p)/len(p), sum(n)/len(n)
+    ratio = pa/na if na else None
+    if len(p) >= 2 and len(n) >= 2 and ratio is not None and ratio >= 2:
+        level = "높음"
+    elif ratio is not None and ratio >= 1.3:
+        level = "가능성 있음"
+    else:
+        level = "제한적"
+    return {"level": level, "ratio": ratio}
+
+def _daily_v4461_build_action(*, order_amount, is_first_run=False,
+                              benefit_price=None, compare_lowest=None,
+                              historical_avg=None, run_count=0,
+                              issue_text=None):
+    """
+    Action precedence:
+    operational issue guard > first-run exception > observation > repeated low.
+    """
+    if _daily_v4461_issue_guard(issue_text):
+        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과로 단정하지 않고 "
+                "정상 판매 조건 확보 후 재검증 필요")
+    price = _daily_v4461_price_signal(benefit_price, compare_lowest)
+    if is_first_run:
+        a = _daily_v4461_first_run_action(order_amount, price["status"])
+        if a:
+            return a
+    a = _daily_v4461_observation_action(order_amount)
+    if a:
+        return a
+    a = _daily_v4461_low_repeat_action(order_amount, historical_avg, run_count)
+    if a:
+        return a
+    grade = _daily_v4461_grade(order_amount)
+    if grade == "핵심 상품":
+        return "고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
+    if grade == "우수 상품":
+        return "동일 조건 1회 추가 검증 후 500만원 이상 확장 가능성 확인"
+    if grade == "검토 상품":
+        return "가격·타겟·전시 조건별 성과를 비교해 재편성 우선순위 판단"
+    return "가격·타겟·상품 적합도 조건을 재점검 후 선택적 재TEST"
+
+def _daily_v4461_validate_output(text):
+    """Block known bad/contradictory daily insight artifacts."""
+    s = str(text or "")
+    bad = [
+        "nan에서", "nan회", "> %", "최근 0회", "과거 0회",
+        "가격 차별화 제한" + " > 가격 경쟁력 우수",
+    ]
+    return {"ok": not any(x in s for x in bad),
+            "hits": [x for x in bad if x in s]}
+
+# Daily insight ruleset marker for regression/audit.
+DAILY_INSIGHT_RULESET_V4461 = {
+    "performance_grades": ["<100만 부진", "100~200만 관찰", "200~300만 검토", "300~500만 우수", "500만+ 핵심"],
+    "first_run_exception": True,
+    "price_diff_within_1pct_limited": True,
+    "previous_average_recent3_separated": True,
+    "fatigue_requires_decline_evidence": True,
+    "record_high_comparison": True,
+    "target_and_seg_evidence": True,
+    "promotion_dependency_sample_guard": True,
+    "operational_issue_guard": True,
+    "action_precedence": True,
+    "weekly_engine_untouched": True,
+}
+
+
+# V4.4.62 REPORT STYLE GUARD
+# Scope:
+# 1) Daily insight output: report-style nominal endings.
+# 2) Weekly: ONLY product-category insight sentences are normalized.
+#    Other weekly sections/logic must remain untouched.
+
+_V4462_ENDING_RULES = [
+    (r"확인됩니다\.?$", "확인"),
+    (r"확인되었습니다\.?$", "확인"),
+    (r"기록했습니다\.?$", "기록"),
+    (r"기록되었습니다\.?$", "기록"),
+    (r"유지했습니다\.?$", "유지"),
+    (r"유지되었습니다\.?$", "유지"),
+    (r"개선되었습니다\.?$", "개선"),
+    (r"감소했습니다\.?$", "감소"),
+    (r"증가했습니다\.?$", "증가"),
+    (r"필요합니다\.?$", "필요"),
+    (r"적절합니다\.?$", "적절"),
+    (r"가능합니다\.?$", "가능"),
+    (r"제한적입니다\.?$", "제한적"),
+    (r"어렵습니다\.?$", "어려움"),
+    (r"보입니다\.?$", "보임"),
+    (r"판단됩니다\.?$", "판단"),
+    (r"예상됩니다\.?$", "예상"),
+    (r"검토하는 것이 좋습니다\.?$", "검토 필요"),
+    (r"검토하는 것이 필요합니다\.?$", "검토 필요"),
+    (r"검토가 필요합니다\.?$", "검토 필요"),
+]
+
+def _v4462_nominalize_sentence(sentence):
+    """Conservative report-tone normalizer; no semantic/numeric changes."""
+    if sentence is None:
+        return sentence
+    s = str(sentence).strip()
+    if not s:
+        return s
+    for pat, repl in _V4462_ENDING_RULES:
+        s2 = re.sub(pat, repl, s)
+        if s2 != s:
+            s = s2
+            break
+    return s
+
+def _v4462_nominalize_segments(text):
+    """Normalize each insight segment split by > while preserving structure."""
+    if text is None:
+        return text
+    raw = str(text)
+    parts = re.split(r'(\s*>\s*)', raw)
+    for i in range(0, len(parts), 2):
+        parts[i] = _v4462_nominalize_sentence(parts[i])
+    return ''.join(parts)
+
+def _v4462_daily_style_guard(text):
+    """Apply to DAILY insight strings only."""
+    return _v4462_nominalize_segments(text)
+
+def _v4462_is_weekly_category_insight(text):
+    """Strict scope guard: weekly product-category insight only."""
+    s = "" if text is None else str(text)
+    category_tokens = ("상품별 편차", "카테고리보다 검증 상품 중심 편성")
+    return any(tok in s for tok in category_tokens)
+
+def _v4462_weekly_category_style_guard(text):
+    """Apply ONLY to weekly product-category insight lines."""
+    if not _v4462_is_weekly_category_insight(text):
+        return text
+    return _v4462_nominalize_segments(text)
+
+def _v4462_forbidden_sentence_ending(text):
+    if text is None:
+        return False
+    s = str(text).strip()
+    return bool(re.search(
+        r"(습니다|합니다|됩니다|있습니다|보입니다|판단됩니다|예상됩니다)\.?$",
+        s
+    ))
 
