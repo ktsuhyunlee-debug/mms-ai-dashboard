@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.74-DAILY-LOGIC-FINAL
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.75-UNBOUNDLOCAL-HOTFIX
 # - Daily grade/action consistency hardened.
 # - New-product 1st/2nd/3rd+ run lifecycle logic added.
 # - Report-tone normalization strengthened.
@@ -1567,6 +1567,7 @@ def _v4464_weekly_category_line(text):
 
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
+    action_sentence = ""  # V4.4.75: initialize before conditional action guards
     name = str(row.get("상품명", "")).strip()
     amount = float(row.get("주문금액", 0) or 0)
     current_target = target_label(row)
@@ -8193,5 +8194,4 @@ _V4462_ENDING_RULES = [
     (r"검토하는 것이 필요합니다\.?$", "검토 필요"),
     (r"검토가 필요합니다\.?$", "검토 필요"),
 ]
-
 
