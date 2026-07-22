@@ -1736,6 +1736,84 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     }
 
 
+
+def format_daily_insight_item(item: dict) -> str:
+    """일일실적 상품 인사이트를 간결한 실무 보고체로 표시합니다."""
+    category = str(item.get("category", "") or "").strip()
+    sentence = str(item.get("sentence", "") or "").strip()
+    evidence = str(item.get("evidence", "") or "").strip()
+
+    # 짧은 항목명
+    if category == "다음 운영 제안" or sentence.startswith("다음 운영 제안:"):
+        title = "다음 운영 제안"
+        sentence = sentence.replace("다음 운영 제안:", "", 1).strip()
+    elif "역대 최고" in sentence:
+        title = "역대 최고 경신"
+    elif category == "성장 추세":
+        title = "성과 성장"
+    elif category == "가격·성과":
+        title = "가격 대비 성과 점검"
+    elif "가격" in category:
+        title = "가격 경쟁력" if "위험" not in category else "가격 조건 점검"
+    elif category == "타겟 확장성":
+        title = "타겟·SEG 확장"
+    elif category == "타겟 적합도":
+        title = "핵심 타겟 적합도"
+    elif category == "타겟 위험":
+        title = "타겟 편중 점검"
+    elif category in {"운영 위험", "운영 이슈"}:
+        title = "운영 조건 점검"
+    elif category in {"금번 성과", "성과"}:
+        title = "금번 성과"
+    else:
+        title = category or "운영 인사이트"
+
+    # 서술형 종결 → 간결한 실무 보고체
+    replacements = [
+        ("기록하며 역대 최고 실적을 경신했습니다.", "기록, 역대 최고 실적 경신"),
+        ("역대 최고 실적을 경신했습니다.", "역대 최고 실적 경신"),
+        ("기록했습니다.", "기록"),
+        ("확인되었습니다.", "확인"),
+        ("확인됩니다.", "확인"),
+        ("확보했습니다.", "확보"),
+        ("유지했습니다.", "유지"),
+        ("개선되었습니다.", "개선"),
+        ("감소했습니다.", "감소"),
+        ("증가했습니다.", "증가"),
+        ("하락했습니다.", "하락"),
+        ("상승했습니다.", "상승"),
+        ("가능성이 확인됩니다.", "가능성 확인"),
+        ("흐름이 확인됩니다.", "흐름 확인"),
+        ("재편성이 가능합니다.", "재편성 가능"),
+        ("검토하는 것이 좋습니다.", "검토 필요"),
+        ("검토하는 것이 필요합니다.", "검토 필요"),
+        ("검토할 필요가 있습니다.", "검토 필요"),
+        ("확인하는 것이 필요합니다.", "확인 필요"),
+        ("확인하는 것이 좋습니다.", "확인 필요"),
+        ("판단하는 것이 필요합니다.", "판단 필요"),
+        ("것이 적절합니다.", "적절"),
+        ("것이 필요합니다.", "필요"),
+        ("것이 좋습니다.", "검토 필요"),
+        ("필요합니다.", "필요"),
+        ("수준입니다.", "수준"),
+        ("성과입니다.", "성과"),
+    ]
+    for old, new in replacements:
+        sentence = sentence.replace(old, new)
+
+    sentence = re.sub(r"(했습니다|됩니다|있습니다)\.$", "", sentence).rstrip(".").strip()
+
+    # 괄호형 근거는 중복/기준성 문구를 줄이고 필요한 근거만 ' > '로 연결
+    noisy_evidence = {
+        "현재 주문금액 기준", "발송일 최저가 기준", "직전 운영 비교",
+        "핵심 상품 기준", "우수 상품 기준", "관찰 상품 기준", "부진 상품 기준",
+    }
+    if evidence and evidence not in noisy_evidence and evidence not in sentence and len(evidence) <= 48:
+        sentence = f"{sentence} > {evidence}"
+
+    return f"• {title} : {sentence}"
+
+
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
     """상품구분·상품분석·PPT에서 사용할 한 줄형 호환 함수입니다."""
     report = generate_insight_report(row, history, get_saved_issue(row))
@@ -4412,8 +4490,105 @@ def _repeat_operation_sentence(product_name: str, pw: pd.DataFrame):
     )
 
 
+
+def _compact_weekly_business_tone(sentence: str) -> str:
+    """주간실적 시사점을 간결한 실무 보고체로 정리."""
+    s = str(sentence or "").strip()
+    replacements = [
+        ("기록했습니다.", "기록"),
+        ("확인됐습니다.", "확인"),
+        ("확인되었습니다.", "확인"),
+        ("확인됩니다.", "확인"),
+        ("차지했습니다.", "차지"),
+        ("높았습니다.", "우수"),
+        ("낮았습니다.", "열위"),
+        ("유지됐습니다.", "유지"),
+        ("유지되었습니다.", "유지"),
+        ("개선됐습니다.", "개선"),
+        ("개선되었습니다.", "개선"),
+        ("필요가 있습니다.", "필요"),
+        ("필요합니다.", "필요"),
+        ("적절합니다.", "검토 필요"),
+        ("검토하는 것이 좋습니다.", "검토 필요"),
+        ("검토하는 것이 적절합니다.", "검토 필요"),
+        ("활용할 수 있습니다.", "활용 가능"),
+        ("병행할 수 있습니다.", "병행 가능"),
+        ("재편성이 가능합니다.", "재편성 가능"),
+        ("검토할 수 있습니다.", "검토 가능"),
+        ("것이 좋습니다.", "검토 필요"),
+        ("것이 필요합니다.", "필요"),
+    ]
+    for old, new in replacements:
+        s = s.replace(old, new)
+    s = re.sub(r"(했습니다|됩니다|있습니다)\.$", "", s).rstrip(".").strip()
+    return s
+
+
+def _weekly_new_repeat_stats(pw: pd.DataFrame, products_all: pd.DataFrame, week_start) -> dict | None:
+    """
+    금주 상품을 과거 동일상품 이력 유무 기준으로
+    신규·유사신규 후보군 vs 재편성으로 구분해 성과 비교.
+    """
+    if pw.empty or "상품명" not in pw.columns:
+        return None
+
+    wk = pw.groupby("상품명", as_index=False)["주문금액"].sum().copy()
+    if wk.empty:
+        return None
+
+    hist = products_all.copy()
+    hist["_date2"] = pd.to_datetime(hist["_date"], errors="coerce")
+    week_start = pd.to_datetime(week_start, errors="coerce")
+
+    rows = []
+    for _, r in wk.iterrows():
+        pname = str(r["상품명"])
+        prior = hist[
+            (hist["상품명"].astype(str) == pname)
+            & hist["_date2"].notna()
+            & (hist["_date2"] < week_start)
+        ]
+        kind = "재편성" if not prior.empty else "신규·유사신규"
+        rows.append({"구분": kind, "주문금액": float(r["주문금액"])})
+
+    d = pd.DataFrame(rows)
+    out = {}
+    for kind, g in d.groupby("구분"):
+        out[kind] = {
+            "상품수": int(len(g)),
+            "평균매출": float(g["주문금액"].mean()) if len(g) else 0,
+            "삼백이상률": float((g["주문금액"] >= 3_000_000).mean()) if len(g) else 0,
+            "오백이상률": float((g["주문금액"] >= 5_000_000).mean()) if len(g) else 0,
+        }
+    return out or None
+
+
+def _weekly_success_formula_sentence(
+    core_count: int,
+    core_share: float,
+    amount_delta: float | None,
+    spm_delta: float | None,
+) -> str | None:
+    """금주 성과 구조를 과도한 인과 단정 없이 요약."""
+    if core_count <= 0 or core_share <= 0:
+        return None
+    if amount_delta is not None and spm_delta is not None and amount_delta > 0 and spm_delta > 0:
+        return (
+            f"• 금주 성과 핵심 요인 : 500만원 이상 핵심 상품 {core_count}개가 매출의 {core_share:.1f}%를 차지한 가운데 "
+            f"주문금액 {amount_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}% 개선 > "
+            f"단순 발송량 확대보다 검증 상품 × 적합 타겟 중심의 편성 효율 개선이 성과 상승과 함께 확인"
+        )
+    return (
+        f"• 금주 성과 구조 : 500만원 이상 핵심 상품 {core_count}개가 매출의 {core_share:.1f}% 차지 > "
+        f"핵심 상품 의존도와 신규 매출원 확보 수준을 함께 관리할 필요"
+    )
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
+    week_start = pd.to_datetime(pw["_date"], errors="coerce").min() if not pw.empty else pd.NaT
+    amount_delta = None
+    spm_delta = None
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
 
     send_count = float(sw[send_col].sum())
@@ -4501,11 +4676,23 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         core_names = ", ".join(_short_weekly_product_name(x) for x in core.head(4)["상품명"].astype(str))
         if core_share >= 50:
             product_points.append(
-                f"• 500만원 이상 핵심 상품 {len(core)}개가 전체 주문금액의 {core_share:.1f}%를 차지해 {core_names} 등 상위 상품 중심의 매출 집중도가 높았습니다. 차주에는 핵심 상품 재편성과 함께 신규·유사신규 후보를 병행해 매출원을 분산할 필요가 있습니다."
+                f"• 핵심 상품 매출 집중 : 전체 {len(rank)}개 중 500만원 이상 핵심 상품 {len(core)}개가 주문금액의 {core_share:.1f}% 차지 > "
+                f"{core_names} 등 검증 상품은 안정적으로 재편성하되 저성과 편성 비중을 줄이고 신규·유사신규 후보 TEST를 병행해 추가 핵심 상품 발굴 필요"
             )
         else:
             product_points.append(
-                f"• 500만원 이상 핵심 상품 {len(core)}개가 전체 주문금액의 {core_share:.1f}%를 차지했으며 {core_names} 등이 주간 매출을 견인했습니다. 핵심 상품은 유지하되 특정 상품 의존 여부를 지속 점검할 필요가 있습니다."
+                f"• 핵심 상품 매출 기여 : 500만원 이상 핵심 상품 {len(core)}개가 주문금액의 {core_share:.1f}% 차지 > "
+                f"{core_names} 등 검증 상품은 유지하되 특정 상품 의존도와 신규 매출원 확보 수준 지속 점검 필요"
+            )
+
+    # 저성과 상품 비중: 편성 비효율을 핵심상품 집중도와 함께 확인
+    if not rank.empty:
+        poor_count = int(len(poor))
+        poor_share = poor_count / len(rank) * 100 if len(rank) else 0
+        if poor_count > 0:
+            product_points.append(
+                f"• 저성과 상품 효율 점검 : 금주 {len(rank)}개 상품 중 100만원 미만 {poor_count}개로 전체의 {poor_share:.1f}% 차지 > "
+                f"반복 저성과 상품은 재편성 우선순위를 낮추고 과거 300만원 이상 검증 상품 또는 신규·유사신규 후보로 교체 필요"
             )
 
     # 최고매출 상품: 실제 반복횟수/회당 성과 근거 반영
@@ -4612,6 +4799,27 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 f"• {g}{a}은 {', '.join(top_products)} 등 고성과 상품이 함께 편성된 가운데 SPM {s['SPM']:.1f}를 기록했습니다. 타겟 자체가 우수하다고 단정하기보다 해당 타겟에서 반복적으로 성과가 확인된 상품군과 SEG를 우선 확인하고, 동일 조건에서 재현 여부를 검증한 뒤 유사 상품 재편성과 미발송 SEG 확대 TEST에 활용하는 것이 좋습니다."
             )
 
+    # 신규·유사신규 vs 재편성 성과 비교
+    nr_stats = _weekly_new_repeat_stats(pw, products_all, week_start)
+    if nr_stats and "재편성" in nr_stats and "신규·유사신규" in nr_stats:
+        rep = nr_stats["재편성"]
+        newc = nr_stats["신규·유사신규"]
+        if rep["상품수"] > 0 and newc["상품수"] > 0:
+            if rep["평균매출"] >= newc["평균매출"] * 1.25:
+                direction = "검증 상품 재편성 효율 우위"
+                action = "핵심 재편성으로 기본 매출을 확보하되 신규·유사신규 TEST 성공률 개선 필요"
+            elif newc["평균매출"] >= rep["평균매출"] * 1.25:
+                direction = "신규·유사신규 성과 우위"
+                action = "신규 소싱 강도를 유지하되 300만원 이상 성과 상품은 빠르게 재편성 후보로 전환 필요"
+            else:
+                direction = "양 유형 성과 유사"
+                action = "재편성과 신규 TEST 비중을 균형 운영하며 300만원 이상 성공률 기준으로 편성 비중 조정 필요"
+            op.append(
+                f"• 신규·유사신규 vs 재편성 : 신규·유사신규 {newc['상품수']}개 평균 {compact_money(newc['평균매출'])}, "
+                f"300만원 이상 비중 {newc['삼백이상률']*100:.1f}% / 재편성 {rep['상품수']}개 평균 {compact_money(rep['평균매출'])}, "
+                f"300만원 이상 비중 {rep['삼백이상률']*100:.1f}%로 {direction} > {action}"
+            )
+
     # 최근 4주 반복성 실제 계산: 3주 이상 동일 우위일 때만 강한 시사점 생성
     pattern4 = _recent_4week_time_pattern(week, year, sends_all)
     if pattern4 and pattern4.get("time"):
@@ -4624,7 +4832,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         dname, dcnt, dtotal = pattern4["day"]
         if dcnt >= 3:
             op.append(
-                f"• 최근 {dtotal}주 중 {dcnt}주에서 {dname}요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다. 동일 요일의 상품 구성과 타겟 조건을 함께 비교해 재현 가능한 편성 조건으로 활용할 필요가 있습니다."
+                f"• 요일별 편성 조건 검증 : 최근 {dtotal}주 중 {dcnt}주에서 {dname}요일 SPM 최고 기록 > "
+                f"요일 자체 효과로 단정하기보다 해당 요일의 핵심 상품 비중·타겟·SEG·발송모수를 함께 비교해 공통 고성과 조건 확인 필요"
             )
 
     if not big_cat.empty and big_cat["주문금액"].sum()>0:
@@ -4656,6 +4865,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             _repeat_replaced.append(_s)
     product_points = _repeat_replaced
 
+    # 금주 성과 핵심 요인: 핵심상품 집중 + 주문금액/SPM 변화를 연결하되 인과는 단정하지 않음
+    if not core.empty and amount > 0:
+        core_share_for_formula = float(core["주문금액"].sum()) / amount * 100
+        success_formula = _weekly_success_formula_sentence(
+            len(core), core_share_for_formula, amount_delta, spm_delta
+        )
+        if success_formula:
+            product_points.insert(0, success_formula)
+
     # 상품 운영 시사점 중복 제거: 동일 문장/동일 반복판정 중복 방지
     _pp_seen = set()
     _pp_dedup = []
@@ -4682,7 +4900,16 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         clean_sentence = sentence.strip()
         if not clean_sentence or clean_sentence in seen_sentences:
             continue
-        nxt.append("• " + clean_sentence)
+        kind_label_map = {
+            "즉시 재편성": "재편성 우선",
+            "최근 미편성": "휴지기 후 재편성",
+            "가격 조건": "가격 조건 점검",
+            "저성과 교체": "저성과 교체",
+            "카테고리 교체": "저성과 교체",
+            "신규·유사신규 TEST": "신규·유사신규 발굴",
+        }
+        label = kind_label_map.get(kind, kind)
+        nxt.append(f"• {label} | {clean_sentence}")
         seen_sentences.add(clean_sentence)
         used_kinds[kind] = used_kinds.get(kind, 0) + 1
 
@@ -4729,10 +4956,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 동일 product master가 여러 추천 규칙에 걸리면 근거를 하나로 병합해 1회만 노출
     nxt = _merge_same_product_recommendations(nxt, products_all)
 
+    product_points = [_compact_weekly_business_tone(x) for x in product_points]
+    op = [_compact_weekly_business_tone(x) for x in op]
+    nxt = [_compact_weekly_business_tone(x) for x in nxt]
+
     return "\n".join([
         "■ 주간 실적 요약",*summary,"",
-        "■ 상품 운영 시사점",*(product_points[:5] or ["• 금주 상품 성과를 기준으로 재편성 우선순위를 점검할 필요가 있습니다."]),"",
-        "■ 편성 운영 시사점",*(op[:5] or ["• 타겟·요일·시간대·카테고리별 효율을 원인 상품과 함께 비교해 편성 우선순위를 조정할 필요가 있습니다."]),"",
+        "■ 상품 운영 시사점",*(product_points[:6] or ["• 금주 상품 성과 기준 재편성 우선순위 점검 필요"]),"",
+        "■ 편성 운영 시사점",*(op[:5] or ["• 타겟·요일·시간대·카테고리별 효율을 원인 상품과 함께 비교해 편성 우선순위 조정 필요"]),"",
         "■ 차주 운영 제안",*nxt
     ])
 
@@ -5713,8 +5944,8 @@ elif menu == "일일실적":
             ):
                 rows_html = []
                 for item in report["인사이트"]:
-                    evidence = f" <span class='evidence'>({item['evidence']})</span>" if item.get("evidence") else ""
-                    rows_html.append(f"<div class='insight-row'>• {item['sentence']}{evidence}</div>")
+                    insight_text = format_daily_insight_item(item)
+                    rows_html.append(f"<div class='insight-row'>{html.escape(insight_text)}</div>")
                 st.markdown("<div class='compact-insight'>" + "".join(rows_html) + "</div>", unsafe_allow_html=True)
 
                 if report["위험요인"]:
