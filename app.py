@@ -4811,8 +4811,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         s = _clean_weekly_title(name)
         s = re.sub(r"^\[[^\]]+\]\s*", "", s)
         s = re.sub(r"^★단독\s*", "", s)
-        # 보고서 제목만 과도하게 긴 옵션/모델 꼬리를 축약
         s = re.sub(r"\s*/\s*[A-Z0-9\-]+$", "", s).strip()
+        if "필립스 이지프로" in s:
+            return "필립스 이지프로"
+        if "비에날씬 BNR17" in s:
+            return "비에날씬 BNR17"
+        if "락앤락 바로한끼 밥용기" in s:
+            return "락앤락 바로한끼 밥용기"
+        if "보랄" in s and "날개없는 선풍기" in s:
+            return "보랄 날개없는 선풍기"
         return s
 
     def _infer_weekly_title(s: str, default_title="운영 인사이트") -> str:
@@ -4850,6 +4857,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     def _strip_subject_prefix(fact: str, title: str) -> str:
         f = str(fact or "").strip()
+        if title == "식품/건강 상품 교체":
+            return f
         base = title.replace(" 타겟 적합도", "").strip()
         # full title may be shortened; first remove exact title, then generic leading subject up to 조사
         for subj in [base, title]:
@@ -4866,19 +4875,49 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     def _compact_fact(fact: str, title: str) -> str:
         f = _strip_subject_prefix(fact, title)
-        # Facts: remove prose endings without concatenating arbitrary suffixes.
+
+        if title == "핵심 상품 매출 집중":
+            f = re.sub(r"500만원 이상 핵심 상품\s+(\d+)개가", r"편성 건 기준 500만원 이상 핵심 성과 \1건이", f)
+            f = re.sub(r"등 상위 상품 중심의 매출 집중도가 높았습니다", "등 상위 상품 중심으로 매출 집중", f)
+
+        if "회차별 주문금액은" in f:
+            mm = re.search(r"금주\s+(\d+)회.*?회차별 주문금액은\s+(.+?)으로\s+연속 하락은 확인되지 않았습니다", f)
+            if mm:
+                amounts = mm.group(2).replace(" → ", "·")
+                f = f"금주 {mm.group(1)}회 각각 {amounts} 기록, 반복 편성에도 고성과 유지"
+
+        if title.endswith("타겟 적합도"):
+            f = re.sub(r"에서\s+(\d+)회 평균", r" \1회 평균", f)
+            f = re.sub(r",\s*500만원 이상\s+(\d+)회 기록,\s*반면", r"·500만원 이상 \1회, ", f)
+            f = re.sub(r"으로 차이가 확인됐습니다", "으로 차이", f)
+            f = re.sub(r"로 차이가 확인됐습니다", "로 차이", f)
+
+        if title == "고성과 상품 × 적합 타겟 조합 강화":
+            f = re.sub(r"^(.+?)은\s+", r"\1에서 ", f)
+            f = re.sub(r"를 기록했습니다$", " 기록", f)
+
+        if title == "카테고리보다 검증 상품 중심 편성":
+            f = re.sub(r"^대카테고리 매출은\s*", "", f)
+            f = re.sub(r"순으로 구성됐습니다$", "순으로 매출 구성", f)
+
+        if title == "요일별 편성 조건 검증":
+            f = re.sub(r"최근 4주 중 3주에서 수요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다",
+                       "최근 4주 중 3주에서 수요일 SPM 최고 기록", f)
+
         replacements = [
             (r"의 ([0-9.]+)%를 차지해", r"의 \1% 차지,"),
             (r"의 ([0-9.]+)%로 높은 비중을 차지했으나", r"의 \1%를 차지했으나"),
             (r"을 기록했고", " 기록,"),
             (r"를 기록했고", " 기록,"),
-            (r"을 기록한 반면", " 기록, 반면"),
-            (r"를 기록한 반면", " 기록, 반면"),
-            (r"으로 차이가 확인됐습니다", "으로 차이 확인"),
-            (r"로 차이가 확인됐습니다", "로 차이 확인"),
-            (r"이 반복 확인됐습니다", " 반복 확인"),
-            (r"가 반복 확인됐습니다", " 반복 확인"),
+            (r"을 기록한 반면", " 기록, "),
+            (r"를 기록한 반면", " 기록, "),
             (r"에 그쳤습니다", " 기록"),
+            (r"기록했습니다$", "기록"),
+            (r"확인되지 않았습니다$", "확인되지 않음"),
+            (r"높았습니다$", "높음"),
+            (r"구성됐습니다$", "구성"),
+            (r"상태입니다$", "상태"),
+            (r"후보입니다$", "후보"),
             (r"입니다$", ""),
             (r"했습니다$", ""),
             (r"됐습니다$", ""),
