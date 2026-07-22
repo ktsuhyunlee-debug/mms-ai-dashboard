@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.69 WEEKLY LOGIC FINALIZED
+# V4.4.70 WEEKLY LOGIC GLOBAL GUARD
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.69-WEEKLY-LOGIC-FINALIZED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.70-WEEKLY-LOGIC-GLOBAL-GUARD
 
 from __future__ import annotations
 
@@ -3798,6 +3798,10 @@ def _v4468_compact_report_text(text: str) -> str:
         (r"마켓임당\s+병천\s+순대국밥\s+180g\s*[xX×]\s*8봉", "병천 순대국밥 8봉"),
         (r"1\+1\s+초경량\s+3단\s+자동\s+우산\s+양산\s+겸용[_\s-]*접이식\s+암막\s+우양산", "1+1 초경량 3단 자동 암막 우양산"),
         (r"CJ\s+햇반\s+윤기가득쌀밥\s+210g\s*[xX×]\s*36개", "CJ 햇반 윤기가득쌀밥 36개"),
+        (r"온더바디\s+발을씻자\s+풋샴푸\s+385ml\s*[xX×]\s*3개\s*\([^)]*\)", "온더바디 발을씻자 풋샴푸 3개"),
+        (r"더나함\s+순살\s+장어탕(?:\s+리뉴얼!?|\s+600g|\s+용량UP)*\s*10팩(?:세트)?", "더나함 순살 장어탕 10팩"),
+        (r"풀무원\s+탄산수/탄산음료\s+브리지톡\s+500mL\s*[xX×]\s*20병\s*\([^)]*\)", "풀무원 브리지톡 500ml 20병"),
+        (r"AHC\s+프리미어\s+아이크림\s+커버쿠션\s+본품\s*\(15g\)\s*\(\+?리필\s*15g\)", "AHC 프리미어 아이크림 커버쿠션"),
     ]
     for pat, repl in rules:
         s = re.sub(pat, repl, s, flags=re.I)
@@ -4401,6 +4405,10 @@ _V4467_DISPLAY_REPLACEMENTS = [
     (r"1\+1\s+초경량\s+3단\s+자동\s+우산\s+양산\s+겸용[_\s-]*접이식\s+암막\s+우양산", "1+1 초경량 3단 자동 암막 우양산"),
     (r"맛있는청년들\s+66갈비\s+국내산\s+한돈\s+냉동\s+한입/대패\s+삼겹살\s+1팩\(400g\)", "66갈비 한입/대패 삼겹살 400g"),
     (r"웅진식품\s+탄산수\s+더\s+빅토리아\s+500ml\s+16가지맛", "더 빅토리아 탄산수 500ml"),
+    (r"온더바디\s+발을씻자\s+풋샴푸\s+385ml\s*[xX×]\s*3개\s*\([^)]*\)", "온더바디 발을씻자 풋샴푸 3개"),
+    (r"더나함\s+순살\s+장어탕(?:\s+리뉴얼!?|\s+600g|\s+용량UP)*\s*10팩(?:세트)?", "더나함 순살 장어탕 10팩"),
+    (r"풀무원\s+탄산수/탄산음료\s+브리지톡\s+500mL\s*[xX×]\s*20병\s*\([^)]*\)", "풀무원 브리지톡 500ml 20병"),
+    (r"AHC\s+프리미어\s+아이크림\s+커버쿠션\s+본품\s*\(15g\)\s*\(\+?리필\s*15g\)", "AHC 프리미어 아이크림 커버쿠션"),
 ]
 
 def _v4467_compact_display_name(name: str) -> str:
@@ -4903,11 +4911,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         short = _short_weekly_product_name(pname)
         if count >= 2:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록. 회차별 주문금액과 타겟별 성과를 실제 비교해 반복 운영 지속 여부를 판정하는 것이 적절합니다."
+                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 주간 상품 중 최고 매출 기록. 회차별 주문금액과 타겟별 성과를 실제 비교해 반복 운영 지속 여부를 판정하는 것이 적절합니다."
             )
         else:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록. 동일 타겟 1회 추가 검증 후 유사 성과가 유지되면 운영 확대를 검토할 수 있습니다."
+                f"• {_with_topic(short)} 금주 {compact_money(float(r['주문금액']))}으로 주간 상품 중 최고 매출 기록. 동일 타겟 1회 추가 검증 후 유사 성과가 유지되면 운영 확대를 검토할 수 있습니다."
             )
 
     # 카테고리별 성과 편차: 실제 대카테고리 row에서 동적 생성
@@ -5323,7 +5331,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         f = re.sub(r"\s+", " ", f).strip(" ,.")
         return f
 
-    def _compact_action(action: str, title: str) -> str:
+    def _compact_action(action: str, title: str, fact: str = "") -> str:
         a = str(action or "").strip().rstrip(".")
         # Generate clean report-style action from semantic patterns rather than suffix replacement.
         if title == "핵심 상품 매출 집중":
@@ -5358,9 +5366,25 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if title.endswith("상품 교체"):
             return "동일 카테고리 내 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체 검토"
         if title.endswith("냉방가전 신규·유사신규 발굴"):
+            evidence = f"{fact} {a}".lower()
+            if any(k in evidence for k in ("핸디", "손선풍기", "휴대용", "아이스볼트", "에어쿨")):
+                return (
+                    "단일 사례로 반복성을 단정하기보다 당시 가격대·휴대성·냉각 기능 등 성과 조건을 참고해 "
+                    "유사 스펙의 휴대용 냉방가전 신규·유사신규 상품 발굴 및 TEST 검토"
+                )
+            if any(k in evidence for k in ("에어서큘", "에어써큘", "서큘레이터", "써큘레이터", "3d")):
+                return (
+                    "단일 사례로 반복성을 단정하기보다 3~5만원대·스탠드형·공기순환·리모컨 등 "
+                    "사용 편의성이 명확한 냉방가전 중심으로 신규·유사신규 상품 우선 발굴 및 TEST 검토"
+                )
+            if "날개없는" in evidence:
+                return (
+                    "단일 사례로 반복성을 단정하기보다 당시 가격 경쟁력·안전성·공간 활용·조작 편의 등 성과 조건을 참고해 "
+                    "유사 특성의 냉방가전 신규·유사신규 상품 발굴 및 TEST 검토"
+                )
             return (
-                "단일 사례로 반복성을 단정하기보다 3~5만원대·스탠드형·공기순환·리모컨 등 "
-                "사용 편의성이 명확한 냉방가전 중심으로 신규·유사신규 상품 우선 발굴 및 TEST 검토"
+                "단일 사례로 반복성을 단정하기보다 당시 가격·핵심 기능·사용 편의 등 실제 성과 조건을 참고해 "
+                "유사 냉방가전 신규·유사신규 상품 발굴 및 TEST 검토"
             )
         if title.endswith("우양산 신규·유사신규 발굴"):
             return (
@@ -5403,7 +5427,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             old_title, rest = s.split(" : ", 1)
             fact, action = rest.split(" > ", 1)
             inferred = _infer_weekly_title(f"{old_title} {fact} {action}", _clean_weekly_title(old_title))
-            return f"• {inferred} : {_compact_fact(fact, inferred)} > {_compact_action(action, inferred)}"
+            return f"• {inferred} : {_compact_fact(fact, inferred)} > {_compact_action(action, inferred, fact)}"
 
         # Sentence-form input: first sentence fact, remaining sentences interpretation/action.
         sentences = [x.strip() for x in re.split(r"(?<=\.)\s+", s) if x.strip()]
@@ -5419,7 +5443,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     action = token.strip() + " " + action
                     break
 
-        return f"• {title} : {_compact_fact(fact, title)}" + (f" > {_compact_action(action, title)}" if action else "")
+        return f"• {title} : {_compact_fact(fact, title)}" + (f" > {_compact_action(action, title, fact)}" if action else "")
 
     def _dedupe_keep_order(items):
         out, seen = [], set()
@@ -5858,6 +5882,35 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         _v4468_naturalize_report_text(_v4468_compact_report_text(x))
         for x in dyn_next
     ]
+
+    def _v4470_final_report_tone_guard(line: str) -> str:
+        """Final weekly render guard: normalize only sentence endings; preserve facts/numbers/actions."""
+        s = str(line or "").strip()
+        if not s:
+            return s
+        replacements = [
+            (r"적절합니다\.?$", "적절"),
+            (r"가능합니다\.?$", "가능"),
+            (r"필요합니다\.?$", "필요"),
+            (r"검토할 수 있습니다\.?$", "검토 가능"),
+            (r"확인됩니다\.?$", "확인"),
+            (r"판단됩니다\.?$", "판단"),
+            (r"예상됩니다\.?$", "예상"),
+        ]
+        parts = re.split(r"(\s*>\s*)", s)
+        for i in range(0, len(parts), 2):
+            seg = parts[i].rstrip()
+            for pat, repl in replacements:
+                new_seg = re.sub(pat, repl, seg)
+                if new_seg != seg:
+                    seg = new_seg
+                    break
+            parts[i] = seg
+        return "".join(parts)
+
+    dyn_product = [_v4470_final_report_tone_guard(x) for x in dyn_product]
+    dyn_op = [_v4470_final_report_tone_guard(x) for x in dyn_op]
+    dyn_next = [_v4470_final_report_tone_guard(x) for x in dyn_next]
 
     dyn_next = sorted(dyn_next, key=_weekly_next_priority)
 
