@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.68 WEEKLY FINAL HARDENING
+# V4.4.69 WEEKLY LOGIC FINALIZED
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.68-WEEKLY-FINAL-HARDENING
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.69-WEEKLY-LOGIC-FINALIZED
 
 from __future__ import annotations
 
@@ -2952,10 +2952,10 @@ def _target_strength_sentence(product_name: str, analysis):
         g, a = s["target"]
         vals = " → ".join(compact_money(v) for v in s["vals"])
         seg_text = f", {s['seg_n']}개 SEG에서 운영" if s["seg_n"] >= 2 else ""
+        seg_part = f"·{s['seg_n']}개 SEG 운영" if s["seg_n"] >= 2 else ""
         return (
-            f"• {_with_topic(short)} {g}{clean_identifier_value(a)}에서 최근 {len(s['vals'])}회 주문금액이 {vals}으로 "
-            f"모두 300만원 이상을 유지했고{seg_text}했습니다. 동일 성별·연령에서 반복 성과가 유지돼 "
-            f"해당 타겟 내 운영 안정성이 확인된 상품으로, 고성과 SEG 순환과 미발송 SEG 확대 TEST를 병행할 수 있습니다."
+            f"• {_with_topic(short)} {g}{clean_identifier_value(a)} 최근 {len(s['vals'])}회 모두 300만원 이상{seg_part} > "
+            f"동일 타겟 내 반복 성과 및 운영 안정성 확인, 고성과 SEG 순환과 미발송 SEG 확대 TEST 가능"
         )
     return None
 
@@ -2993,7 +2993,16 @@ def _next_week_action_candidates(pw, products_all, week_end):
                     f"동일 SEG 과다 반복은 피하고 미발송 SEG로 순차 확대 TEST하는 것이 적절합니다."
                 )
         else:
-            s+=" 반복 고성과 이력은 확인되나 비교 가능한 타겟·SEG 근거가 충분하지 않아 최근 고성과 조건을 유지한 추가 편성 후 성과 재현 여부를 확인하는 것이 적절합니다."
+            if int(hist.get("ge5m", 0)) >= 2:
+                s += (
+                    " 500만원 이상 반복 고성과 이력이 확인돼 최근 고성과 타겟·SEG 조건을 우선 유지하고 "
+                    "미발송 SEG 확대 TEST를 검토하는 것이 적절합니다."
+                )
+            else:
+                s += (
+                    " 비교 가능한 타겟·SEG 근거가 충분하지 않아 최근 고성과 조건을 유지해 "
+                    "1회 추가 편성 후 성과 재현 여부를 확인하는 것이 적절합니다."
+                )
         actions.append((100+float(r["주문금액"])/1e6,"즉시 재편성",s))
 
     histdf=products_all.copy()
@@ -3696,12 +3705,17 @@ def _v4467_guard_season_conflicts(sentences, products_all: pd.DataFrame, week_en
 
 
 def _v4468_ensure_recommendation_action(sentences):
-    """재편성 우선 후보가 액션 없이 끝나는 경우 최소 실행 액션을 보장."""
+    """재편성 우선 후보가 액션 없이 끝나는 경우 누적 검증 수준에 맞는 최소 실행 액션을 보장."""
     out = []
     for raw in sentences or []:
         s = str(raw or "").strip()
         if "차주 재편성 우선 후보" in s and ">" not in s:
-            s += " > 최근 고성과 조건 유지 후 1회 추가 편성해 성과 재현 여부 확인 필요"
+            m = re.search(r"500만원 이상\s*(\d+)회", s)
+            ge5 = int(m.group(1)) if m else 0
+            if ge5 >= 2:
+                s += " > 반복 고성과 이력을 바탕으로 최근 고성과 타겟·SEG 조건 우선 유지 및 미발송 SEG 확대 TEST 검토"
+            else:
+                s += " > 최근 고성과 조건 유지 후 1회 추가 편성해 성과 재현 여부 확인 필요"
         out.append(s)
     return out
 
@@ -3714,11 +3728,15 @@ def _v4468_similarity_tokens(name: str):
         "공용","외","및","겸용","신규","유사신규","발굴","과거","동시점","운영","기록"
     }
     toks = []
+    synonym = {
+        "우산": "우양산", "양산": "우양산", "우양산": "우양산",
+        "써큘레이터": "서큘레이터", "에어써큘팬": "서큘레이터", "서큘레이터": "서큘레이터",
+    }
     for tok in re.split(r"\s+", s):
         tok = tok.strip()
         if len(tok) < 2 or tok in stop:
             continue
-        toks.append(tok)
+        toks.append(synonym.get(tok, tok))
     return set(toks)
 
 def _v4468_similar_product_name(a: str, b: str) -> bool:
@@ -3792,6 +3810,10 @@ def _v4468_naturalize_report_text(text: str) -> str:
     s = s.replace("반복 고성과가 확인", "반복 고성과 확인")
     s = s.replace(
         "해당 타겟 내 운영 안정성이 확인된 상품으로,",
+        "동일 타겟 내 반복 성과 및 운영 안정성 확인 >"
+    )
+    s = s.replace(
+        "동일 성별·연령에서 반복 성과가 유지돼 동일 타겟 내 반복 성과 및 운영 안정성 확인 >",
         "동일 타겟 내 반복 성과 및 운영 안정성 확인 >"
     )
     s = s.replace("병행할 수 있습니다.", "병행 가능")
@@ -4334,8 +4356,8 @@ def _repeat_operation_sentence(product_name: str, pw: pd.DataFrame):
     # 반복 성과 수준을 500만원 이상 반복 고성과와 300만원 이상 안정 성과로 구분
     if all(v >= 5_000_000 for v in vals):
         return (
-            f"• {_with_topic(short)} 금주 {len(vals)}회 편성 모두 500만원 이상을 기록했고 회차별 주문금액은 "
-            f"{seq_txt}으로 반복 고성과가 확인. 동일 조건의 성과 재현성이 높은 만큼 고성과 타겟·SEG 중심 단기 재편성 검토"
+            f"• {_with_topic(short)} 금주 {len(vals)}회 편성 모두 500만원 이상 기록, 회차별 주문금액은 "
+            f"{seq_txt}으로 반복 고성과 확인 > 반복 편성에서도 고성과가 유지돼 최근 고성과 타겟·SEG 조건 중심 재편성 검토"
         )
     if all(v >= 3_000_000 for v in vals):
         return (
@@ -4377,10 +4399,13 @@ _V4467_DISPLAY_REPLACEMENTS = [
     (r"메디트리\s+이뮨원샷\s+올인원\s+멀티비타민\s+앰플\s+2박스", "메디트리 이뮨원샷 멀티비타민 2박스"),
     (r"마켓임당\s+병천\s+순대국밥\s+180g\s*[xX×]\s*8봉", "병천 순대국밥 8봉"),
     (r"1\+1\s+초경량\s+3단\s+자동\s+우산\s+양산\s+겸용[_\s-]*접이식\s+암막\s+우양산", "1+1 초경량 3단 자동 암막 우양산"),
+    (r"맛있는청년들\s+66갈비\s+국내산\s+한돈\s+냉동\s+한입/대패\s+삼겹살\s+1팩\(400g\)", "66갈비 한입/대패 삼겹살 400g"),
+    (r"웅진식품\s+탄산수\s+더\s+빅토리아\s+500ml\s+16가지맛", "더 빅토리아 탄산수 500ml"),
 ]
 
 def _v4467_compact_display_name(name: str) -> str:
-    s = _v4467_compact_display_name(name)
+    # 표시명 전용 정리 함수. 원본 상품명/집계키는 변경하지 않는다.
+    s = str(name or "").strip()
     for pat, repl in _V4467_DISPLAY_REPLACEMENTS:
         s = re.sub(pat, repl, s, flags=re.I)
     s = re.sub(r"\s+", " ", s).strip()
@@ -4390,7 +4415,7 @@ def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
     """주간실적 전 섹션 공통 표시명 formatter.
     원본 상품키/집계값은 절대 변경하지 않고 화면 표시명만 축약한다.
     """
-    s = str(name or "").strip()
+    s = _v4467_compact_display_name(name)
 
     # 운영/광고 태그 제거
     s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
