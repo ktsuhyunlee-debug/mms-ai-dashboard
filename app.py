@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.43-UNIFIED-WEEKLY-ENGINE-ALL-WEEKS
 
 from __future__ import annotations
 
@@ -3190,7 +3190,7 @@ def _normalize_season_group(product_name: str, current_group: str) -> str:
 def _season_specific_action(group_name: str) -> str:
     actions = {
         "우양산": "1만원 내외 가격대의 경량·휴대용·암막 기능을 갖춘 우양산",
-        "캐리어·여행용품": "기내용·경량·확장형 등 휴가 수요가 명확한 캐리어·여행용품",
+        "캐리어·여행용품": "휴가·여행 수요가 명확한 동시즌 여행·레저 상품",
         "여행용 소형가전": "휴대성·소형·멀티전압 등 여행 편의성이 명확한 소형가전",
         "선케어": "휴대성·간편 도포·높은 자외선 차단 지수를 갖춘 선스틱·선쿠션·선크림",
         "냉감·기능성 의류": "냉감·흡습속건·통기성 기능이 명확한 여름 기능성 의류",
@@ -4634,6 +4634,17 @@ def validate_weekly_analysis_all_weeks(products_all: pd.DataFrame, sends_all: pd
     return pd.DataFrame(issues)
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
+    """선택 주차 기준 통합 주간 인사이트 엔진.
+    2025년 최초 데이터부터 향후 누적되는 모든 주차에 동일 규칙을 적용하며,
+    선택 주차 종료일 이후 데이터는 비교/누적/추천 근거에서 제외한다.
+    """
+    _week_end = pd.to_datetime(pw["_date"], errors="coerce").max() if "_date" in pw.columns and not pw.empty else pd.NaT
+    products_all = _weekly_cutoff_history(products_all, _week_end)
+    if sends_all is not None and not sends_all.empty and pd.notna(_week_end):
+        _sdate_col = "_date" if "_date" in sends_all.columns else first_col(sends_all, ["발송일시2", "발송일", "날짜", "일자"])
+        if _sdate_col:
+            _sdates = pd.to_datetime(sends_all[_sdate_col], errors="coerce")
+            sends_all = sends_all[_sdates.notna() & (_sdates <= _week_end)].copy()
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
 
@@ -5365,7 +5376,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = s.replace(", >", " >")
             s = s.replace("교체검토", "교체 검토")
             s = s.replace("확장검토", "확장 검토")
+            s = s.replace("확인검토", "확인 검토")
+            s = s.replace("재운영을 우선 검토하고", "재운영 우선 검토,")
+            s = re.sub(r"([가-힣A-Za-z0-9])검토$", r"\\1 검토", s)
             s = re.sub(r"운영 확대를 검토할 수 있습니다", "운영 확대 검토", s)
+            s = re.sub(r"\s*/\s*당시와 유사한 가격 조건 확보 시", " > 당시와 유사한 가격 조건 확보 시", s)
+            s = re.sub(r"\s*,\s*,+", ",", s)
+            s = re.sub(r"\s+([,>.])", r"\\1", s)
             s = re.sub(r"동일 성별·연령에서 반복 성과가 유지돼 해당 타겟 적합도가 확인된 상품으로,?", "동일 성별·연령 내 반복 고성과 확인,", s)
             s = re.sub(r"\s+", " ", s).strip()
             out.append(s)
@@ -5381,6 +5398,10 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         _weekly_section_join("■ 편성 운영 시사점", dyn_op),
         _weekly_section_join("■ 차주 운영 제안", dyn_next),
     ])
+
+APP_DIR = Path(__file__).resolve().parent
+IMAGE_DIR = APP_DIR / "images"
+MESSAGE_DIR = APP_DIR / "messages"
 
 def daily_asset_key(date_value, time_value) -> str:
     dt = pd.to_datetime(date_value, errors="coerce")
