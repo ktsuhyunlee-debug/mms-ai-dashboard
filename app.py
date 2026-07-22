@@ -188,14 +188,15 @@ html, body, [class*="css"] {
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--surface);
-    padding: 10px;
+    padding: 14px;
     box-sizing: border-box;
     box-shadow: 0 3px 12px rgba(25, 42, 70, 0.045);
 }
 
+/* 문구 카드가 좌우 전체 높이의 기준이 됨 */
 .asset-message-card {
     height: auto;
-    min-height: 420px;
+    min-height: 320px;
     overflow: visible;
     white-space: pre-wrap;
     font-size: 15px;
@@ -203,27 +204,27 @@ html, body, [class*="css"] {
     background: #fbfcfe;
 }
 
+/* 이미지 자체 높이가 row를 늘리지 않도록 카드 안에 absolute 배치 */
 .asset-image-card {
     position: relative;
     height: 100%;
-    min-height: 420px;
+    min-height: 320px;
     overflow: hidden;
-    background: #ffffff;
+    background: var(--surface);
 }
 
 .asset-image-card img {
     position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
+    inset: 14px;
+    width: calc(100% - 28px);
+    height: calc(100% - 28px);
     min-height: 0;
     max-height: none;
     object-fit: contain;
     object-position: center center;
-    border-radius: 8px;
-    transform: scale(1.28);
-    transform-origin: center center;
+    border-radius: 10px;
 }
+
 .asset-empty {
     height: 398px;
     display: flex;
@@ -326,59 +327,20 @@ hr {
 
 
 
-/* V4.4.31 발송소재: 예시 이미지처럼 좌우 카드 상·하단 동일 + 이미지 크게 채움 */
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) {
-    align-items: stretch !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
-    align-self: stretch !important;
-    display: flex !important;
-    flex-direction: column !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
-    flex: 1 1 auto !important;
-    height: 100% !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
-    width: 100% !important;
-    height: 100% !important;
-    min-height: 420px !important;
-    box-sizing: border-box !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
-    height: 100% !important;
-    min-height: 420px !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
-    height: 100% !important;
-    min-height: 420px !important;
-}
-
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
-    position: absolute !important;
-    inset: 0 !important;
-    width: 100% !important;
-    height: 100% !important;
-    max-width: none !important;
-    max-height: none !important;
-    object-fit: contain !important;
-    object-position: center center !important;
-    transform: scale(1.28) !important;
-    transform-origin: center center !important;
+@media (max-width: 900px) {
+    .daily-asset-grid {
+        grid-template-columns: 1fr;
+    }
+    .daily-asset-grid .daily-asset-panel {
+        min-height: 320px;
+    }
+    .daily-asset-grid .daily-asset-image img,
+    .daily-asset-grid .daily-asset-empty {
+        min-height: 300px;
+    }
 }
 
 @media (max-width: 900px) {
-    [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
-        transform: scale(1.0) !important;
-    }
-
 
     [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"],
     [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
@@ -3864,13 +3826,6 @@ def _set_weekly_deeplink(year: int, week: str) -> None:
         pass
 
 
-def _normalize_mms_message_text(value) -> str:
-    """MMS 문구 맨 앞 공백/개행만 제거하고 내부 줄바꿈은 유지."""
-    s = "" if value is None else str(value)
-    return s.lstrip()
-
-
-
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5433,58 +5388,52 @@ elif menu == "일일실적":
         message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
-        asset_image_col, asset_text_col = st.columns([1, 1.35], gap="medium")
 
-        with asset_image_col:
-            if image_path is not None:
-                import base64
-                mime_map = {
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".png": "image/png",
-                    ".webp": "image/webp",
-                }
-                mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
-                encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-                st.markdown(
-                    f"""
-                    <div class="asset-card asset-image-card">
-                        <img src="data:{mime};base64,{encoded}" alt="{image_path.name}">
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f"""
-                    <div class="asset-card asset-image-card">
-                        <div class="asset-empty">
-                            images 폴더에<br>
-                            {asset_key}_ 로 시작하는 이미지가 없습니다.
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        import base64
+        import html
 
-        with asset_text_col:
-            import html
-            if message_text:
-                message_body = html.escape(_normalize_mms_message_text(message_text)).replace("\n", "<br>")
-            else:
-                message_body = (
-                    "로우데이터의 MMS문구 컬럼에 문구를 입력하면 "
-                    "이곳에 자동으로 표시됩니다."
-                )
-
-            st.markdown(
-                f"""
-                <div class="asset-card asset-message-card" style="padding-top:18px;">
-                    {message_body}
-                </div>
-                """,
-                unsafe_allow_html=True,
+        # MMS 문구는 맨 앞의 공백/개행만 제거하고 내부 줄바꿈은 유지
+        clean_message_text = str(message_text or "").lstrip()
+        if clean_message_text:
+            message_body = html.escape(clean_message_text).replace("\n", "<br>")
+        else:
+            message_body = (
+                "로우데이터의 MMS문구 컬럼에 문구를 입력하면 "
+                "이곳에 자동으로 표시됩니다."
             )
+
+        if image_path is not None:
+            mime_map = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".webp": "image/webp",
+            }
+            mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
+            encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+            image_body = (
+                f'<img src="data:{mime};base64,{encoded}" '
+                f'alt="{html.escape(image_path.name)}">'
+            )
+        else:
+            image_body = (
+                '<div class="daily-asset-empty">'
+                f'images 폴더에<br>{html.escape(asset_key)}_ 로 시작하는 이미지가 없습니다.'
+                '</div>'
+            )
+
+        # 한 개의 HTML Grid로 렌더: 좌우 카드의 시작선/끝선이 구조적으로 동일
+        asset_html = (
+            '<div class="daily-asset-grid">'
+            '<div class="daily-asset-panel daily-asset-image">'
+            + image_body +
+            '</div>'
+            '<div class="daily-asset-panel daily-asset-message">'
+            + message_body +
+            '</div>'
+            '</div>'
+        )
+        st.markdown(asset_html, unsafe_allow_html=True)
 
         # 발송 통계: 요청 컬럼만 표시
         send_count = float(send_row.get(send_col, 0)) if send_col else 0
