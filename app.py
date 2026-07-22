@@ -27,6 +27,139 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 
 
+# === V4.4.38 DAILY INSIGHT ENGINE POLICY ===
+# 성과등급 기준(주문금액):
+# 핵심 상품: 5,000,000원 이상
+# 우수 상품: 3,000,000원 이상 ~ 5,000,000원 미만
+# 안정 상품: 2,000,000원 이상 ~ 3,000,000원 미만
+# 관찰 상품: 1,000,000원 이상 ~ 2,000,000원 미만
+# 부진 상품: 1,000,000원 미만
+DAILY_GRADE_RULES = [
+    (5_000_000, "핵심 상품"),
+    (3_000_000, "우수 상품"),
+    (2_000_000, "안정 상품"),
+    (1_000_000, "관찰 상품"),
+    (0, "부진 상품"),
+]
+
+def _daily_grade(amount):
+    try:
+        v = float(amount or 0)
+    except Exception:
+        v = 0.0
+    for threshold, label in DAILY_GRADE_RULES:
+        if v >= threshold:
+            return label
+    return "부진 상품"
+
+def _daily_trend_label(values):
+    """최근 최대 3회 추세: 상승/둔화만 명확할 때 반환, 혼조는 None."""
+    vals = [float(x) for x in values if x is not None]
+    if len(vals) < 3:
+        return None
+    vals = vals[-3:]
+    if vals[0] < vals[1] < vals[2]:
+        return "성과 성장"
+    if vals[0] > vals[1] > vals[2]:
+        return "성과 둔화"
+    return None
+
+def _daily_select_insights(candidates, max_core=3):
+    """
+    후보 인사이트를 중요도순으로 최대 3개 + 다음 운영 제안 1개로 압축.
+    신규 첫 운영/신규 타겟 TEST는 최우선.
+    금번 성과는 최대 1개.
+    동일 근거의 성과/추세 중복을 제거.
+    """
+    if not candidates:
+        return candidates
+
+    rows = [str(x).strip() for x in candidates if str(x).strip()]
+    actions = [x for x in rows if "다음 운영 제안" in x]
+    warnings = [x for x in rows if x.startswith("주의:") or x.startswith("**주의")]
+    rows = [x for x in rows if x not in actions and x not in warnings]
+
+    # 완전 중복 제거
+    uniq = []
+    for x in rows:
+        if x not in uniq:
+            uniq.append(x)
+    rows = uniq
+
+    # 신규 첫 운영이 있으면 별도 금번 성과는 중복으로 제거
+    has_new = any(("신규 첫 운영" in x or "신규 타겟 TEST" in x) for x in rows)
+    if has_new:
+        rows = [x for x in rows if "금번 성과" not in x or ("신규 첫 운영" in x or "신규 타겟 TEST" in x)]
+
+    # 금번 성과 최대 1개
+    seen_perf = False
+    tmp = []
+    for x in rows:
+        if "금번 성과" in x:
+            if seen_perf:
+                continue
+            seen_perf = True
+        tmp.append(x)
+    rows = tmp
+
+    def score(x):
+        if "신규 첫 운영" in x: return 100
+        if "신규 타겟 TEST" in x: return 98
+        if "금번 성과" in x: return 90
+        if "성과 하락 요인" in x or "성과 상승 요인" in x: return 88
+        if "가격 성공 조건" in x: return 84
+        if "타겟 적합" in x: return 82
+        if "프로모션" in x and ("의존" in x or "영향" in x): return 80
+        if "운영 간격" in x or "피로도" in x: return 78
+        if "가격 대비 성과" in x or "가격 경쟁력" in x or "가격 점검" in x: return 76
+        if "시즌성" in x: return 65
+        if "성과 성장" in x or "성과 둔화" in x: return 60
+        return 50
+
+    rows = sorted(enumerate(rows), key=lambda z: (-score(z[1]), z[0]))
+    selected = [x for _, x in rows[:max_core]]
+
+    if actions:
+        selected.append(actions[0])
+
+    # 주의 태그는 최대 2개 의미만 유지
+    if warnings:
+        w = warnings[0]
+        if "·" in w:
+            prefix, body = w.split(":", 1)
+            tags = [t.strip() for t in body.split("·") if t.strip()][:2]
+            w = prefix + ": " + " · ".join(tags)
+        selected.append(w)
+    return selected
+
+def _daily_compare_priority():
+    """원인 분석용 과거 비교 우선순위."""
+    return (
+        "동일 상품+동일 타겟/SEG",
+        "동일 시즌",
+        "최근 운영",
+        "역대 최고",
+    )
+
+def _daily_test_principle():
+    """재TEST는 원인 학습이 가능하도록 한 번에 한 변수 중심."""
+    return "가격/구성/타겟/전시순서 중 핵심 변수 1개 우선 조정"
+
+# 고급 분석 원칙:
+# 1) 하락뿐 아니라 상승 시에도 과거 유사 회차 대비 성공 요인을 추정한다.
+# 2) 역대 최고만 비교하지 않고 동일 타겟/SEG > 동일 시즌 > 최근 운영 > 역대 최고 순으로 비교한다.
+# 3) 가격은 외부 최저가 차액뿐 아니라 과거 300만원 이상 달성 회차의 성공가격 조건을 참고한다.
+#    단, 표본 1회면 '성공가격'으로 단정하지 않고 '과거 고성과 당시 가격'으로 표현한다.
+# 4) 타겟 적합도는 평균매출 + 300만원 이상 달성률 + 운영횟수 + 최근 성과의 재현성을 함께 본다.
+# 5) 프로모션 의존도는 프로모션/일반기간 표본이 충분할 때만 판단하고, 표본 부족 시 가능성으로 제한한다.
+# 6) 피로도는 최근 하락 + 짧은 운영 간격이 함께 확인될 때 우선 추정한다.
+# 7) 다음 운영 제안은 가격/구성/타겟/전시순서 중 한 번에 핵심 변수 1개를 우선 조정한다.
+# 8) 출력은 핵심 인사이트 최대 3개 + 다음 운영 제안 1개를 기본으로 한다.
+# === END V4.4.38 POLICY ===
+
+
+
+
 st.set_page_config(
     page_title="MMS AI Dashboard",
     page_icon="📊",
@@ -1483,7 +1616,7 @@ def _daily_finalize_insight_lines(lines, row=None, history=None):
     if actions:
         out.append(actions[0])
 
-    return out
+    return _daily_select_insights(out, max_core=3)
 
 
 def _daily_marketing_season_context(product_name: str, current_date) -> dict:
