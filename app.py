@@ -215,14 +215,16 @@ html, body, [class*="css"] {
 
 .asset-image-card img {
     position: absolute;
-    inset: 14px;
-    width: calc(100% - 28px);
-    height: calc(100% - 28px);
+    inset: 8px;
+    width: calc(100% - 16px);
+    height: calc(100% - 16px);
     min-height: 0;
     max-height: none;
     object-fit: contain;
     object-position: center center;
     border-radius: 10px;
+    transform: scale(1.08);
+    transform-origin: center center;
 }
 
 .asset-empty {
@@ -369,13 +371,15 @@ hr {
 /* 세로형 원본 이미지도 카드 높이를 밀어내지 않음 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
     position: absolute !important;
-    inset: 14px !important;
-    width: calc(100% - 28px) !important;
-    height: calc(100% - 28px) !important;
-    max-width: calc(100% - 28px) !important;
-    max-height: calc(100% - 28px) !important;
+    inset: 8px !important;
+    width: calc(100% - 16px) !important;
+    height: calc(100% - 16px) !important;
+    max-width: none !important;
+    max-height: none !important;
     object-fit: contain !important;
     object-position: center center !important;
+    transform: scale(1.08) !important;
+    transform-origin: center center !important;
 }
 
 @media (max-width: 900px) {
@@ -3864,6 +3868,16 @@ def _set_weekly_deeplink(year: int, week: str) -> None:
         pass
 
 
+def _normalize_mms_message_text(value) -> str:
+    """MMS 문구 표시용: 첫 줄 시작의 불필요한 공백/개행만 제거합니다."""
+    s = "" if value is None else str(value)
+    # 전체 문구의 맨 앞 공백/개행만 제거하고 내부 줄바꿈/공백은 유지
+    s = s.lstrip()
+    # '( 광고)' 같은 비정상 첫 토큰이 아니라 '(광고)' 앞 공백 제거가 목적
+    return s
+
+
+
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5463,7 +5477,7 @@ elif menu == "일일실적":
         with asset_text_col:
             import html
             if message_text:
-                message_body = html.escape(message_text).replace("\n", "<br>")
+                message_body = html.escape(_normalize_mms_message_text(message_text)).replace("\n", "<br>")
             else:
                 message_body = (
                     "로우데이터의 MMS문구 컬럼에 문구를 입력하면 "
