@@ -345,6 +345,7 @@ hr {
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
     width: 100% !important;
     height: 100% !important;
+    box-sizing: border-box !important;
     min-height: 430px !important;
     box-sizing: border-box !important;
 }
@@ -378,7 +379,7 @@ hr {
 }
 
 
-/* V4.4.30 발송소재: 원본 이미지 비율은 유지하고 좌우 박스 하단만 정확히 맞춤 */
+/* V4.4.31 발송소재: 좌우 박스 높이 동기화 + 원본 이미지 하단 1px 클리핑 방지 */
 .daily-asset-pair {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
@@ -394,18 +395,27 @@ hr {
 .daily-asset-pair .asset-image-card {
     position: relative;
     overflow: hidden;
-    padding: 0;
+    padding: 1px !important;
     background: var(--surface);
+    box-sizing: border-box !important;
 }
 .daily-asset-pair .asset-image-card img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: top center;
-    margin: 0;
-    padding: 0;
+    position: static !important;
+    inset: auto !important;
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    object-fit: contain !important;
+    object-position: top center !important;
+    transform: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
     border-radius: 10px;
+    box-sizing: border-box !important;
 }
 .daily-asset-pair .asset-message-card {
     min-height: 0 !important;
