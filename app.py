@@ -4956,14 +4956,101 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 동일 product master가 여러 추천 규칙에 걸리면 근거를 하나로 병합해 1회만 노출
     nxt = _merge_same_product_recommendations(nxt, products_all)
 
-    product_points = [_compact_weekly_business_tone(x) for x in product_points]
-    op = [_compact_weekly_business_tone(x) for x in op]
-    nxt = [_compact_weekly_business_tone(x) for x in nxt]
+
+
+    # ------------------------------------------------------------------
+    # MD 활용형 주간 시사점 보강
+    # 목표: 성과 진단 → 원인/조건 → 상품 상태 → 운영 액션 → MD 제안 가이드
+    # ------------------------------------------------------------------
+    md_guides = []
+
+    # 1) 핵심 상품 상태/MD 액션: 금주 고유상품 기준 상위 핵심상품
+    if not rank.empty:
+        top_core = rank[rank["주문금액"] >= 5_000_000].head(3)
+        for _, rr in top_core.iterrows():
+            pname = str(rr["상품명"])
+            wamt = float(rr["주문금액"])
+            hist_p = products_all[products_all["상품명"].astype(str) == pname].copy()
+            hist_p["_date2"] = pd.to_datetime(hist_p["_date"], errors="coerce")
+            hist_p = hist_p[hist_p["_date2"].notna()]
+            total_runs = int(len(hist_p))
+            core_runs = int((pd.to_numeric(hist_p["주문금액"], errors="coerce").fillna(0) >= 5_000_000).sum())
+
+            # 최근/누적 타겟 성과
+            target_txt = ""
+            if "타겟" in hist_p.columns and not hist_p.empty:
+                tg = hist_p.groupby("타겟", as_index=False)["주문금액"].mean().sort_values("주문금액", ascending=False)
+                if len(tg) >= 1:
+                    best_t = str(tg.iloc[0]["타겟"])
+                    best_a = float(tg.iloc[0]["주문금액"])
+                    target_txt = f", 핵심 타겟 {best_t} 평균 {compact_money(best_a)}"
+
+            md_guides.append(
+                f"• 핵심 유지 | {pname} : 금주 {compact_money(wamt)}, 누적 {total_runs}회 중 500만원 이상 {core_runs}회{target_txt} > "
+                f"고성과 타겟 중심 재편성 및 미발송 SEG 확장 TEST / MD : 동일 혜택 조건 유지 가능 여부와 유사 상품 추가 제안 검토"
+            )
+
+    # 2) 저성과 상품: 단순 제외가 아니라 재제안 가능 조건 제시
+    if not rank.empty:
+        poor_rank = rank[rank["주문금액"] < 1_000_000].head(3)
+        for _, rr in poor_rank.iterrows():
+            pname = str(rr["상품명"])
+            wamt = float(rr["주문금액"])
+            md_guides.append(
+                f"• 조건 개선 | {pname} : 금주 {compact_money(wamt)}로 100만원 미만 기록 > "
+                f"동일 조건 반복 편성보다 가격 인하·구성 확대·증정 혜택 등 판매 조건 개선 후 재TEST / "
+                f"MD : 조건 개선 가능 시 재제안, 개선 불가 시 동일 카테고리 검증 상품으로 대체 제안"
+            )
+
+    # 3) 신규·유사신규 vs 재편성: 평균매출과 성공률을 각각 평가해 단순 우위 오판 방지
+    nr_stats2 = _weekly_new_repeat_stats(pw, products_all, week_start)
+    if nr_stats2 and "재편성" in nr_stats2 and "신규·유사신규" in nr_stats2:
+        rep = nr_stats2["재편성"]
+        newc = nr_stats2["신규·유사신규"]
+        if rep["상품수"] and newc["상품수"]:
+            rep_avg = rep["평균매출"]
+            new_avg = newc["평균매출"]
+            rep_hit = rep["삼백이상률"]
+            new_hit = newc["삼백이상률"]
+            if rep_avg > new_avg and new_hit > rep_hit:
+                verdict = "재편성은 평균매출, 신규·유사신규는 300만원 이상 성공률에서 각각 강점 확인"
+                action = "검증 상품 재편성으로 기본 매출을 확보하면서 신규 후보 TEST 병행 필요"
+            elif rep_avg >= new_avg * 1.25 and rep_hit >= new_hit:
+                verdict = "재편성이 평균매출과 300만원 이상 성공률 모두 우위"
+                action = "핵심 재편성 비중을 유지하되 신규·유사신규 후보의 가격·구성 경쟁력 강화 필요"
+            elif new_avg >= rep_avg * 1.25 and new_hit >= rep_hit:
+                verdict = "신규·유사신규가 평균매출과 300만원 이상 성공률 모두 우위"
+                action = "신규 소싱 강도를 유지하고 고성과 신규 상품은 빠르게 재편성 후보로 전환 필요"
+            else:
+                verdict = "유형별 성과 우위가 혼재"
+                action = "평균매출과 300만원 이상 성공률을 함께 기준으로 재편성·신규 TEST 비중 조정 필요"
+
+            # 기존 op의 같은 주제 제거 후 정확한 판정으로 교체
+            op = [x for x in op if "신규·유사신규 vs 재편성" not in str(x)]
+            op.append(
+                f"• 신규·유사신규 vs 재편성 : 신규·유사신규 {newc['상품수']}개 평균 {compact_money(new_avg)}·300만원 이상 {new_hit*100:.1f}%, "
+                f"재편성 {rep['상품수']}개 평균 {compact_money(rep_avg)}·300만원 이상 {rep_hit*100:.1f}% > {verdict}, {action}"
+            )
+
+    # 4) 성공/실패 조건을 MD가 바로 이해할 수 있도록 상품 운영 가이드 추가
+    if not rank.empty:
+        poor_count2 = int((rank["주문금액"] < 1_000_000).sum())
+        core_count2 = int((rank["주문금액"] >= 5_000_000).sum())
+        if poor_count2:
+            product_points.append(
+                f"• 상품 제안 기준 : 금주 고유 상품 {len(rank)}개 중 핵심 상품 {core_count2}개·100만원 미만 {poor_count2}개 확인 > "
+                f"고성과 상품은 타겟·가격·구성 조건을 유지해 재편성하고, 저성과 상품은 동일 조건 반복보다 가격·구성·혜택 개선 여부를 우선 확인해 재제안 판단 필요"
+            )
+
+    # 5) 기존 차주 제안은 유지하되, MD가 행동할 수 있는 액션 가이드를 뒤에 추가
+    # 너무 길어지지 않도록 핵심 유지 3개 + 조건 개선 3개까지만 반영
+    if md_guides:
+        nxt.extend(md_guides[:6])
 
     return "\n".join([
         "■ 주간 실적 요약",*summary,"",
-        "■ 상품 운영 시사점",*(product_points[:6] or ["• 금주 상품 성과 기준 재편성 우선순위 점검 필요"]),"",
-        "■ 편성 운영 시사점",*(op[:5] or ["• 타겟·요일·시간대·카테고리별 효율을 원인 상품과 함께 비교해 편성 우선순위 조정 필요"]),"",
+        "■ 상품 운영 시사점",*(product_points[:7] or ["• 금주 상품 성과 기준 재편성 우선순위 점검 필요"]),"",
+        "■ 편성 운영 시사점",*(op[:6] or ["• 타겟·요일·시간대·카테고리별 효율을 원인 상품과 함께 비교해 편성 우선순위 조정 필요"]),"",
         "■ 차주 운영 제안",*nxt
     ])
 
