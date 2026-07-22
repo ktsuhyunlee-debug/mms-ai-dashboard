@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.66 DEEP CLEAN
+# V4.4.67 WEEKLY LOGIC HARDENING
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.66-DEEP-CLEAN
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.67-WEEKLY-LOGIC-HARDENING
 
 from __future__ import annotations
 
@@ -2955,7 +2955,7 @@ def _target_strength_sentence(product_name: str, analysis):
         return (
             f"• {_with_topic(short)} {g}{clean_identifier_value(a)}에서 최근 {len(s['vals'])}회 주문금액이 {vals}으로 "
             f"모두 300만원 이상을 유지했고{seg_text}했습니다. 동일 성별·연령에서 반복 성과가 유지돼 "
-            f"해당 타겟 적합도가 확인된 상품으로, 고성과 SEG 순환과 미발송 SEG 확대 TEST를 병행할 수 있습니다."
+            f"해당 타겟 내 운영 안정성이 확인된 상품으로, 고성과 SEG 순환과 미발송 SEG 확대 TEST를 병행할 수 있습니다."
         )
     return None
 
@@ -2979,8 +2979,21 @@ def _next_week_action_candidates(pw, products_all, week_end):
         elif ta and ta.get("gender_strength"):
             a,b,ratio=ta["gender_strength"]
             s+=f" {a['성별']} 평균매출이 {b['성별']} 대비 {ratio:.1f}배 높아 {a['성별']} 중심 편성이 적절합니다."
+        elif ta and ta.get("stable"):
+            stable = ta["stable"]
+            g, a = stable["target"]
+            if stable.get("seg_n", 0) >= 2:
+                s += (
+                    f" {g}{clean_identifier_value(a)}에서 반복 성과가 유지되고 {stable['seg_n']}개 SEG 운영 이력이 확인돼 "
+                    f"고성과 SEG 순환과 미발송 SEG 확대 TEST를 검토하는 것이 적절합니다."
+                )
+            else:
+                s += (
+                    f" {g}{clean_identifier_value(a)}에서 반복 성과가 유지돼 최근 고성과 조건을 우선 유지하되 "
+                    f"동일 SEG 과다 반복은 피하고 미발송 SEG로 순차 확대 TEST하는 것이 적절합니다."
+                )
         else:
-            s+=" 최근 고성과 타겟을 우선 유지하되 동일 SEG 과다 반복은 피하는 것이 적절합니다."
+            s+=" 반복 고성과 이력은 확인되나 비교 가능한 타겟·SEG 근거가 충분하지 않아 최근 고성과 조건을 유지한 추가 편성 후 성과 재현 여부를 확인하는 것이 적절합니다."
         actions.append((100+float(r["주문금액"])/1e6,"즉시 재편성",s))
 
     histdf=products_all.copy()
@@ -3644,6 +3657,43 @@ def _extract_recent_unassigned_days(sentence: str):
     return int(m.group(1)) if m else None
 
 
+
+def _v4467_repeated_underperformer_keys(products_all: pd.DataFrame, week_end):
+    """기준일 이전 2회 이상 운영했고 300만원 이상 달성이 0회인 상품 master key 집합."""
+    if products_all is None or products_all.empty:
+        return set()
+    d = _attach_product_master_keys(products_all.copy())
+    d["_date_guard"] = pd.to_datetime(d["_date"], errors="coerce")
+    d = d[d["_date_guard"].notna() & (d["_date_guard"] <= pd.to_datetime(week_end))]
+    out = set()
+    for key, g in d.groupby("_product_master_key"):
+        vals = pd.to_numeric(g["주문금액"], errors="coerce").fillna(0)
+        if len(vals) >= 2 and int((vals >= 3_000_000).sum()) == 0:
+            out.add(str(key))
+    return out
+
+def _v4467_guard_season_conflicts(sentences, products_all: pd.DataFrame, week_end):
+    """반복부진 상품을 시즌 성공사례로 다시 '동일 상품 재운영' 추천하는 논리 충돌 방지."""
+    bad_keys = _v4467_repeated_underperformer_keys(products_all, week_end)
+    if not bad_keys:
+        return sentences
+    guarded = []
+    for raw in sentences or []:
+        s = str(raw)
+        key, _ = _sentence_product_master_key(s, products_all)
+        if key in bad_keys and ("동시즌" in s or "신규·유사신규" in s or "시즌" in s):
+            s = re.sub(
+                r"당시와 유사한 가격 조건 확보 시 동일 상품 재운영(?:을)? 우선 검토",
+                "과거 단일 고성과의 가격·기능 조건만 참고하되 동일 상품 재운영은 우선하지 않고 신규·유사신규 TEST 검토",
+                s
+            )
+            s = s.replace(
+                "단일 사례로 반복성을 단정하기보다",
+                "이후 반복 성과까지 함께 고려해 동일 상품의 재현성을 단정하지 않고"
+            )
+        guarded.append(s)
+    return guarded
+
 def _merge_same_product_recommendations(sentences, products_all: pd.DataFrame):
     """
     모든 주차 공통:
@@ -4177,13 +4227,16 @@ def _repeat_operation_sentence(product_name: str, pw: pd.DataFrame):
                 f"최근 미발송 타겟·SEG 전환 TEST 또는 일정 기간 미편성 후 재운영하는 것이 적절합니다."
             )
 
-    # 모두 300만원 이상이면 안정 유지
+    # 반복 성과 수준을 500만원 이상 반복 고성과와 300만원 이상 안정 성과로 구분
+    if all(v >= 5_000_000 for v in vals):
+        return (
+            f"• {_with_topic(short)} 금주 {len(vals)}회 편성 모두 500만원 이상을 기록했고 회차별 주문금액은 "
+            f"{seq_txt}으로 반복 고성과가 확인. 동일 조건의 성과 재현성이 높은 만큼 고성과 타겟·SEG 중심 단기 재편성 검토"
+        )
     if all(v >= 3_000_000 for v in vals):
         return (
             f"• {_with_topic(short)} 금주 {len(vals)}회 편성 모두 300만원 이상을 기록했고 회차별 주문금액은 "
-            f"{seq_txt}으로 연속 하락은 확인되지 않았습니다. 반복 운영에도 성과가 유지돼 "
-            f"고성과 타겟 중심의 단기 재편성이 가능하며, 이후 2회 이상 연속 하락이 발생할 때 "
-            f"최근 ○일간 미편성 후 재운영하는 기준을 적용하는 것이 적절합니다."
+            f"{seq_txt}으로 안정적인 성과 유지 확인 > 500만원 이상 반복 고성과로 단정하지 않고 타겟·SEG별 성과를 비교해 우수 조건 중심 재편성 검토"
         )
 
     # 등락 반복
@@ -4210,6 +4263,24 @@ def _weekly_normalize_product_key(name: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
+
+
+_V4467_DISPLAY_REPLACEMENTS = [
+    (r"보랄\s+더\s+데일리\s+스탠드\s+에어서큘레이터(?:\s+[A-Z0-9\-/]+)?", "보랄 스탠드 에어서큘레이터"),
+    (r"(?:독일\s+)?보랄\s+프리미엄\s+스탠드\s+3D\s+에어써큘팬(?:\(전자식\))?(?:\s*/?\s*[A-Z0-9\-/]+)?", "보랄 3D 스탠드 에어써큘팬"),
+    (r"빙그레\s+붕어싸만코[^\n,·]*?\(총\s*12개\)", "빙그레 붕어싸만코 아이스크림 12개"),
+    (r"CJ\s+햇반\s+윤기가득쌀밥\s+210g\s*[xX×]\s*36개", "CJ 햇반 윤기가득쌀밥 36개"),
+    (r"메디트리\s+이뮨원샷\s+올인원\s+멀티비타민\s+앰플\s+2박스", "메디트리 이뮨원샷 멀티비타민 2박스"),
+    (r"마켓임당\s+병천\s+순대국밥\s+180g\s*[xX×]\s*8봉", "병천 순대국밥 8봉"),
+    (r"1\+1\s+초경량\s+3단\s+자동\s+우산\s+양산\s+겸용[_\s-]*접이식\s+암막\s+우양산", "1+1 초경량 3단 자동 암막 우양산"),
+]
+
+def _v4467_compact_display_name(name: str) -> str:
+    s = _v4467_compact_display_name(name)
+    for pat, repl in _V4467_DISPLAY_REPLACEMENTS:
+        s = re.sub(pat, repl, s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
     """주간실적 전 섹션 공통 표시명 formatter.
