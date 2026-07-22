@@ -4556,11 +4556,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         core_names = ", ".join(_short_weekly_product_name(x) for x in core.head(4)["상품명"].astype(str))
         if core_share >= 50:
             product_points.append(
-                f"• 500만원 이상 핵심 상품 {len(core)}개가 전체 주문금액의 {core_share:.1f}%를 차지해 {core_names} 등 상위 상품 중심의 매출 집중도가 높았습니다. 차주에는 핵심 상품 재편성과 함께 신규·유사신규 후보를 병행해 매출원을 분산할 필요가 있습니다."
+                f"• 편성 건 기준 500만원 이상 핵심 성과 {len(core)}건이 전체 주문금액의 {core_share:.1f}%를 차지해 {core_names} 등 상위 상품 중심의 매출 집중도가 높았습니다. 차주에는 핵심 상품 재편성과 함께 신규·유사신규 후보를 병행해 매출원을 분산할 필요가 있습니다."
             )
         else:
             product_points.append(
-                f"• 500만원 이상 핵심 상품 {len(core)}개가 전체 주문금액의 {core_share:.1f}%를 차지했으며 {core_names} 등이 주간 매출을 견인했습니다. 핵심 상품은 유지하되 특정 상품 의존 여부를 지속 점검할 필요가 있습니다."
+                f"• 편성 건 기준 500만원 이상 핵심 성과 {len(core)}건이 전체 주문금액의 {core_share:.1f}%를 차지했으며 {core_names} 등이 주간 매출을 견인했습니다. 핵심 상품은 유지하되 특정 상품 의존 여부를 지속 점검할 필요가 있습니다."
             )
 
     # 최고매출 상품: 실제 반복횟수/회당 성과 근거 반영
@@ -4836,12 +4836,20 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             return "요일별 편성 조건 검증"
         if "신규·유사신규" in s and "재편성" in s and ("평균" in s or "비중" in s):
             return "신규·유사신규 vs 재편성"
+        if "최근 4주 중" in s and "시간대" in s and "SPM 최고" in s:
+            return "시간대별 편성 조건 검증"
         if "SPM" in s and ("함께 편성" in s or "고성과 상품" in s):
             return "고성과 상품 × 적합 타겟 조합 강화"
         if "전년 동시점" in s and any(k in s for k in ["써큘", "서큘", "선풍기", "냉방"]):
             return "7월 냉방가전 신규·유사신규 발굴"
         if "전년 동시점" in s and any(k in s for k in ["우양산", "양산", "우산"]):
             return "7월 우양산 신규·유사신규 발굴"
+
+        # 성별 타겟 비교
+        if (("여성 타겟" in s and "남성 평균" in s) or ("남성 타겟" in s and "여성 평균" in s)):
+            mm = re.match(r"^(.+?)\s+상품은\s+", s)
+            if mm:
+                return _short_product_name(mm.group(1)) + " 성별 타겟 적합도"
 
         # 타겟 비교
         mt = re.match(r"^(.+?)(?:은|는)\s+(?:남성|여성)\d{4}", s)
@@ -4900,6 +4908,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f = re.sub(r"^대카테고리 매출은\s*", "", f)
             f = re.sub(r"순으로 구성됐습니다$", "순으로 매출 구성", f)
 
+        if title == "시간대별 편성 조건 검증":
+            f = re.sub(r"최근 4주 중 3주에서\s+(\d{1,2}:\d{2})(?::\d{2})?\s+시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인됐습니다", r"최근 4주 중 3주에서 \1 SPM 최고 기록", f)
+        if title.endswith("성별 타겟 적합도"):
+            f = re.sub(r"여성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 남성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인됐습니다", r"여성 \1회 평균 \2·500만원 이상 \3회, 남성 평균 \4로 \5배 차이", f)
+            f = re.sub(r"남성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 여성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인됐습니다", r"남성 \1회 평균 \2·500만원 이상 \3회, 여성 평균 \4로 \5배 차이", f)
+
         if title == "요일별 편성 조건 검증":
             f = re.sub(r"최근 4주 중 3주에서 수요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다",
                        "최근 4주 중 3주에서 수요일 SPM 최고 기록", f)
@@ -4933,6 +4947,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         # Generate clean report-style action from semantic patterns rather than suffix replacement.
         if title == "핵심 상품 매출 집중":
             return "검증 상품 재편성과 신규·유사신규 후보 발굴을 병행해 핵심 상품군 확대 필요"
+        if title == "시간대별 편성 조건 검증":
+            return "해당 시간대의 상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
+        if title.endswith("성별 타겟 적합도"):
+            if "여성 중심" in a:
+                return "여성 중심 편성 후 연령·SEG별 성과를 비교해 세부 타겟 확대 검토"
+            if "남성 중심" in a:
+                return "남성 중심 편성 후 연령·SEG별 성과를 비교해 세부 타겟 확대 검토"
         if title == "요일별 편성 조건 검증":
             return "상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
         if title == "카테고리보다 검증 상품 중심 편성":
@@ -4983,7 +5004,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             return f"• {inferred} : {_compact_fact(fact, inferred)} > {_compact_action(action, inferred)}"
 
         # Sentence-form input: first sentence fact, remaining sentences interpretation/action.
-        sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", s) if x.strip()]
+        sentences = [x.strip() for x in re.split(r"(?<=\.)\s+", s) if x.strip()]
         title = _infer_weekly_title(s, default_title)
         fact = sentences[0] if sentences else s
         action = " ".join(sentences[1:]).strip() if len(sentences) > 1 else ""
@@ -5026,7 +5047,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     if not dyn_op:
         try:
             # 상품구분별 성과 비교
-            type_col = first_col(pw, ["상품구분", "신규구분", "운영구분"])
+            type_col = first_col(pw, ["상품구분", "신규구분", "운영구분", "재편성", "구분", "편성구분"])
             if type_col and "주문금액" in pw.columns:
                 labels = pw[type_col].fillna("").astype(str)
                 new_df = pw[labels.str.contains("신규", na=False)]
@@ -5067,6 +5088,36 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 특정 상품/시즌 사례는 현재 선택 주차의 원래 엔진(nxt)에 존재할 때만 출력됨.
     # 따라서 과거 주차를 선택해도 다른 주차 상품/수치가 섞이지 않음.
 
+    def _merge_next_duplicates(items):
+        merged = {}
+        order = []
+        for line in items:
+            s = str(line or "").strip()
+            if not s.startswith("• "):
+                continue
+            body = s[2:]
+            title = body.split(" : ", 1)[0].strip() if " : " in body else body.strip()
+            key = re.sub(r"\s+", " ", title)
+            if key not in merged:
+                merged[key] = s
+                order.append(key)
+                continue
+            prev = merged[key]
+            prev_fact = prev.split(" : ", 1)[1].split(" > ", 1)[0] if " : " in prev else ""
+            cur_fact = body.split(" : ", 1)[1].split(" > ", 1)[0] if " : " in body else ""
+            prev_action = prev.split(" > ", 1)[1] if " > " in prev else ""
+            cur_action = body.split(" > ", 1)[1] if " > " in body else ""
+            fact = prev_fact if len(prev_fact) >= len(cur_fact) else cur_fact
+            actions = []
+            for a in [prev_action, cur_action]:
+                a = a.strip()
+                if a and a not in actions:
+                    actions.append(a)
+            merged[key] = f"• {title} : {fact}" + (f" > {' / '.join(actions)}" if actions else "")
+        return [merged[k] for k in order]
+
+    dyn_next = _merge_next_duplicates(dyn_next)
+
     # Final guard: malformed mechanical suffixes must never reach the report.
     def _final_clean(items):
         out = []
@@ -5080,6 +5131,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = s.replace("분산필요", "분산 필요")
             s = s.replace("적용검토", "적용 검토")
             s = s.replace("피검토", "피하고 미발송 SEG 확대 TEST 검토")
+            s = re.sub(r"를 기록했습니다", " 기록", s)
+            s = re.sub(r"을 기록했습니다", " 기록", s)
+            s = re.sub(r"상태입니다", "상태", s)
+            s = re.sub(r"후보입니다", "후보", s)
+            s = re.sub(r"고성과 사례이며", "고성과 사례,", s)
+            s = re.sub(r"운영했습니다", "운영", s)
+            s = re.sub(r"병행할 수 있습니다", "병행 가능", s)
+            s = re.sub(r"순으로 구성됐습니다", "순으로 매출 구성", s)
             out.append(s)
         return out
 
