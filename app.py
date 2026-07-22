@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.43-UNIFIED-WEEKLY-ENGINE-ALL-WEEKS
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.45-UNIFIED-DAILY-INSIGHT-ENGINE
 
 from __future__ import annotations
 
@@ -1648,7 +1648,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_evidence = "발송일 최저가 대비 1% 초과 가격 열위"
     elif summary["운영횟수"] == 0 and amount < 1_000_000:
         if price_eval and price_eval.get("level") in {"same","moderate"}:
-            action_sentence = "첫 운영 부진을 상품 적합도만의 문제로 단정하기 어렵습니다. 실질적인 가격 차별화 또는 구성 혜택을 보강하고 타겟을 변경해 1회 재TEST한 뒤 가격·타겟 요인을 구분해 판단하는 것이 필요합니다."
+            action_sentence = "신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외"
             action_evidence = "신규 첫 운영 + 100만원 미만 + 가격 차별화 제한"
         else:
             action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요합니다."
@@ -1660,7 +1660,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요합니다."
         action_evidence = "프로모션·일반기간 평균 비교"
     elif "최근 성과 둔화" in risks and amount < 2_000_000:
-        action_sentence = "직전 회차 대비 유지 여부와 별개로 절대 매출과 과거 평균 대비 성과가 모두 낮은 만큼 단기 반복 편성은 제한하고, 과거 고성과 타겟·가격·시즌 조건을 재확인한 후 재운영하는 것이 적절합니다."
+        action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외"
         action_evidence = "절대 성과 + 과거 평균 동시 부진"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
         action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
@@ -1691,7 +1691,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 250만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
             action_evidence = "안정 상품 및 목표 250만원 기준"
     elif amount >= 1_000_000:
-        action_sentence = "가격·타겟·전시순서 중 한 가지 조건을 조정해 선택적으로 재TEST하고, 200만원 이상 회복 여부를 확인하는 것이 필요합니다."
+        action_sentence = "가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 200만원 이상 회복 여부 확인 필요"
         action_evidence = "관찰 상품 기준"
     else:
         action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요합니다."
@@ -2507,7 +2507,7 @@ def _short_weekly_product_name(name: str) -> str:
     s = re.sub(r"^\s*\(M\)\s*", "", s, flags=re.I)
 
     # 브랜드 대괄호는 텍스트로 살림
-    s = re.sub(r"\[([^\]]+)\]", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]", r" > ", s)
 
     # 불필요한 운영 메모만 제거
     s = re.sub(r"\s*\((?:재고부족|편성\s*\d+회|추가\s*멤포\s*상품)[^)]*\)", "", s, flags=re.I)
@@ -2919,7 +2919,7 @@ def _target_strength_sentence(product_name: str, analysis):
             f"• {_with_topic(short)} {a['성별']}{clean_identifier_value(a['연령'])}에서 {int(a['운영횟수'])}회 평균 "
             f"{compact_money(a['평균매출'])}, 500만원 이상 {int(a['오백이상'])}회를 기록한 반면 "
             f"{b['성별']}{clean_identifier_value(b['연령'])}은 {int(b['운영횟수'])}회 평균 {compact_money(b['평균매출'])}"
-            f"{spm_txt}으로 차이가 확인됐습니다. 평균매출이 {ratio:.1f}배 높은 {a['성별']}{clean_identifier_value(a['연령'])}을 "
+            f"{spm_txt}으로 차이가 확인. 평균매출이 {ratio:.1f}배 높은 {a['성별']}{clean_identifier_value(a['연령'])}을 "
             f"우선 편성하되, 해당 연령대 내 고성과 SEG와 미발송 SEG를 순차 TEST하는 것이 적절합니다."
         )
 
@@ -2932,7 +2932,7 @@ def _target_strength_sentence(product_name: str, analysis):
         return (
             f"• {_with_topic(short)} {a['성별']} 타겟 {int(a['운영횟수'])}회 평균 {compact_money(a['평균매출'])}, "
             f"500만원 이상 {int(a['오백이상'])}회로 {b['성별']} 평균 {compact_money(b['평균매출'])} 대비 {ratio:.1f}배 높았고"
-            f"{spm_txt}로 효율도 함께 확인됐습니다. 단일 회차가 아닌 반복 이력에서 성별 강세가 확인된 만큼 "
+            f"{spm_txt}로 효율도 함께 확인. 단일 회차가 아닌 반복 이력에서 성별 강세가 확인된 만큼 "
             f"{a['성별']} 중심으로 편성하되 연령·SEG별 성과를 기준으로 세부 타겟을 좁히는 것이 적절합니다."
         )
 
@@ -3019,7 +3019,7 @@ def _next_week_action_candidates(pw, products_all, week_end):
             if wkrow.empty: continue
             catname=str(wkrow["대카"].iloc[0]); share=shares.get(catname,0)
             if share>=20:
-                actions.append((65,"상품 교체",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지했습니다. 카테고리 비중을 줄이기보다 동일 카테고리 내 과거 300만원 이상 성과가 반복된 검증 상품으로 교체하는 것이 적절합니다."))
+                actions.append((65,"상품 교체",f"{_with_topic(_short_weekly_product_name(pname))} 과거 {len(vals)}회 운영 중 300만원 이상 달성 이력이 없지만 {catname} 카테고리는 금주 전체 주문금액의 {share:.1f}%를 차지. 카테고리 비중을 줄이기보다 동일 카테고리 내 과거 300만원 이상 성과가 반복된 검증 상품으로 교체하는 것이 적절합니다."))
 
     seen=set(); out=[]
     for score,kind,s in sorted(actions,key=lambda x:x[0],reverse=True):
@@ -3288,13 +3288,13 @@ def _season_single_or_repeat_sentence(x: dict) -> str:
             f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회"
             + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
             + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과를 기록해 "
-              f"동시즌 반복 성과가 확인됐습니다. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영을 우선 검토하고, "
+              f"동시즌 반복 성과 확인. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영을 우선 검토하고, "
               f"{action_product}으로 신규·유사신규 TEST를 확장하는 것이 적절합니다."
         )
 
     return (
         f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회, 평균 {compact_money(x['avg_amt'])}, "
-        f"최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과가 확인됐습니다. 반복 고성과로 단정하기에는 표본이 제한적이므로 "
+        f"최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과가 확인. 반복 고성과로 단정하기에는 표본이 제한적이므로 "
         f"동일 상품 또는 {action_product}을 추가 TEST해 재현 여부를 확인하는 것이 적절합니다."
     )
 
@@ -3502,7 +3502,7 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
             parts.append(
                 f"금주 {week_count}회 편성에서 누적 {compact_money(week_total)}, "
                 f"회차 최고 {compact_money(week_max)}을 기록했으며 300만원 이상 {ge3}회"
-                + (f", 500만원 이상 {ge5}회" if ge5 else "") + "의 성과가 확인됐습니다."
+                + (f", 500만원 이상 {ge5}회" if ge5 else "") + "의 성과가 확인."
             )
         else:
             parts.append(f"금번 {compact_money(week_total)}을 기록했습니다.")
@@ -3641,8 +3641,8 @@ def _recommendation_priority(sentence: str) -> int:
 def _clean_seg_display_text(s: str) -> str:
     """SEG 숫자가 1.0/2.0/3.0으로 노출되는 문제 및 조사 오류 보정."""
     s = str(s)
-    s = re.sub(r"\b(남성|여성)\s*(3040|5060)\s+([123])\.0\b", r"\1 \2 SEG\3", s)
-    s = re.sub(r"\bSEG\s*([123])\.0\b", r"SEG\1", s, flags=re.I)
+    s = re.sub(r"\b(남성|여성)\s*(3040|5060)\s+([123])\.0\b", r" >  \2 SEG\3", s)
+    s = re.sub(r"\bSEG\s*([123])\.0\b", r"SEG > ", s, flags=re.I)
     s = re.sub(r"선풍기·서큘레이터으로", "선풍기·서큘레이터로", s)
     s = re.sub(r"선풍기·서큘레이터을", "선풍기·서큘레이터를", s)
     return s
@@ -4319,7 +4319,7 @@ def _latest_trend_action_sentence(products_all: pd.DataFrame, week_end):
             + (f", 500만원 이상 {evidence['ge5']}회" if evidence["ge5"] else "")
             + target_text
             + (f", {price_text}" if price_text else "")
-            + "의 성과가 확인됐습니다. 최신 관심 상승과 과거 MMS 성과가 동시에 확인된 만큼 "
+            + "의 성과가 확인. 최신 관심 상승과 과거 MMS 성과가 동시에 확인된 만큼 "
               "유사 가격대·구성의 동일/유사 상품을 고성과 타겟 중심으로 신규·유사신규 TEST하는 것이 적절합니다."
         )
     return None
@@ -4437,7 +4437,7 @@ def _repeat_operation_sentence(product_name: str, pw: pd.DataFrame):
 
     # 등락 반복
     return (
-        f"• {_with_topic(short)} 금주 {len(vals)}회 편성의 회차별 주문금액은 {seq_txt}으로 편차가 확인됐습니다. "
+        f"• {_with_topic(short)} 금주 {len(vals)}회 편성의 회차별 주문금액은 {seq_txt}으로 편차가 확인. "
         f"단순 반복 횟수보다 각 회차의 성별·연령·SEG·가격 조건을 함께 비교해 고성과 조건을 선별한 뒤 재편성하는 것이 적절합니다."
     )
 
@@ -4862,13 +4862,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         tname, tcnt, ttotal = pattern4["time"]
         if tcnt >= 3:
             op.append(
-                f"• 최근 {ttotal}주 중 {tcnt}주에서 {tname} 시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인됐습니다. 해당 시간대에 편성된 고성과 상품·타겟 조합을 기준으로 핵심 상품 우선 배치 TEST를 확대하는 것이 적절합니다."
+                f"• 최근 {ttotal}주 중 {tcnt}주에서 {tname} 시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인. 해당 시간대에 편성된 고성과 상품·타겟 조합을 기준으로 핵심 상품 우선 배치 TEST를 확대하는 것이 적절합니다."
             )
     if pattern4 and pattern4.get("day"):
         dname, dcnt, dtotal = pattern4["day"]
         if dcnt >= 3:
             op.append(
-                f"• 최근 {dtotal}주 중 {dcnt}주에서 {dname}요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다. 동일 요일의 상품 구성과 타겟 조건을 함께 비교해 재현 가능한 편성 조건으로 활용할 필요가 있습니다."
+                f"• 최근 {dtotal}주 중 {dcnt}주에서 {dname}요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인. 동일 요일의 상품 구성과 타겟 조건을 함께 비교해 재현 가능한 편성 조건으로 활용할 필요가 있습니다."
             )
 
     if not big_cat.empty and big_cat["주문금액"].sum()>0:
@@ -5074,7 +5074,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         f = _strip_subject_prefix(fact, title)
 
         if title == "핵심 상품 매출 집중":
-            f = re.sub(r"500만원 이상 핵심 상품\s+(\d+)개가", r"편성 건 기준 500만원 이상 핵심 성과 \1건이", f)
+            f = re.sub(r"500만원 이상 핵심 상품\s+(\d+)개가", r"편성 건 기준 500만원 이상 핵심 성과  > 건이", f)
             f = re.sub(r"등 상위 상품 중심의 매출 집중도가 높았습니다", "등 상위 상품 중심으로 매출 집중", f)
 
         if "회차별 주문금액은" in f:
@@ -5084,13 +5084,13 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 f = f"금주 {mm.group(1)}회 각각 {amounts} 기록, 반복 편성에도 고성과 유지"
 
         if title.endswith("타겟 적합도"):
-            f = re.sub(r"에서\s+(\d+)회 평균", r" \1회 평균", f)
-            f = re.sub(r",\s*500만원 이상\s+(\d+)회 기록,\s*반면", r"·500만원 이상 \1회, ", f)
-            f = re.sub(r"으로 차이가 확인됐습니다", "으로 차이", f)
-            f = re.sub(r"로 차이가 확인됐습니다", "로 차이", f)
+            f = re.sub(r"에서\s+(\d+)회 평균", r"  > 회 평균", f)
+            f = re.sub(r",\s*500만원 이상\s+(\d+)회 기록,\s*반면", r"·500만원 이상  > 회, ", f)
+            f = re.sub(r"으로 차이가 확인", "으로 차이", f)
+            f = re.sub(r"로 차이가 확인", "로 차이", f)
 
         if title == "고성과 상품 × 적합 타겟 조합 강화":
-            f = re.sub(r"^(.+?)은\s+", r"\1에서 ", f)
+            f = re.sub(r"^(.+?)은\s+", r" > 에서 ", f)
             f = re.sub(r"를 기록했습니다$", " 기록", f)
 
         if title == "카테고리보다 검증 상품 중심 편성":
@@ -5098,18 +5098,18 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f = re.sub(r"순으로 구성됐습니다$", "순으로 매출 구성", f)
 
         if title == "시간대별 편성 조건 검증":
-            f = re.sub(r"최근 4주 중 3주에서\s+(\d{1,2}:\d{2})(?::\d{2})?\s+시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인됐습니다", r"최근 4주 중 3주에서 \1 SPM 최고 기록", f)
+            f = re.sub(r"최근 4주 중 3주에서\s+(\d{1,2}:\d{2})(?::\d{2})?\s+시간대가 SPM 최고를 기록해 시간대 우위가 반복 확인", r"최근 4주 중 3주에서  >  SPM 최고 기록", f)
         if title.endswith("성별 타겟 적합도"):
-            f = re.sub(r"여성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 남성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인됐습니다", r"여성 \1회 평균 \2·500만원 이상 \3회, 남성 평균 \4로 \5배 차이", f)
-            f = re.sub(r"남성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 여성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인됐습니다", r"남성 \1회 평균 \2·500만원 이상 \3회, 여성 평균 \4로 \5배 차이", f)
+            f = re.sub(r"여성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 남성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인", r"여성  > 회 평균 \2·500만원 이상 \3회, 남성 평균 \4로 \5배 차이", f)
+            f = re.sub(r"남성 타겟\s+(\d+)회 평균\s+([^,]+),\s*500만원 이상\s+(\d+)회로 여성 평균\s+([^\s]+) 대비\s+([0-9.]+)배 높았고로 효율도 함께 확인", r"남성  > 회 평균 \2·500만원 이상 \3회, 여성 평균 \4로 \5배 차이", f)
 
         if title == "요일별 편성 조건 검증":
-            f = re.sub(r"최근 4주 중 3주에서 수요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인됐습니다",
+            f = re.sub(r"최근 4주 중 3주에서 수요일이 SPM 최고를 기록해 요일별 효율 차이가 반복 확인",
                        "최근 4주 중 3주에서 수요일 SPM 최고 기록", f)
 
         replacements = [
-            (r"의 ([0-9.]+)%를 차지해", r"의 \1% 차지,"),
-            (r"의 ([0-9.]+)%로 높은 비중을 차지했으나", r"의 \1%를 차지했으나"),
+            (r"의 ([0-9.]+)%를 차지해", r"의  > % 차지,"),
+            (r"의 ([0-9.]+)%로 높은 비중을 차지했으나", r"의  > %를 차지했으나"),
             (r"을 기록했고", " 기록,"),
             (r"를 기록했고", " 기록,"),
             (r"을 기록한 반면", " 기록, "),
@@ -5378,11 +5378,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = s.replace("확장검토", "확장 검토")
             s = s.replace("확인검토", "확인 검토")
             s = s.replace("재운영을 우선 검토하고", "재운영 우선 검토,")
-            s = re.sub(r"([가-힣A-Za-z0-9])검토$", r"\\1 검토", s)
+            s = re.sub(r"([가-힣A-Za-z0-9])검토$", r"\ >  검토", s)
             s = re.sub(r"운영 확대를 검토할 수 있습니다", "운영 확대 검토", s)
             s = re.sub(r"\s*/\s*당시와 유사한 가격 조건 확보 시", " > 당시와 유사한 가격 조건 확보 시", s)
             s = re.sub(r"\s*,\s*,+", ",", s)
-            s = re.sub(r"\s+([,>.])", r"\\1", s)
+            s = re.sub(r"\s+([,>.])", r"\ > ", s)
             s = re.sub(r"동일 성별·연령에서 반복 성과가 유지돼 해당 타겟 적합도가 확인된 상품으로,?", "동일 성별·연령 내 반복 고성과 확인,", s)
             s = re.sub(r"\s+", " ", s).strip()
             out.append(s)
@@ -5391,6 +5391,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_product = _final_clean(dyn_product)
     dyn_op = _final_clean(dyn_op)
     dyn_next = _final_clean(dyn_next)
+
+    # 최종 출력 안전장치: 정규식 backreference 문자열이 사용자 화면에 노출되지 않도록 제거
+    dyn_product = [x.replace("\\1", " > ") for x in dyn_product]
+    dyn_op = [x.replace("\\1", " > ") for x in dyn_op]
+    dyn_next = [x.replace("\\1", " > ") for x in dyn_next]
 
     return "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
@@ -5421,6 +5426,95 @@ def daily_asset_key(date_value, time_value) -> str:
             return ""
     return f"{dt:%Y%m%d}_{slot}"
 
+
+
+def _finalize_daily_insight_text(text):
+    """일일실적 AI 인사이트 공통 후처리.
+    과거/현재/향후 모든 일자에 동일 적용:
+    - 실무 보고체 통일
+    - 중복 주의/근거 문구 제거
+    - 가격 인사이트는 성과 해석과 결합
+    - 다음 운영 제안 문장 간결화
+    """
+    if text is None:
+        return text
+    s = str(text)
+
+    # 문장형 -> 보고체
+    replacements = {
+        "확인됩니다.": "확인",
+        "확인됐습니다.": "확인",
+        "기록했습니다.": "기록",
+        "기록해 ": "기록, ",
+        "필요합니다.": "필요",
+        "적절합니다.": "적절",
+        "좋습니다.": "권장",
+        "검토하는 것이 좋습니다.": "검토 필요",
+        "검토하는 것이 필요합니다.": "검토 필요",
+        "검토하는 것이 적절합니다.": "검토 필요",
+        "확인하는 것이 필요합니다.": "확인 필요",
+        "확인할 필요가 있습니다.": "확인 필요",
+        "병행할 수 있습니다.": "병행 가능",
+    }
+    for a, b in replacements.items():
+        s = s.replace(a, b)
+
+    # 괄호형 내부 근거는 본문과 중복되는 경우가 많아 제거.
+    s = re.sub(r"\s*\((?:현재 주문금액 기준|발송일 최저가 및 현재 주문금액 기준|발송일 최저가 기준|발송일 최저가 ±1% 이내|직전 운영 비교|관찰 상품 기준|절대 성과 \+ 과거 평균 동시 부진|신규 첫 운영 \+ 100만원 미만 \+ 가격 차별화 제한|동일 타겟군 내 신규 SEG 핵심 상품 성과|동일 성별·연령 과거 운영 \d+회 / 해당 SEG 첫 운영)\)", "", s)
+
+    # 별도 주의 문구가 본문과 중복되면 제거.
+    s = re.sub(r"(?m)^\s*주의:\s*(가격 차별화 제한|최근 성과 둔화)\s*$", "", s)
+
+    # 중복 공백/구두점
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    s = s.replace("검토 필요 필요", "검토 필요")
+    s = s.replace("확인 필요 필요", "확인 필요")
+    return s.strip()
+
+
+def _prioritize_daily_insight_lines(lines):
+    """Daily 상품 인사이트를 성과→이력/추세→타겟→가격→시즌/프로모션→반복→액션 순으로 정렬.
+    근거가 없는 항목은 새로 만들지 않고 기존 생성 결과만 재정렬/정리한다.
+    """
+    if not lines:
+        return lines
+    if isinstance(lines, str):
+        raw = [x.strip() for x in lines.splitlines() if x.strip()]
+        as_string = True
+    else:
+        raw = [str(x).strip() for x in lines if str(x).strip()]
+        as_string = False
+
+    def rank(x):
+        z = x.replace("•", "").strip()
+        if "다음 운영 제안" in z:
+            return 70
+        if any(k in z for k in ["역대 최고", "최고 매출", "금번", "주문금액"]):
+            return 10
+        if any(k in z for k in ["최근 3회", "최근 4회", "과거 평균", "연속", "안정적인 판매", "성과 둔화"]):
+            return 20
+        if any(k in z for k in ["타겟", "SEG", "여성3040", "여성5060", "남성3040", "남성5060"]):
+            return 30
+        if any(k in z for k in ["혜택가", "최저가", "가격 경쟁", "가격 차별"]):
+            return 40
+        if any(k in z for k in ["시즌", "프로모션", "보답"]):
+            return 50
+        if any(k in z for k in ["재편성", "직전 운영 후", "피로도", "반복"]):
+            return 60
+        return 35
+
+    # stable sort + exact duplicate removal
+    seen, out = set(), []
+    for x in sorted(enumerate(raw), key=lambda q: (rank(q[1]), q[0])):
+        line = x[1]
+        key = re.sub(r"\s+", " ", line)
+        if key not in seen:
+            seen.add(key)
+            out.append(line)
+
+    result = "\n".join(out) if as_string else out
+    return result
 
 def find_daily_image(asset_key: str, campaign_name: str = ""):
     if not IMAGE_DIR.exists():
