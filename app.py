@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.79-NEW-PRODUCT-INSIGHT-FIX
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.80-DAILY-OUTPUT-CLEANUP
 
 from __future__ import annotations
 
@@ -1342,6 +1342,17 @@ def _v4464_num(v, default=0.0):
     except Exception:
         return default
 
+
+def _v4480_daily_evidence_display(sentence: str, evidence: str, category: str = "") -> str:
+    """일일 인사이트 화면에서는 반복적인 근거 괄호를 최소화하되 데이터 자체는 유지."""
+    s = str(sentence or "").strip()
+    e = str(evidence or "").strip()
+    # 핵심 주의/특수근거가 아니면 본문 뒤 괄호를 생략
+    keep_keys = ["운영이슈", "재고", "판매중단", "프로모션", "보답프로그램"]
+    if e and any(k in e for k in keep_keys):
+        return f"{s} ({e})"
+    return s
+
 def _v4464_report_tone(text):
     """Conservative Korean report-tone normalizer for generated insight text."""
     if text is None:
@@ -1838,6 +1849,10 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     )
     if has_strong_performance_story:
         insights = [item for item in insights if item[1] != "금번 성과"]
+    # 신규/유사신규 전용 인사이트가 있으면 일반 '금번 성과' 문장은 중복 제거
+    if _new_product_insight:
+        insights = [item for item in insights if item[1] != "금번 성과"]
+
     insights = sorted(insights, key=lambda x: (-x[0], x[1]))
     selected, category_count = [], {}
     for _, category, sentence, evidence, confidence in insights:
@@ -1902,6 +1917,14 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if _is_first_run_final and _amount_final < 1_000_000 and _item.get("type") != "action":
             if ("금번" in _sent and ("구매 반응" in _sent or "그치" in _sent)) and "신규 첫 TEST" not in _sent:
                 _sent = f"신규 첫 TEST에서 {compact_money(_amount_final)}으로 초기 구매 반응 제한적"
+
+        # 시즌성은 단순 시즌 문구가 아니라 실제 성과와 교차해 해석
+        if _is_seasonal_final and _amount_final < 1_000_000 and _item.get("type") != "action":
+            if any(k in _sent for k in ["여름 식품 시즌", "휴가철", "보양식", "가정식 수요"]):
+                _sent = (
+                    f"여름 휴가철·보양식 수요가 형성되는 시즌 상품이나 금번 {compact_money(_amount_final)}으로 "
+                    "시즌 수요가 실제 구매로 충분히 연결되지 않은 흐름 확인"
+                )
 
         if _item.get("type") == "action":
             if 1_000_000 <= _amount_final < 2_000_000 and _has_price_advantage_final:
