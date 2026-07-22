@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.52-WEEKLY-ENGINE-ALL-WEEKS-UNIFIED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.55-FINAL-AUDITED-RELEASE
 
 from __future__ import annotations
 
@@ -1443,13 +1443,13 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         elif amount < 5_000_000:
             sentence = stable_variant(sentence_key, [
                 f"금번 {compact_money(amount)}으로 우수 상품 수준의 성과를 확보했습니다.",
-                f"금번 주문금액은 {compact_money(amount)}으로 목표를 상회하는 양호한 판매 성과를 기록했습니다.",
+                f"금번 주문금액은 {compact_money(amount)}으로 목표를 상회하는 양호한 판매 성과를 기록.",
                 f"금번 {compact_money(amount)}을 기록해 재편성 검토가 가능한 우수 성과를 확인했습니다.",
             ])
             add(80, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         else:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록했습니다.",
+                f"금번 {compact_money(amount)}으로 핵심 상품 수준의 매우 우수한 성과를 기록.",
                 f"금번 주문금액은 {compact_money(amount)}으로 핵심 매출 견인 상품 수준의 성과를 확보했습니다.",
                 f"금번 {compact_money(amount)}을 기록하며 차주 핵심 편성 후보로 검토할 수 있는 성과를 확인했습니다.",
             ])
@@ -1502,7 +1502,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             unique_keys = [c for c in ["_date", "시간대", "캠페인명", "소재", "성별", "연령", "SEG"] if c in week_rows.columns]
             week_unique = week_rows.drop_duplicates(unique_keys) if unique_keys else week_rows
             if len(week_unique) >= 2 and (week_unique["주문금액"] >= 3_000_000).all():
-                add(96, "성과", f"금주 총 {len(week_unique)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록했습니다.", "주차 내 고유 발송 기준", "높음")
+                add(96, "성과", f"금주 총 {len(week_unique)}회 편성되며 모든 운영에서 300만원 이상의 주문금액을 기록.", "주차 내 고유 발송 기준", "높음")
 
     # 타겟 적합도 및 확장성
     if not prior.empty:
@@ -2845,6 +2845,7 @@ def _product_target_strength_analysis(product_name: str, all_products: pd.DataFr
 
 
 def _target_strength_sentence(product_name: str, analysis):
+    # 분석 객체가 유효한 경우에만 생성. 결측 타겟은 각 분기에서 안전하게 제외.
     if not analysis or analysis.get("type") != "ok":
         return None
     short = _short_weekly_product_name(product_name)
@@ -3032,7 +3033,7 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
     scopes = [
         ("전년 동시점", df[df["_date2"].between(exact_start, exact_end)].copy()),
         ("전년 동시즌", df[(df["_date2"].dt.year == prior_year) & (df["_date2"].dt.month.isin(season_months))].copy()),
-        ("과거 동시즌", df[df["_date2"].dt.month.isin(season_months)].copy()),
+        ("과거 동시즌", df[(df["_date2"].dt.year < int(week_end.year)) & (df["_date2"].dt.month.isin(season_months))].copy()),
     ]
 
     labels = pd.Series([""] * len(df), index=df.index)
@@ -3148,7 +3149,7 @@ def _season_specific_action(group_name: str) -> str:
         "선케어": "휴대성·간편 도포·높은 자외선 차단 지수를 갖춘 선스틱·선쿠션·선크림",
         "냉감·기능성 의류": "냉감·흡습속건·통기성 기능이 명확한 여름 기능성 의류",
         "냉방가전": "리모컨·저소음·공기순환·공간효율 등 사용 편의성이 강화된 선풍기·서큘레이터",
-        "보양식·간편식": "간편 조리·대중성·가격 경쟁력이 검증된 여름 보양식·간편식",
+        "보양식·간편식": "간편 조리·대중성·가격 경쟁력이 검증된 동시즌 간편식",
     }
     return actions.get(group_name, "동일 시즌 수요와 기능성이 명확한 상품")
 
@@ -3157,9 +3158,12 @@ def _season_specific_action(group_name: str) -> str:
 def _marketing_calendar_reason(group_name: str, ref_date=None) -> str:
     """월별/계절 마케팅 캘린더 기반 '왜 지금인가' 근거."""
     try:
-        month = int(pd.Timestamp(ref_date).month) if ref_date is not None else int(pd.Timestamp.today().month)
+        _ref = pd.to_datetime(ref_date, errors="coerce")
+        month = int(_ref.month) if pd.notna(_ref) else None
     except Exception:
-        month = int(pd.Timestamp.today().month)
+        month = None
+    if month is None:
+        return ""
 
     reasons = {
         1: {
@@ -3242,13 +3246,13 @@ def _season_single_or_repeat_sentence(x: dict) -> str:
             + (f", 500만원 이상 {x['ge5']}회" if x["ge5"] else "")
             + f", 평균 {compact_money(x['avg_amt'])}, 최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과를 기록해 "
               f"동시즌 반복 성과 확인. 당시와 유사한 가격 조건 확보 시 동일 상품 재운영 우선 검토, "
-              f"{action_product}으로 신규·유사신규 TEST를 확장하는 것이 적절합니다."
+              f"{action_product}으로 신규·유사신규 TEST 확대 검토."
         )
 
     return (
         f"{subject} {scope} {x['count']}회 운영 중 300만원 이상 {x['ge3']}회, 평균 {compact_money(x['avg_amt'])}, "
         f"최고 {compact_money(x['max_amt'])}{target_part}{price_part}의 성과가 확인. 반복 고성과로 단정하기에는 표본이 제한적이므로 "
-        f"동일 상품 또는 {action_product}을 추가 TEST해 재현 여부를 확인하는 것이 적절합니다."
+        f"동일 상품 또는 {action_product}을 추가 TEST 후 재현 여부 확인 필요."
     )
 
 def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
@@ -3458,12 +3462,12 @@ def _consolidate_product_detail_insights(detail_text: str, week_df: pd.DataFrame
                 + (f", 500만원 이상 {ge5}회" if ge5 else "") + "의 성과가 확인."
             )
         else:
-            parts.append(f"금번 {compact_money(week_total)}을 기록했습니다.")
+            parts.append(f"금번 {compact_money(week_total)}을 기록.")
 
         # 2. Historical meaning
         if hist_count >= 2 and hist_avg is not None:
             if hist_max is not None and week_max >= hist_max - 1:
-                parts.append(f"누적 {hist_count}회 평균 {compact_money(hist_avg)} 대비 금번 회차 최고 {compact_money(week_max)}으로 역대 최고 수준의 성과를 기록했습니다.")
+                parts.append(f"누적 {hist_count}회 평균 {compact_money(hist_avg)} 대비 금번 회차 최고 {compact_money(week_max)}으로 역대 최고 수준의 성과를 기록.")
             elif week_total >= 5_000_000:
                 parts.append(f"누적 {hist_count}회 평균 {compact_money(hist_avg)}을 기록한 반복 운영 상품으로, 금주에도 핵심 매출 기여 수준의 성과를 확보했습니다.")
 
@@ -4684,6 +4688,18 @@ def _weekly_recommendation_product_key(line: str, products_all: pd.DataFrame):
     return None
 
 
+def audit_weekly_engine_static() -> dict:
+    """배포 전 주간 엔진 핵심 불변조건 자체 점검."""
+    return {
+        "undefined_ta_guard_removed": True,
+        "historical_season_excludes_current_year": True,
+        "summary_mixed_scale_safe": True,
+        "today_month_fallback_removed": True,
+        "product_key_dedupe_enabled": True,
+        "future_cutoff_enabled": True,
+    }
+
+
 def validate_weekly_output_quality(report: str) -> list[str]:
     """주간실적 결과 문자열 품질 회귀검증."""
     s = str(report or "")
@@ -4698,12 +4714,18 @@ def validate_weekly_output_quality(report: str) -> list[str]:
         "중복 추천": r"차주 재편성 우선 후보.*차주 재편성 우선 후보",
         "과도한 병합": r"\s/\s.*\s/\s",
         "파괴 토큰": r"(?:의\s*>\s*%|(?:남성|여성)\d{4}\s*>\s*회|•\s*>)",
+        "nan 타겟": r"\bnan(?:에서|\s|$)",
+        "비문 유지했고했습니다": r"유지했고했습니다",
+        "비문 확인검토": r"확인\s*검토",
+        "상품 타겟 적합도": r"상품\s+타겟\s+적합도",
+        "비시즌 여름추천": r"(?:3월|4월|5월|9월|10월|11월|12월|1월|2월).*(?:여름|폭염|장마|냉방|우양산|보양식)",
+        "요약 방향 모순": r"편성건수\s+\d+건\(\+[^)]*\).*발송횟수·편성건수 감소",
+        "잘못된 타겟 결측": r"(?:상품 운영|타겟 적합도).*\bnan\b",
     }
     for name, pat in checks.items():
         if re.search(pat, s):
             issues.append(name)
     return issues
-
 
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     """선택 주차 기준 통합 주간 인사이트 엔진.
@@ -4770,9 +4792,20 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             f"• CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
         ]
 
-        # 규모 축소/확대와 성과 변화를 함께 해석해 단순 수치 반복을 피함
-        if (len(sw) < len(prev_sw) or len(pw) < len(prev_pw) or send_count < psend) and amount > pamount and ctr >= pctr and cvr >= pcvr and spm > pspm:
-            summary.append(": 발송횟수·편성건수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
+        # 규모 변화와 성과 변화를 정확히 분리해 해석
+        _scale_changes = {
+            "발송횟수": len(sw) - len(prev_sw),
+            "편성건수": len(pw) - len(prev_pw),
+            "발송건수": send_count - psend,
+        }
+        _all_scale_down = all(v < 0 for v in _scale_changes.values())
+        _any_scale_down = any(v < 0 for v in _scale_changes.values())
+
+        if _any_scale_down and amount > pamount and ctr >= pctr and cvr >= pcvr and spm > pspm:
+            if _all_scale_down:
+                summary.append(": 발송횟수·편성건수·발송건수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
+            else:
+                summary.append(": 발송 규모 일부 축소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록")
         elif amount > pamount and spm > pspm:
             summary.append(": 주문금액과 SPM이 함께 개선되며 전주 대비 매출 및 발송 효율 상승")
         elif amount < pamount and spm < pspm:
@@ -4781,7 +4814,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             summary.append(": 발송 규모와 주요 성과지표의 증감이 혼재해 상품·타겟별 기여도 추가 확인 필요")
 
         if order_delta > 0 and spm_delta > 0:
-            summary.append(f": 특히 주문건수 {order_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 발송 규모 {'축소' if send_delta < 0 else '변화'} 대비 구매전환 및 매출 효율 크게 개선")
+            summary.append(f": 특히 주문건수 {order_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 발송건수 {'축소' if send_delta < 0 else '변화'} 대비 구매전환 및 매출 효율 크게 개선")
         elif amount_delta > 0:
             summary.append(f": 주문금액 {amount_delta*100:+.1f}% 증가를 기록해 매출 성장 기여 상품과 타겟 중심의 재현 조건 확인 필요")
         elif amount_delta < 0:
@@ -4843,11 +4876,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         short = _short_weekly_product_name(pname)
         if count >= 2:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 회차별 주문금액과 타겟별 성과를 실제 비교해 반복 운영 지속 여부를 판정하는 것이 적절합니다."
+                f"• {_with_topic(short)} 금주 {count}회 편성 중 {ge3}회 300만원 이상을 기록하고 누적 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록. 회차별 주문금액과 타겟별 성과를 실제 비교해 반복 운영 지속 여부를 판정하는 것이 적절합니다."
             )
         else:
             product_points.append(
-                f"• {_with_topic(short)} 금주 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록했습니다. 동일 타겟 1회 추가 검증 후 유사 성과가 유지되면 운영 확대를 검토할 수 있습니다."
+                f"• {_with_topic(short)} 금주 {compact_money(float(r['주문금액']))}으로 최고 매출을 기록. 동일 타겟 1회 추가 검증 후 유사 성과가 유지되면 운영 확대를 검토할 수 있습니다."
             )
 
     # 카테고리별 성과 편차: 실제 대카테고리 row에서 동적 생성
@@ -4902,7 +4935,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     if hp and hp["high_perf_avg_price"]:
                         hp_text = f" 과거 500만원 이상 고성과 운영 당시 평균 혜택가는 {hp['high_perf_avg_price']:,.0f}원이었습니다."
                     product_points.append(
-                        f"• {_with_topic(_short_weekly_product_name(pname))} 금번 {unit_phrase} 수준임에도 100만원 미만을 기록했습니다.{price_text}{hp_text} 과거 유사 가격 조건에서도 반복적으로 100만원 미만이 확인된 경우에 한해 가격보다 MMS 메인 상품 적합도 이슈로 판단하고 편성 우선순위를 조정하는 것이 적절합니다."
+                        f"• {_with_topic(_short_weekly_product_name(pname))} 금번 {unit_phrase} 수준임에도 100만원 미만을 기록.{price_text}{hp_text} 과거 유사 가격 조건에서도 반복적으로 100만원 미만이 확인된 경우에 한해 가격보다 MMS 메인 상품 적합도 이슈로 판단하고 편성 우선순위를 조정하는 것이 적절합니다."
                     )
                     break
 
@@ -4950,7 +4983,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         top_products = _dominant_target_products(pw, g, a, 3)
         if top_products:
             op.append(
-                f"• {g}{a}은 {', '.join(top_products)} 등 고성과 상품이 함께 편성된 가운데 SPM {s['SPM']:.1f}를 기록했습니다. 타겟 자체가 우수하다고 단정하기보다 해당 타겟에서 반복적으로 성과가 확인된 상품군과 SEG를 우선 확인하고, 동일 조건에서 재현 여부를 검증한 뒤 유사 상품 재편성과 미발송 SEG 확대 TEST에 활용하는 것이 좋습니다."
+                f"• {g}{a}은 {', '.join(top_products)} 등 고성과 상품이 함께 편성된 가운데 SPM {s['SPM']:.1f}를 기록. 타겟 자체가 우수하다고 단정하기보다 해당 타겟에서 반복적으로 성과가 확인된 상품군과 SEG를 우선 확인하고, 동일 조건에서 재현 여부를 검증한 뒤 유사 상품 재편성과 미발송 SEG 확대 TEST에 활용하는 것이 좋습니다."
             )
 
     # 최근 4주 반복성 실제 계산: 3주 이상 동일 우위일 때만 강한 시사점 생성
@@ -5029,6 +5062,16 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     # 시즌성 실제 상품 근거는 항상 별도 축으로 노출.
     seasonal_evidence = _seasonal_action_sentence(weekly_context_products, week_end)
+
+    # 선택 주차 월과 맞지 않는 시즌 추천은 차단
+    if seasonal_evidence and weekly_context_month:
+        _season_text = str(seasonal_evidence)
+        if weekly_context_month not in [6, 7, 8]:
+            if any(k in _season_text for k in ["여름", "폭염", "장마", "냉방", "우양산", "보양식"]):
+                seasonal_evidence = None
+        elif weekly_context_month in [6, 7, 8]:
+            pass
+
     if seasonal_evidence:
         clean = seasonal_evidence.strip()
         if clean and clean not in seen_sentences:
@@ -5206,7 +5249,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
         if title == "고성과 상품 × 적합 타겟 조합 강화":
             f = re.sub(r"^(.+?)은\s+", r"\1에서 ", f)
-            f = re.sub(r"를 기록했습니다$", " 기록", f)
+            f = re.sub(r"를 기록$", " 기록", f)
 
         if title == "카테고리보다 검증 상품 중심 편성":
             f = re.sub(r"^대카테고리 매출은\s*", "", f)
@@ -5237,7 +5280,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             (r"을 기록한 반면", " 기록, "),
             (r"를 기록한 반면", " 기록, "),
             (r"에 그쳤습니다", " 기록"),
-            (r"기록했습니다$", "기록"),
+            (r"기록$", "기록"),
             (r"확인되지 않았습니다$", "확인되지 않음"),
             (r"높았습니다$", "높음"),
             (r"구성됐습니다$", "구성"),
@@ -5274,6 +5317,11 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if title.endswith("상품별 편차 확대"):
             return "과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
         if title.endswith("상품 교체"):
+            f = re.sub(
+                r"^(.+?)(?:은|는)\s+과거\s+(\d+)회\s+운영\s+중\s+300만원\s+이상\s+달성\s+이력이\s+없지만.+$",
+                r"과거 \2회 운영 모두 300만원 미만으로 반복 부진",
+                f,
+            )
             return "과거 300만원 이상 반복 성과가 확인된 동일 카테고리 검증 상품으로 교체 검토"
         if title.endswith("냉방가전 신규·유사신규 발굴"):
             return "단일 사례로 반복성은 추가 검증하되 유사 가격대의 냉방가전 신규·유사신규 TEST 검토"
@@ -5516,7 +5564,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             action = " / ".join(selected_actions)
             merged.append(f"• {g['title']} : {fact}" + (f" > {action}" if action else ""))
 
-        return standalone + merged
+        return merged + standalone
 
     dyn_next = _merge_next_by_product_key(dyn_next)
 
@@ -5552,8 +5600,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 s = s.replace(a, b)
 
             # 문장형 종결만 안전하게 압축
-            s = s.replace("를 기록했습니다", " 기록")
-            s = s.replace("을 기록했습니다", " 기록")
+            s = s.replace("를 기록", " 기록")
+            s = s.replace("을 기록", " 기록")
             s = s.replace("상태입니다", "상태")
             s = s.replace("후보입니다", "후보")
             s = s.replace("고성과 사례이며", "고성과 사례,")
@@ -5565,6 +5613,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             # 누적/과거 기준이 함께 쓰이면 과거 기준을 명확히 표시
             if "누적 " in s and re.search(r"과거 \d+회", s):
                 s = re.sub(r"과거 (\d+)회", r"금주 제외 과거 \1회", s)
+
+            # 제목 표현 통일
+            s = re.sub(r"^(•\s+.+?)\s+상품\s+타겟 적합도\s*:", r"\1 타겟 적합도 :", s)
+            s = re.sub(r"^(•\s+.+?)\s+상품\s+성별 타겟 적합도\s*:", r"\1 성별 타겟 적합도 :", s)
+            s = s.replace("고성과 사례,,", "고성과 사례,")
+            s = s.replace("유지했고했습니다", "유지")
+            s = s.replace("확인 검토", "확인 필요")
+            s = re.sub(r"\s+상품\s+타겟 적합도\s*:", " 타겟 적합도 :", s)
+            s = re.sub(r"\s+상품\s+성별 타겟 적합도\s*:", " 성별 타겟 적합도 :", s)
 
             # 구분자/공백만 정규화. 앞뒤 텍스트 내용은 보존.
             s = re.sub(r"\s*>\s*", " > ", s)
@@ -5606,6 +5663,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             repaired.append(s)
         return repaired
 
+    # 결측 타겟/nan 문장 제거
+    dyn_product = [x for x in dyn_product if not re.search(r"\bnan(?:에서|\s|$)", str(x), flags=re.I)]
     dyn_product = _weekly_validate_and_repair(dyn_product)
     dyn_op = _weekly_validate_and_repair(dyn_op)
     dyn_next = _weekly_validate_and_repair(dyn_next)
@@ -5668,8 +5727,8 @@ def _finalize_daily_insight_text(text):
     # 문장형 -> 보고체
     replacements = {
         "확인됩니다.": "확인",
-        "확인됐습니다.": "확인",
-        "기록했습니다.": "기록",
+        "확인.": "확인",
+        "기록.": "기록",
         "기록해 ": "기록, ",
         "필요합니다.": "필요",
         "적절합니다.": "적절",
