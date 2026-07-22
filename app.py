@@ -16,11 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.73-DAILY-INSIGHT-FINAL
-# - Daily grade/action consistency hardened.
-# - New-product 1st/2nd/3rd+ run lifecycle logic added.
-# - Report-tone normalization strengthened.
-# - Final contradiction guard added.
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.72-DAILY-LOGIC-HARDENING
 
 from __future__ import annotations
 
@@ -1418,11 +1414,6 @@ def _v4464_report_tone(text):
         ("확인하는 것이 필요합니다.", "확인 필요"),
         ("확인할 필요가 있습니다.", "확인 필요"),
         ("병행할 수 있습니다.", "병행 가능"),
-        ("추가 운영 여력이 있습니다.", "추가 운영 여력 확인"),
-        ("가격 민감도가 낮은 흐름입니다.", "가격 인상에도 성과가 유지돼 가격 민감도는 낮은 흐름"),
-        ("운영 비중 확대 검토가 가능합니다.", "운영 비중 확대 검토 가능"),
-        ("추가 운영을 검토할 수 있습니다.", "추가 운영 검토 가능"),
-        ("추가 TEST가 필요합니다.", "추가 TEST 필요"),
     ]
     for a, b in phrase_rules:
         s = s.replace(a, b)
@@ -1466,12 +1457,10 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
                         benefit_price=None, compare_lowest=None,
                         historical_avg=None, run_count=0,
                         issue_text=None):
-    """Daily action precedence: issue > new-product lifecycle > grade > history."""
+    """Daily action precedence agreed in the working standard."""
     amount = _v4464_num(order_amount)
     bp = _v4464_num(benefit_price, None)
     low = _v4464_num(compare_lowest, None)
-    prior_runs = int(_v4464_num(run_count))
-    total_runs = prior_runs + 1
 
     issue_s = str(issue_text or "")
     if any(k in issue_s for k in ["판매중단", "판매 중단", "재고부족", "재고 부족",
@@ -1483,48 +1472,30 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
     if bp is not None and low is not None and low > 0:
         price_limited = abs(low - bp) / low <= 0.01
 
-    if total_runs == 1:
-        if amount < 1_000_000:
-            if price_limited:
-                return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인"
-                        " > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외")
-            return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려움"
-                    " > 가격·타겟·구성 중 핵심 조건을 조정해 1회 재TEST 후 재편성 여부 판단")
-        if amount < 2_000_000:
-            return ("신규 첫 운영에서 관찰 상품 수준의 기본 수요 확인"
-                    " > 가격·타겟·전시순서 중 1개 조건을 조정해 1회 추가 TEST 후 200만원 이상 회복 여부 확인")
-        if amount < 3_000_000:
-            return "신규 첫 운영에서 안정 상품 수준 확보 > 동일 조건 1회 추가 검증해 성과 재현 여부 확인"
-        if amount < 5_000_000:
-            return "신규 첫 운영에서 우수 상품 수준 확보 > 동일 조건 1회 추가 검증 후 500만원 이상 확장 가능성 확인"
-        return "신규 첫 운영에서 핵심 상품 수준 확보 > 고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
+    if is_first_run and amount < 1_000_000:
+        if price_limited:
+            return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인"
+                    " > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, "
+                    "재차 100만원 미만 시 재편성 우선순위 제외")
+        return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려움"
+                " > 가격·타겟·구성 중 핵심 조건을 조정해 1회 재TEST 후 재편성 여부 판단")
 
-    if total_runs == 2:
-        if amount < 1_000_000:
-            return ("2회차에서도 100만원 미만으로 성과 재현이 제한"
-                    " > 가격·타겟·구성 조건 재점검 후 재편성 우선순위 제외 검토")
-        if amount < 2_000_000:
-            return ("2회차 관찰 상품 수준으로 추가 검증 필요"
-                    " > 가격·타겟·전시순서 중 1개 조건 조정 후 200만원 이상 회복 여부 확인")
-        if amount < 3_000_000:
-            return "2회차 안정 상품 수준 유지 > 동일 조건 재현성 확인 후 선택적 재편성 검토"
-        if amount < 5_000_000:
-            return "2회차 우수 성과 재현 여부를 바탕으로 고성과 조건 중심 재편성 검토"
-        return "2회차 핵심 성과 확인 > 고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
+    if 1_000_000 <= amount < 2_000_000:
+        return ("가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 "
+                "200만원 이상 회복 여부 확인 필요")
 
     avg = _v4464_num(historical_avg)
-    if amount < 1_000_000:
-        if avg > 0 and amount <= avg * 0.7:
-            return ("절대 매출과 과거 평균 대비 성과가 모두 낮아 반복 편성 효율 제한"
-                    " > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외")
-        return "반복 운영에서도 100만원 미만 성과 확인 > 조건 개선 근거가 없으면 재편성 우선순위 제외"
-    if amount < 2_000_000:
-        return "반복 운영 기준 관찰 상품 수준 > 가격·타겟·전시순서 중 1개 조건 조정 후 200만원 이상 회복 여부 확인"
-    if amount < 3_000_000:
-        return "반복 운영 기준 안정 상품 수준 > 가격·타겟·전시 조건별 성과를 비교해 선택적 재편성 판단"
-    if amount < 5_000_000:
-        return "반복 운영에서 우수 상품 수준 확인 > 최근 고성과 조건 중심 재편성 후 500만원 이상 확장 가능성 확인"
-    return "반복 고성과 이력을 바탕으로 고성과 타겟·SEG 조건 우선 유지 및 미발송 SEG 확대 TEST 검토"
+    if int(_v4464_num(run_count)) >= 2 and amount < 1_000_000 and avg > 0 and amount <= avg * 0.7:
+        return ("절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한"
+                " > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외")
+
+    if amount >= 5_000_000:
+        return "고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
+    if amount >= 3_000_000:
+        return "동일 조건 1회 추가 검증 후 500만원 이상 확장 가능성 확인"
+    if amount >= 2_000_000:
+        return "가격·타겟·전시 조건별 성과를 비교해 재편성 우선순위 판단"
+    return "가격·타겟·상품 적합도 조건 재점검 후 선택적 재TEST"
 
 def _v4464_weekly_category_line(text):
     """Weekly style change ONLY for product/category insight lines."""
@@ -1587,7 +1558,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(91, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 3_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 기본 성과 구간을 확보",
+                f"금번 {compact_money(amount)}으로 안정 상품 수준을 기록해 상품당 목표 250만원에 근접한 성과",
                 f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 전후의 안정적인 성과를 확보",
                 f"금번 {compact_money(amount)}을 기록해 추가 운영 여부를 판단할 수 있는 기본 성과를 확보",
             ])
