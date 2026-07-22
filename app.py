@@ -215,16 +215,14 @@ html, body, [class*="css"] {
 
 .asset-image-card img {
     position: absolute;
-    inset: 8px;
-    width: calc(100% - 16px);
-    height: calc(100% - 16px);
+    inset: 14px;
+    width: calc(100% - 28px);
+    height: calc(100% - 28px);
     min-height: 0;
     max-height: none;
     object-fit: contain;
     object-position: center center;
     border-radius: 10px;
-    transform: scale(1.08);
-    transform-origin: center center;
 }
 
 .asset-empty {
@@ -329,57 +327,58 @@ hr {
 
 
 
-/* V4.4.29 일일실적 이미지·문구 시작/끝선 정확히 일치
-   문구 콘텐츠 높이가 row를 결정하고 이미지는 동일 높이 안에서 contain */
+
+/* V4.4.33 발송소재 이미지/문구 세로 길이 동일화 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) {
     align-items: stretch !important;
 }
 
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] {
-    align-self: stretch !important;
     display: flex !important;
     flex-direction: column !important;
+    align-self: stretch !important;
 }
 
-/* Streamlit 중첩 wrapper까지 같은 높이 전달 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] > div,
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"],
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
+    display: flex !important;
+    flex-direction: column !important;
     flex: 1 1 auto !important;
     height: 100% !important;
 }
 
-/* 이미지/문구 카드의 외곽 시작·끝선을 완전히 동일하게 */
+/* 좌우 카드 외곽 높이 동일 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-card {
     width: 100% !important;
     height: 100% !important;
+    min-height: 430px !important;
     box-sizing: border-box !important;
 }
 
-/* 오른쪽 문구가 실제 높이를 결정 */
+/* 문구 영역 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-message-card {
-    min-height: 320px !important;
-    height: auto !important;
-}
-
-/* 왼쪽 이미지는 문구가 만든 높이에만 맞춤 */
-[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
-    min-height: 320px !important;
     height: 100% !important;
+    min-height: 430px !important;
+    overflow: visible !important;
 }
 
-/* 세로형 원본 이미지도 카드 높이를 밀어내지 않음 */
+/* 이미지 영역 */
+[data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card {
+    height: 100% !important;
+    min-height: 430px !important;
+    overflow: hidden !important;
+}
+
+/* 이미지는 카드 내부에서 비율 유지, 잘림 없음 */
 [data-testid="stHorizontalBlock"]:has(.asset-message-card) .asset-image-card img {
-    position: absolute !important;
-    inset: 8px !important;
-    width: calc(100% - 16px) !important;
-    height: calc(100% - 16px) !important;
-    max-width: none !important;
-    max-height: none !important;
+    width: calc(100% - 28px) !important;
+    height: calc(100% - 28px) !important;
+    max-width: calc(100% - 28px) !important;
+    max-height: calc(100% - 28px) !important;
     object-fit: contain !important;
     object-position: center center !important;
-    transform: scale(1.08) !important;
-    transform-origin: center center !important;
+    transform: none !important;
 }
 
 @media (max-width: 900px) {
@@ -3868,16 +3867,6 @@ def _set_weekly_deeplink(year: int, week: str) -> None:
         pass
 
 
-def _normalize_mms_message_text(value) -> str:
-    """MMS 문구 표시용: 첫 줄 시작의 불필요한 공백/개행만 제거합니다."""
-    s = "" if value is None else str(value)
-    # 전체 문구의 맨 앞 공백/개행만 제거하고 내부 줄바꿈/공백은 유지
-    s = s.lstrip()
-    # '( 광고)' 같은 비정상 첫 토큰이 아니라 '(광고)' 앞 공백 제거가 목적
-    return s
-
-
-
 def _get_secret_value(*names):
     """Streamlit Secrets → 환경변수 순으로 안전하게 인증값 조회."""
     for name in names:
@@ -5477,7 +5466,7 @@ elif menu == "일일실적":
         with asset_text_col:
             import html
             if message_text:
-                message_body = html.escape(_normalize_mms_message_text(message_text)).replace("\n", "<br>")
+                message_body = html.escape(message_text).replace("\n", "<br>")
             else:
                 message_body = (
                     "로우데이터의 MMS문구 컬럼에 문구를 입력하면 "
