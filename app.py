@@ -5,7 +5,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.55-FINAL-AUDITED-RELEASE
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.56-UNIFIED-PRODUCT-NAME-DISPLAY
 
 from __future__ import annotations
 
@@ -4450,49 +4450,52 @@ def _weekly_normalize_product_key(name: str) -> str:
     return s
 
 
-def _weekly_short_display_name(name: str, max_len: int = 52) -> str:
-    """주간실적 공통 표시명 formatter.
-    운영 태그만 제거하고 브랜드/핵심 상품군은 보존한다.
-    긴 구성은 의미 단위로 정리한 뒤 최종 길이를 제한한다.
+def _weekly_short_display_name(name: str, max_len: int = 44) -> str:
+    """주간실적 전 섹션 공통 표시명 formatter.
+    원본 상품키/집계값은 절대 변경하지 않고 화면 표시명만 축약한다.
     """
     s = str(name or "").strip()
+
+    # 운영/광고 태그 제거
     s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
     s = re.sub(r"^★단독\s*", "", s)
     s = re.sub(r"^\[([^\]]+)\]\s*", r"\1 ", s)
+    s = re.sub(r"\b특별혜택가\b\s*", "", s)
+    s = re.sub(r"\b리미티드 에디션\b\s*", "", s)
+    s = re.sub(r"\bNEW\b\s*", "", s, flags=re.I)
     s = re.sub(r"\s+", " ", s).strip()
 
-    # 보고서용 대표 축약명
+    # 의미 기반 대표 축약
     aliases = [
         ("필립스 이지프로 S2883/00 전기면도기", "필립스 이지프로 전기면도기"),
         ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
         ("비에날씬 BNR17 다이어트 유산균 체지방감소 캡슐 3개월분", "비에날씬 BNR17"),
         ("락앤락 바로한끼 밥용기 LITE 3P 320ML", "락앤락 바로한끼 밥용기"),
+        ("테팔 IH 매직핸즈 뉴이모션 티타늄2X 스텐 멀티 6P 세트", "테팔 IH 매직핸즈 6P 세트"),
+        ("맛춤상회 특수부위 소 토시살 600g + 소 안창살 400g 총 1kg", "맛춤상회 소 토시살+안창살 1kg"),
+        ("종근당건강 락토핏 생유산균 골드 120포 3통", "종근당건강 락토핏 생유산균 골드"),
+        ("독일 보랄 날개없는 선풍기(리모컨형)", "보랄 날개없는 선풍기"),
+        ("독일 보랄 보이는 에어프라이어 5L", "보랄 보이는 에어프라이어 5L"),
         ("1+1 초경량 3단 자동 우산 양산 겸용_튼튼한 접이식 미니 우산 암막 우양산", "1+1 초경량 3단 자동 암막 우양산"),
+        ("하얀 겨울 따라 떠나는, 유람선+BIG5 관광+4대특식 제주도 3박 4일", "제주도 3박 4일 여행상품"),
     ]
     for src_name, dst_name in aliases:
         if src_name in s:
             return dst_name
 
-    # 제목에 불필요한 운영/상태 정보 제거
-    s = re.sub(r"\s*\(재고부족[^)]*\)", "", s)
-    s = re.sub(r"\s*\*퇴근 이후 판중.*$", "", s)
+    # 모델번호/상태/증정/긴 옵션 제거
+    s = re.sub(r"\s*/\s*[A-Z]{1,6}-?[A-Z0-9\-]+$", "", s)
+    s = re.sub(r"\s*\((?:재고부족|소비기한|증정|퇴근 이후 판중)[^)]*\)", "", s)
+    s = re.sub(r"\s*\+\s*(?:보조배터리|스타벅스 아메리카노|쇼핑백|증정).*?$", "", s)
+    s = re.sub(r"\s*\([^)]{10,}\)", "", s)
     s = re.sub(r"\s+", " ", s).strip()
 
-    # 중복 브랜드 제거: "고디바 고디바" 등
+    # 중복 브랜드 제거
     words = s.split()
     if len(words) >= 2 and words[0] == words[1]:
         s = " ".join(words[1:])
 
-    if len(s) <= max_len:
-        return s
-
-    # 긴 상품은 괄호형 상세구성 제거 후 재확인
-    compact = re.sub(r"\s*\([^)]{8,}\)", "", s)
-    compact = re.sub(r"\s+", " ", compact).strip()
-    if len(compact) <= max_len:
-        return compact
-
-    return compact[:max_len].rstrip(" ,/_-") + "…"
+    return s if len(s) <= max_len else s[:max_len].rstrip(" ,/_-") + "…"
 
 
 def _weekly_cutoff_history(products_all: pd.DataFrame, week_end):
@@ -5668,6 +5671,40 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_product = _weekly_validate_and_repair(dyn_product)
     dyn_op = _weekly_validate_and_repair(dyn_op)
     dyn_next = _weekly_validate_and_repair(dyn_next)
+
+    def _apply_weekly_display_names(items):
+        """최종 렌더 직전 원본 상품명을 공통 축약명으로 치환.
+        원본 데이터/집계키에는 영향 없음.
+        """
+        if weekly_context_products is None or weekly_context_products.empty:
+            return items
+        pcol = _weekly_product_col(weekly_context_products)
+        if not pcol:
+            return items
+
+        names = (
+            weekly_context_products[pcol]
+            .dropna().astype(str).drop_duplicates()
+            .sort_values(key=lambda s: s.str.len(), ascending=False)
+            .tolist()
+        )
+
+        out = []
+        for line in items:
+            s = str(line or "")
+            for raw in names:
+                short = _weekly_short_display_name(raw)
+                if raw and short and raw != short and raw in s:
+                    s = s.replace(raw, short)
+            # 축약 후 "상품" 중복 표현 정리
+            s = re.sub(r"(\S)\s+상품\s+:", r"\1 :", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            out.append(s)
+        return out
+
+    dyn_product = _apply_weekly_display_names(dyn_product)
+    dyn_op = _apply_weekly_display_names(dyn_op)
+    dyn_next = _apply_weekly_display_names(dyn_next)
 
     # 섹션이 비면 현재 선택 주차 데이터만으로 안전 fallback 생성
     if not dyn_product:
