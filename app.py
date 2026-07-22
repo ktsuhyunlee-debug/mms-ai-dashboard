@@ -1,5 +1,5 @@
 # =============================================================================
-# V4.4.71 WEEKLY DETAIL ENGINE FINALIZED
+# V4.4.72 DAILY LOGIC HARDENING
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
 # =============================================================================
@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.71-WEEKLY-DETAIL-ENGINE-FINALIZED
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.72-DAILY-LOGIC-HARDENING
 
 from __future__ import annotations
 
@@ -1065,7 +1065,9 @@ def classify_cases(row: pd.Series, history: pd.DataFrame) -> list[str]:
 
 def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
     """현재 행보다 이전의 동일 상품 이력을 코드 우선순위로 찾습니다."""
-    prior = history[history["_date"] < row["_date"]].copy()
+    _hist_evt = _daily_event_datetime(history)
+    _row_evt = _daily_event_datetime(pd.DataFrame([row])).iloc[0]
+    prior = history[_hist_evt < _row_evt].copy()
 
     for key in ["쇼라코드", "알파코드"]:
         current = clean_identifier_value(row.get(key, ""))
@@ -1080,6 +1082,51 @@ def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
 
     return prior.iloc[0:0].copy()
 
+
+
+def _daily_event_datetime(df: pd.DataFrame) -> pd.Series:
+    """같은 날짜 오전/오후까지 구분하는 일일 이벤트 시각."""
+    if df is None or df.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    date_col = "_date" if "_date" in df.columns else first_col(df, ["발송일시2","발송일","발송일자","일자","날짜"])
+    time_col = first_col(df, ["시간대","발송시간","시간"])
+    base = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.Series(pd.NaT, index=df.index)
+    if time_col:
+        s=df[time_col].astype(str).str.strip()
+        valid=s.str.match(r"^\d{1,2}:\d{2}(:\d{2})?$")
+        td=pd.to_timedelta(s.where(valid,"00:00:00"),errors="coerce").fillna(pd.Timedelta(0))
+        return base.dt.normalize()+td
+    return base
+
+def _daily_match_products_to_send(pday: pd.DataFrame, send_row: pd.Series) -> pd.DataFrame:
+    """캠페인명 우선, 시간대/소재/성별/연령/SEG 순으로 상품을 안전하게 매칭."""
+    matched=pday.copy()
+    if matched.empty:
+        return matched
+    keys=[("캠페인명",["캠페인명","캠페인"]),("시간대",["시간대","발송시간","시간"]),
+          ("소재",["소재","소재명"]),("성별",["성별"]),("연령",["연령"]),("SEG",["SEG","세그","세그먼트"])]
+    for sk,cands in keys:
+        pcol=first_col(matched,cands)
+        sval=clean_identifier_value(send_row.get(sk,""))
+        if not pcol or not sval:
+            continue
+        cur=matched[matched[pcol].astype(str).map(clean_identifier_value).eq(sval)]
+        if not cur.empty:
+            matched=cur
+    return matched
+
+def _daily_issue_key(row: pd.Series) -> str:
+    vals=[
+        clean_identifier_value(row.get("_date",row.get("발송일",""))),
+        clean_identifier_value(row.get("시간대","")),
+        clean_identifier_value(row.get("캠페인명","")),
+        clean_identifier_value(row.get("상품코드",row.get("상품ID",""))),
+        clean_identifier_value(row.get("상품명","")),
+        clean_identifier_value(row.get("성별","")),
+        clean_identifier_value(row.get("연령","")),
+        clean_identifier_value(row.get("SEG","")),
+    ]
+    return "|".join(vals)
 
 def target_label(row: pd.Series, include_seg: bool = True) -> str:
     values = []
@@ -1139,7 +1186,9 @@ def product_history_summary(row: pd.Series, history: pd.DataFrame) -> dict:
 
 def product_history_including_current(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
     """현재 발송 건을 포함해 동일 상품의 누적 이력을 찾습니다."""
-    cumulative = history[history["_date"] <= row["_date"]].copy()
+    _hist_evt2 = _daily_event_datetime(history)
+    _row_evt2 = _daily_event_datetime(pd.DataFrame([row])).iloc[0]
+    cumulative = history[_hist_evt2 <= _row_evt2].copy()
 
     for key in ["쇼라코드", "알파코드"]:
         current = clean_identifier_value(row.get(key, ""))
@@ -1796,7 +1845,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         item_type = "risk" if category in {"운영 위험", "가격 위험", "타겟 위험", "상품 적합도", "운영 이슈"} or "낮" in sentence or "저조" in sentence or "아쉬" in sentence else "fact"
         selected.append({"category": category, "sentence": sentence, "evidence": evidence, "confidence": confidence, "type": item_type})
         category_count[category] = 1
-        if len(selected) >= 5:
+        if len(selected) >= 4:
             break
     if not selected:
         selected.append({"category": "운영", "sentence": f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록했으며 추가 이력 축적 후 판단이 필요", "evidence": "현재 1회", "confidence": "참고", "type": "fact"})
@@ -3385,6 +3434,16 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     items = _seasonal_last_year_evidence(products_all, week_end)
     if not items:
         return None
+
+    _has_recent_decline = any(
+        ("최근 3회" in str(x.get("sentence","")) and "감소" in str(x.get("sentence","")))
+        for x in candidates
+    )
+    if _has_recent_decline:
+        candidates = [
+            x for x in candidates
+            if not ("중기 추세" in str(x.get("sentence","")) and "상승" in str(x.get("sentence","")))
+        ]
 
     selected = []
     used_groups = set()
