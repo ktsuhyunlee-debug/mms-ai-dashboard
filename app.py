@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.73-DAILY-INSIGHT-FINAL
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.74-DAILY-LOGIC-FINAL
 # - Daily grade/action consistency hardened.
 # - New-product 1st/2nd/3rd+ run lifecycle logic added.
 # - Report-tone normalization strengthened.
@@ -597,7 +597,9 @@ def stable_variant(key: str, options: list[str]) -> str:
     score = sum((idx + 1) * ord(ch) for idx, ch in enumerate(str(key)))
     return options[score % len(options)]
 
-def product_grade(amount: float) -> str:
+def product_grade(order_amount):
+    """주문금액 기준 5단계 성과등급 — 단일 기준점."""
+    amount = _v4464_num(order_amount)
     if amount < 1_000_000:
         return "부진 상품"
     if amount < 2_000_000:
@@ -607,7 +609,6 @@ def product_grade(amount: float) -> str:
     if amount < 5_000_000:
         return "우수 상품"
     return "핵심 상품"
-
 
 def parse_yyyymmdd_date(series: pd.Series) -> pd.Series:
     """20260716 같은 숫자·문자 날짜와 일반 날짜를 안전하게 변환합니다."""
@@ -1422,7 +1423,18 @@ def _v4464_report_tone(text):
         ("가격 민감도가 낮은 흐름입니다.", "가격 인상에도 성과가 유지돼 가격 민감도는 낮은 흐름"),
         ("운영 비중 확대 검토가 가능합니다.", "운영 비중 확대 검토 가능"),
         ("추가 운영을 검토할 수 있습니다.", "추가 운영 검토 가능"),
-        ("추가 TEST가 필요합니다.", "추가 TEST 필요"),
+        ("추가 TEST 필요", "추가 TEST 필요"),
+        ("실적입니다.", "실적"),
+        ("확보되지 않았습니다.", "확보 제한"),
+        ("판단됩니다.", "판단"),
+        ("필요합니다.", "필요"),
+        ("확인됩니다.", "확인"),
+        ("적절합니다.", "적절"),
+        ("가능합니다.", "가능"),
+        ("유효합니다.", "유효"),
+        ("우선입니다.", "우선"),
+        ("권장됩니다.", "권장"),
+        ("요구됩니다.", "요구"),
     ]
     for a, b in phrase_rules:
         s = s.replace(a, b)
@@ -1526,6 +1538,25 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
         return "반복 운영에서 우수 상품 수준 확인 > 최근 고성과 조건 중심 재편성 후 500만원 이상 확장 가능성 확인"
     return "반복 고성과 이력을 바탕으로 고성과 타겟·SEG 조건 우선 유지 및 미발송 SEG 확대 TEST 검토"
 
+
+def _v4474_daily_final_guard(value, order_amount):
+    """최종 일일 인사이트 출력 전 등급/문장/기준 충돌 방지."""
+    s = _v4464_report_tone(value)
+    amount = _v4464_num(order_amount)
+    grade = product_grade(amount)
+
+    # stale target wording hard stop
+    s = s.replace("300만원 이상", "300만원 이상")
+    s = s.replace("상품당 목표 300만원", "안정 상품 기준")
+
+    # Explicit grade wording must match the actual amount band.
+    all_grades = ["부진 상품", "관찰 상품", "안정 상품", "우수 상품", "핵심 상품"]
+    for g in all_grades:
+        if g != grade:
+            s = s.replace(f"{g} 수준", f"{grade} 수준")
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
 def _v4464_weekly_category_line(text):
     """Weekly style change ONLY for product/category insight lines."""
     s = "" if text is None else str(text)
@@ -1571,15 +1602,15 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     if not critical_issue:
         if amount < 1_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적입니다.",
+                f"금번 {compact_money(amount)}으로 100만원 미만의 부진 상품 수준을 기록해 기대 대비 매우 저조한 실적 확인",
                 f"금번 주문금액은 {compact_money(amount)}으로, MMS 메인 상품으로 활용하기에는 반응이 제한",
-                f"금번 {compact_money(amount)}에 그치며 가격·타겟 조건 대비 구매 반응이 충분히 확보되지 않았습니다.",
+                f"금번 {compact_money(amount)}에 그치며 가격·타겟 조건 대비 구매 반응 확보 제한",
                 f"금번 주문금액이 {compact_money(amount)}으로 100만원 미만에 머물러 상품 적합도 재검토가 필요",
             ])
             add(97, "금번 성과", sentence, "현재 주문금액 기준", "높음")
         elif amount < 2_000_000:
             sentence = stable_variant(sentence_key, [
-                f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적입니다.",
+                f"금번 {compact_money(amount)}으로 관찰 상품 수준을 기록해 기대 대비 다소 아쉬운 실적 확인",
                 f"금번 주문금액은 {compact_money(amount)}으로 목표 수준 대비 다소 미달",
                 f"금번 {compact_money(amount)}을 기록해 기본 수요는 확인했으나 메인 상품 성과로는 다소 제한",
                 f"금번 주문금액이 {compact_money(amount)}으로 200만원 미만에 머물러 추가 조건 검증이 필요",
@@ -1737,7 +1768,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if len(price_rows) >= 4 and price_rows["멤버십혜택가"].nunique() >= 2:
             corr = price_rows[["멤버십혜택가", "주문금액"]].corr().iloc[0,1]
             if pd.notna(corr) and corr <= -0.6:
-                add(74, "가격 탄력성", "가격 상승 구간에서 주문금액이 함께 하락하는 경향이 뚜렷해 가격 민감형 상품으로 판단됩니다.", f"가격-매출 상관계수 {corr:.2f}", "보통")
+                add(74, "가격 탄력성", "가격 상승 구간에서 주문금액이 함께 하락하는 경향이 뚜렷해 가격 민감형 상품으로 판단", f"가격-매출 상관계수 {corr:.2f}", "보통")
                 risks.append("가격 민감형")
 
     # 피로도·희소성
@@ -1815,16 +1846,16 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요"
             action_evidence = "신규 첫 운영 100만원 미만"
     elif summary["운영횟수"] == 0 and amount >= 2_000_000 and season_ctx:
-        action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인 {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
+        if not str(action_sentence or "").strip(): action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인 {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
         action_evidence = "신규 첫 운영 + 안정 이상 성과 + 시즌 적합성"
     elif "프로모션 의존" in risks:
-        action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요"
+        if not str(action_sentence or "").strip(): action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요"
         action_evidence = "프로모션·일반기간 평균 비교"
     elif "최근 성과 둔화" in risks and amount < 2_000_000:
-        action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외"
+        if not str(action_sentence or "").strip(): action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외"
         action_evidence = "절대 성과 + 과거 평균 동시 부진"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
-        action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요"
+        if not str(action_sentence or "").strip(): action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요"
         action_evidence = "최근 운영 간격 및 성과 하락 기준"
     elif amount >= 5_000_000:
         if same_target.empty:
@@ -1846,11 +1877,11 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_evidence = "우수 상품 기준"
     elif amount >= 2_000_000:
         if price_eval and price_eval.get("level") == "strong":
-            action_sentence = "가격 경쟁력을 확보한 상태에서 안정 수준의 성과를 기록한 만큼 동일 조건 또는 미발송 SEG로 1회 추가 TEST해 250만원 이상 성과 재현 여부를 확인하는 것이 좋습니다."
+            action_sentence = "가격 경쟁력을 확보한 상태에서 안정 수준의 성과를 기록한 만큼 동일 조건 또는 미발송 SEG로 1회 추가 TEST해 300만원 이상 성과 상승 여부를 확인하는 것이 좋습니다."
             action_evidence = "안정 상품 + 유의미한 가격 경쟁력"
         else:
-            action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 250만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
-            action_evidence = "안정 상품 및 목표 250만원 기준"
+            action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 300만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
+            action_evidence = "안정 상품 기준"
     elif amount >= 1_000_000:
         action_sentence = "관찰 수준으로 즉시 반복 편성보다 가격·타겟·전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 시 재편성 확대, 미달 시 우선순위 하향"
         action_evidence = "관찰 상품 기준"
