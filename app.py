@@ -4804,119 +4804,160 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     def _clean_weekly_title(title: str) -> str:
         title = re.sub(r"^•\s*", "", str(title or "")).strip()
         title = re.sub(r"\s+", " ", title)
-        title = re.sub(r"(?:은|는|이|가|에서|의)$", "", title).strip()
-        # 상품명 뒤 불필요한 '상품' 제거
         title = re.sub(r"\s+상품$", "", title).strip()
         return title
 
-    def _remove_title_repeat(title: str, fact: str) -> str:
-        """제목이 본문 첫머리에 반복되는 현상 제거."""
-        t = _clean_weekly_title(title)
-        f = str(fact or "").strip()
-        if not t or not f:
-            return f
-        # '[상품명]은/는/이/가/에서/의 ...' 형태 제거
-        patterns = [
-            rf"^{re.escape(t)}\s*(?:은|는|이|가)\s*",
-            rf"^{re.escape(t)}\s*(?:에서|의)\s*",
-            rf"^{re.escape(t)}\s*",
-        ]
-        for p in patterns:
-            nf = re.sub(p, "", f, count=1)
-            if nf != f:
-                return nf.strip()
-        return f
+    def _short_product_name(name: str) -> str:
+        s = _clean_weekly_title(name)
+        s = re.sub(r"^\[[^\]]+\]\s*", "", s)
+        s = re.sub(r"^★단독\s*", "", s)
+        # 보고서 제목만 과도하게 긴 옵션/모델 꼬리를 축약
+        s = re.sub(r"\s*/\s*[A-Z0-9\-]+$", "", s).strip()
+        return s
 
-    def _infer_weekly_title(text_value: str, default_title="운영 인사이트") -> str:
-        s = str(text_value or "").strip()
-
-        # 유형별 제목 자동 지정
+    def _infer_weekly_title(s: str, default_title="운영 인사이트") -> str:
+        s = str(s or "").strip()
         if "500만원 이상 핵심 상품" in s or "핵심 성과" in s:
             return "핵심 상품 매출 집중"
-        if "100만원 미만" in s and ("고유 상품" in s or "저성과" in s):
+        if "100만원 미만" in s and ("고유 상품" in s or "저성과 상품" in s):
             return "저성과 상품 효율 점검"
-        if "식품/건강" in s and ("100만원 미만" in s or "검증 상품" in s):
-            return "식품/건강 상품별 편차 확대"
+        if "대카테고리 매출" in s:
+            return "카테고리보다 검증 상품 중심 편성"
+        if "식품/건강" in s and ("100만원 미만" in s or "300만원 이상 달성 이력" in s):
+            return "식품/건강 상품별 편차 확대" if "100만원 미만" in s else "식품/건강 상품 교체"
         if "최근 4주 중" in s and "수요일" in s:
             return "요일별 편성 조건 검증"
-        if "대카테고리 매출" in s or "카테고리 비중" in s:
-            return "카테고리보다 검증 상품 중심 편성"
-        if "신규·유사신규" in s and "재편성" in s:
+        if "신규·유사신규" in s and "재편성" in s and ("평균" in s or "비중" in s):
             return "신규·유사신규 vs 재편성"
-        if "SPM" in s and ("고성과 상품" in s or "함께 편성" in s):
+        if "SPM" in s and ("함께 편성" in s or "고성과 상품" in s):
             return "고성과 상품 × 적합 타겟 조합 강화"
         if "전년 동시점" in s and any(k in s for k in ["써큘", "서큘", "선풍기", "냉방"]):
             return "7월 냉방가전 신규·유사신규 발굴"
         if "전년 동시점" in s and any(k in s for k in ["우양산", "양산", "우산"]):
             return "7월 우양산 신규·유사신규 발굴"
-        if "300만원 이상 달성 이력" in s and "카테고리" in s:
-            return "저성과 상품 교체"
 
-        # 상품/타겟형: 조사 앞까지 상품명 추출
-        patterns = [
-            r"^(.+?)(?:은|는)\s+금주",
-            r"^(.+?)(?:은|는)\s+과거",
-            r"^(.+?)(?:은|는)\s+누적",
-            r"^(.+?)(?:은|는)\s+(남성|여성)\d{4}",
-            r"^(.+?)(?:에서)\s+\d+회",
-        ]
-        for pat in patterns:
+        # 타겟 비교
+        mt = re.match(r"^(.+?)(?:은|는)\s+(?:남성|여성)\d{4}", s)
+        if mt:
+            return _short_product_name(mt.group(1)) + " 타겟 적합도"
+
+        # 상품 단위 차주/운영 인사이트
+        for pat in [r"^(.+?)(?:은|는)\s+금주", r"^(.+?)(?:은|는)\s+과거", r"^(.+?)\s+상품은\s+금주", r"^(.+?)\s+상품은\s+과거"]:
             mm = re.match(pat, s)
             if mm:
-                cand = _clean_weekly_title(mm.group(1))
-                if 1 < len(cand) <= 60:
-                    # 타겟 비교는 제목에 적합도 명시
-                    if re.search(r"(남성|여성)\d{4}", s):
-                        short = re.sub(r"\s+", " ", cand)
-                        return f"{short} 타겟 적합도"
-                    return cand
-
+                return _short_product_name(mm.group(1))
         return default_title
 
+    def _strip_subject_prefix(fact: str, title: str) -> str:
+        f = str(fact or "").strip()
+        base = title.replace(" 타겟 적합도", "").strip()
+        # full title may be shortened; first remove exact title, then generic leading subject up to 조사
+        for subj in [base, title]:
+            if subj:
+                nf = re.sub(rf"^{re.escape(subj)}(?:\s+상품)?(?:은|는|이|가)\s*", "", f, count=1)
+                if nf != f:
+                    return nf.strip()
+        # For long original product names when title was shortened
+        if title.endswith("타겟 적합도"):
+            f = re.sub(r"^.+?(?:은|는)\s+(?=(?:남성|여성)\d{4})", "", f, count=1)
+        elif re.search(r"(?:은|는)\s+(?:금주|과거)", f):
+            f = re.sub(r"^.+?(?:은|는)\s+(?=(?:금주|과거))", "", f, count=1)
+        return f.strip()
+
+    def _compact_fact(fact: str, title: str) -> str:
+        f = _strip_subject_prefix(fact, title)
+        # Facts: remove prose endings without concatenating arbitrary suffixes.
+        replacements = [
+            (r"의 ([0-9.]+)%를 차지해", r"의 \1% 차지,"),
+            (r"의 ([0-9.]+)%로 높은 비중을 차지했으나", r"의 \1%를 차지했으나"),
+            (r"을 기록했고", " 기록,"),
+            (r"를 기록했고", " 기록,"),
+            (r"을 기록한 반면", " 기록, 반면"),
+            (r"를 기록한 반면", " 기록, 반면"),
+            (r"으로 차이가 확인됐습니다", "으로 차이 확인"),
+            (r"로 차이가 확인됐습니다", "로 차이 확인"),
+            (r"이 반복 확인됐습니다", " 반복 확인"),
+            (r"가 반복 확인됐습니다", " 반복 확인"),
+            (r"에 그쳤습니다", " 기록"),
+            (r"입니다$", ""),
+            (r"했습니다$", ""),
+            (r"됐습니다$", ""),
+            (r"습니다$", ""),
+        ]
+        for p, r in replacements:
+            f = re.sub(p, r, f)
+        f = re.sub(r"\s+", " ", f).strip(" ,.")
+        return f
+
+    def _compact_action(action: str, title: str) -> str:
+        a = str(action or "").strip().rstrip(".")
+        # Generate clean report-style action from semantic patterns rather than suffix replacement.
+        if title == "핵심 상품 매출 집중":
+            return "검증 상품 재편성과 신규·유사신규 후보 발굴을 병행해 핵심 상품군 확대 필요"
+        if title == "요일별 편성 조건 검증":
+            return "상품 구성·타겟·SEG·발송모수를 함께 비교해 반복되는 고효율 조건 확인 필요"
+        if title == "카테고리보다 검증 상품 중심 편성":
+            return "과거 300만원·500만원 이상 달성 횟수와 가격 경쟁력을 함께 반영해 편성 우선순위 설정 필요"
+        if title == "고성과 상품 × 적합 타겟 조합 강화":
+            return "반복 성과가 확인된 상품·타겟·SEG 조합을 축적해 재편성 및 미발송 SEG 확대 기준으로 활용 필요"
+        if title == "식품/건강 상품별 편차 확대":
+            return "과거 MMS 고성과 검증 상품 중심 교체 편성 필요"
+        if title == "식품/건강 상품 교체":
+            return "카테고리 비중은 유지하되 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체"
+        if title == "7월 냉방가전 신규·유사신규 발굴":
+            return "단일 사례로 반복성은 추가 검증하되 유사 가격대의 냉방가전 신규·유사신규 TEST 검토"
+        if title == "7월 우양산 신규·유사신규 발굴":
+            return "장마·폭염 시즌을 고려해 1만원 내외 경량·휴대성·암막 기능 우양산 신규·유사신규 TEST 검토"
+        if title.endswith("타겟 적합도"):
+            m = re.search(r"평균매출이\s*([0-9.]+)배\s*높은\s*((?:남성|여성)\d{4})", a)
+            if m:
+                return f"{m.group(2)} 우선 편성 및 고성과·미발송 SEG 순차 TEST 필요"
+            return re.sub(r"(?:하는 것이 적절합니다|할 필요가 있습니다)$", "필요", a)
+
+        # Product recommendation actions
+        if "동일 SEG 과다 반복" in a:
+            return "최근 고성과 타겟 중심 재편성하되 동일 SEG 과다 반복을 피하고 미발송 SEG 확대 TEST 검토"
+        if "판매 가능 여부" in a and "최신 가격" in a:
+            return "판매 가능 여부와 최신 가격 확인 후 유사 조건 유지 시 재편성 검토"
+        if "2회 이상 연속 하락" in a:
+            return "고성과 타겟 중심 단기 재편성하되 2회 이상 연속 하락 시 휴지기 적용 검토"
+        if "고성과 SEG" in a and "미발송 SEG" in a:
+            return re.sub(r"하는 것이 적절합니다$", "검토", a)
+
+        # Safe cleanup only: preserve grammar, no blind '필요/검토' concatenation.
+        a = re.sub(r"\s+", " ", a)
+        a = re.sub(r"하는 것이 적절합니다$", "검토", a)
+        a = re.sub(r"할 필요가 있습니다$", "필요", a)
+        a = re.sub(r"하는 것이 좋습니다$", "활용 필요", a)
+        return a.strip()
+
     def _normalize_weekly_bullet(raw, default_title="운영 인사이트"):
-        """
-        문장형을 모두 '• 항목명 : 근거 > 액션'으로 통일.
-        - 제목 중복 제거
-        - 내부 bullet 분리
-        - 문장형 종결어미 압축
-        """
         s = re.sub(r"^•\s*", "", str(raw or "").strip())
         if not s:
             return ""
 
-        # 이미 구조화된 경우도 제목/본문 중복 정리
+        # Existing structured input
         if " : " in s and " > " in s:
-            title, rest = s.split(" : ", 1)
+            old_title, rest = s.split(" : ", 1)
             fact, action = rest.split(" > ", 1)
-            title = _clean_weekly_title(title)
-            fact = _remove_title_repeat(title, fact)
-            action = action.strip().rstrip(".")
-            return f"• {title} : {fact.rstrip('.')} > {action}"
+            inferred = _infer_weekly_title(f"{old_title} {fact} {action}", _clean_weekly_title(old_title))
+            return f"• {inferred} : {_compact_fact(fact, inferred)} > {_compact_action(action, inferred)}"
 
-        # 첫 문장 = 근거, 이후 문장 = 액션/해석
+        # Sentence-form input: first sentence fact, remaining sentences interpretation/action.
         sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", s) if x.strip()]
-        if not sentences:
-            return ""
-
         title = _infer_weekly_title(s, default_title)
-        first = _remove_title_repeat(title.replace(" 타겟 적합도", ""), sentences[0].rstrip("."))
-        rest = " ".join(sentences[1:]).strip().rstrip(".")
+        fact = sentences[0] if sentences else s
+        action = " ".join(sentences[1:]).strip() if len(sentences) > 1 else ""
 
-        # 문장형 표현을 보고용 압축형으로 정리
-        first = re.sub(r"기록했습니다$", "기록", first)
-        first = re.sub(r"차지했습니다$", "차지", first)
-        first = re.sub(r"확인됐습니다$", "확인", first)
-        first = re.sub(r"그쳤습니다$", "기록", first)
-        first = re.sub(r"상태입니다$", "상태", first)
-        first = re.sub(r"후보입니다$", "후보", first)
+        # If the first sentence itself contains an explicit transition, preserve it as action source.
+        if not action:
+            for token in [" 차주에는 ", " 반복 운영에도 ", " 평균매출이 ", " 타겟 자체가 ", " 카테고리 비중만으로 "]:
+                if token in fact:
+                    fact, action = fact.split(token, 1)
+                    action = token.strip() + " " + action
+                    break
 
-        rest = re.sub(r"하는 것이 적절합니다$", "검토", rest)
-        rest = re.sub(r"할 필요가 있습니다$", "필요", rest)
-        rest = re.sub(r"하는 것이 좋습니다$", "활용 필요", rest)
-
-        if rest:
-            return f"• {title} : {first} > {rest}"
-        return f"• {title} : {first}"
+        return f"• {title} : {_compact_fact(fact, title)}" + (f" > {_compact_action(action, title)}" if action else "")
 
     def _dedupe_keep_order(items):
         out, seen = [], set()
@@ -4986,6 +5027,26 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     # 차주 제안은 기존 동적 추천 결과만 정규화.
     # 특정 상품/시즌 사례는 현재 선택 주차의 원래 엔진(nxt)에 존재할 때만 출력됨.
     # 따라서 과거 주차를 선택해도 다른 주차 상품/수치가 섞이지 않음.
+
+    # Final guard: malformed mechanical suffixes must never reach the report.
+    def _final_clean(items):
+        out = []
+        for s in items:
+            s = str(s)
+            s = s.replace("활용활용 필요", "활용 필요")
+            s = s.replace("검토검토", "검토")
+            s = s.replace("검토필요", "검토 필요")
+            s = s.replace("TEST검토", "TEST 검토")
+            s = s.replace("편성검토", "편성 검토")
+            s = s.replace("분산필요", "분산 필요")
+            s = s.replace("적용검토", "적용 검토")
+            s = s.replace("피검토", "피하고 미발송 SEG 확대 TEST 검토")
+            out.append(s)
+        return out
+
+    dyn_product = _final_clean(dyn_product)
+    dyn_op = _final_clean(dyn_op)
+    dyn_next = _final_clean(dyn_next)
 
     return "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
