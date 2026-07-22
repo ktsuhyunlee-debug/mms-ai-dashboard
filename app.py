@@ -1174,6 +1174,40 @@ def delete_operation_issue(row: pd.Series) -> None:
     st.session_state.setdefault("daily_operation_issues", {}).pop(issue_storage_key(row), None)
 
 
+
+def _daily_marketing_season_context(product_name: str, current_date) -> dict:
+    """상품명 + 운영월 기준 일일실적용 시즌/마케팅 캘린더 맥락."""
+    name = str(product_name or "").lower()
+    dt = pd.to_datetime(current_date, errors="coerce")
+    month = int(dt.month) if pd.notna(dt) else 0
+    rules = [
+        ({6,7,8}, ["냉감","쿨링","듀라론","인견","아이스","쿨매트","냉감패드","냉감이불","베개커버"],
+         "폭염·열대야 수요가 집중되는 여름 냉감 침구 시즌", "냉감 소재·세탁 편의성·통기성·간편 교체 등 체감 기능이 명확한 상품"),
+        ({5,6,7,8}, ["선풍기","써큘","서큘","에어컨","냉풍기"],
+         "기온 상승과 폭염 대비 수요가 확대되는 여름 냉방가전 시즌", "저소음·리모컨·공기순환·공간효율 등 사용 편의성이 강화된 상품"),
+        ({6,7,8}, ["우산","우양산","양산"], "장마와 폭염 수요가 동시에 발생하는 여름 시즌", "경량·암막·휴대성·자동 기능 등 계절 사용성이 명확한 상품"),
+        ({6,7,8}, ["선크림","선케어","자외선","썬크림"], "자외선 노출과 야외활동이 증가하는 여름 선케어 시즌", "휴대성·사용감·자외선 차단 기능이 명확한 상품"),
+        ({7,8,9}, ["갈치","생선","수산","전복"], "휴가철·보양식·가정식 수요가 함께 움직이는 여름 식품 시즌", "손질 편의성·중량·구성 혜택이 명확한 상품"),
+        ({9,10,11}, ["홍삼","영양제","유산균"], "환절기 건강관리와 명절 선물 수요가 확대되는 가을 시즌", "복용 편의성·구성 혜택·선물 적합성이 명확한 상품"),
+        ({11,12,1,2}, ["온열","전기요","히터","난방","기모"], "기온 하락으로 보온·난방 수요가 집중되는 겨울 시즌", "보온성·안전성·전력 효율·사용 편의성이 명확한 상품"),
+    ]
+    for months, keywords, context, attributes in rules:
+        if month in months and any(k in name for k in keywords):
+            return {"context": context, "attributes": attributes}
+    return {}
+
+
+def _daily_price_competitiveness(current_price: float, lowest: float) -> dict:
+    """최저가 대비 차이를 차이율로 판정."""
+    if current_price <= 0 or lowest <= 0:
+        return {}
+    advantage = (lowest-current_price)/lowest
+    if advantage >= .05: return {"level":"strong","rate":advantage}
+    if advantage >= .01: return {"level":"moderate","rate":advantage}
+    if advantage >= -.01: return {"level":"same","rate":advantage}
+    return {"level":"weak","rate":advantage}
+
+
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
     name = str(row.get("상품명", "")).strip()
@@ -1182,6 +1216,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     current_date = pd.to_datetime(row.get("_date"), errors="coerce")
     current_price = float(row.get("멤버십혜택가", 0) or 0)
     grade = product_grade(amount)
+    season_ctx = _daily_marketing_season_context(name, current_date)
     summary = product_history_summary(row, history)
     prior = summary["과거이력"].copy().sort_values("_date")
     same_target = summary["동일타겟이력"].copy()
@@ -1329,13 +1364,20 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
                 add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품입니다.", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
 
-    # 가격 경쟁력 및 탄력성
+    # 가격 경쟁력 및 탄력성: 절대 1원 차이가 아닌 최저가 대비 차이율 판정
     lowest = float(row.get("발송일 최저가", 0) or 0)
-    if lowest > 0 and current_price > 0:
-        if current_price <= lowest:
-            add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 이하의 가격 메리트를 확보했습니다.", "발송일 최저가 기준", "높음")
+    price_eval = _daily_price_competitiveness(current_price, lowest)
+    if price_eval:
+        price_rate = abs(price_eval["rate"]) * 100
+        if price_eval["level"] == "strong":
+            add(88, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가 {fmt_num(lowest)}원 대비 약 {price_rate:.1f}% 낮아 유의미한 가격 경쟁력을 확보했습니다.", "발송일 최저가 기준", "높음")
+        elif price_eval["level"] == "moderate":
+            add(82, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원 대비 약 {price_rate:.1f}% 낮아 가격 우위는 있으나 차별화 폭은 제한적입니다.", "발송일 최저가 기준", "높음")
+        elif price_eval["level"] == "same":
+            add(84 if amount < 2_000_000 else 72, "가격", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원과 사실상 동일한 수준으로 가격 차별화는 제한적입니다.", "발송일 최저가 ±1% 이내", "높음")
+            if amount < 2_000_000: risks.append("가격 차별화 제한")
         elif amount < 2_000_000:
-            add(73, "가격 위험", f"멤버십 혜택가가 발송일 비교 최저가보다 {fmt_num(current_price-lowest)}원 높고 성과도 제한적이어서 추가 가격 메리트 확보가 필요합니다.", "발송일 최저가 기준", "높음")
+            add(80, "가격 위험", f"멤버십 혜택가 {fmt_num(current_price)}원은 발송일 비교 최저가 {fmt_num(lowest)}원보다 약 {price_rate:.1f}% 높고 성과도 제한적이어서 가격 조건 재점검이 필요합니다.", "발송일 최저가 대비 1% 초과", "높음")
             risks.append("가격 경쟁력 미확보")
     if not prior.empty and current_price > 0:
         last = prior.iloc[-1]
@@ -1355,8 +1397,9 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         gap, last_amount = int((current_date-last["_date"]).days), float(last.get("주문금액", 0) or 0)
         if gap <= 21 and last_amount > 0:
             ratio = amount / last_amount
-            if ratio >= 0.8:
-                add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 반복 운영 피로도가 제한적입니다.", "직전 운영 비교", "보통")
+            past_avg_for_fatigue = float(prior["주문금액"].mean()) if not prior.empty else 0
+            if ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
+                add(80, "운영 피로도", f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준을 유지해 단기 반복에 따른 추가 하락은 제한적입니다.", "직전 운영 비교", "보통")
             elif ratio < 0.75:
                 add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요합니다.", "직전 운영 비교", "보통")
                 risks.append("단기 반복 피로도")
@@ -1390,6 +1433,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(108, "상품 적합도", f"최근 일반기간 3회 평균이 {compact_money(recent_normal['주문금액'].mean())}으로 반복 운영에서도 성과 개선이 제한적이어서 MMS 메인 상품으로는 적합도가 낮은 것으로 판단됩니다.", "일반기간 최근 3회", "높음")
             risks.append("MMS 메인 적합도 낮음")
 
+    # 시즌성·마케팅 캘린더
+    if season_ctx:
+        add(86 if summary["운영횟수"] == 0 else 78, "시즌성",
+            f"{season_ctx['context']}에 해당하는 상품입니다. {season_ctx['attributes']} 중심으로 상품 매력을 강화해 운영하는 것이 적절합니다.",
+            f"{pd.to_datetime(current_date).month if pd.notna(current_date) else '-'}월 마케팅 캘린더 및 상품 속성 기준", "보통")
+
     # 다음 운영 제안: 분석 결과를 실제 편성 액션으로 연결합니다.
     current_promo_name = promotion_label(row)
     recent_gap = None
@@ -1403,11 +1452,24 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = "반복 부진이 확인된 만큼 MMS 메인 편성은 축소하고, 가격·구성 또는 타겟 조건이 개선된 경우에만 선택적으로 재TEST하는 것이 필요합니다."
         action_evidence = "일반기간 최근 3회 반복 부진"
     elif "가격 경쟁력 미확보" in risks:
-        action_sentence = "발송일 최저가 이하의 가격 경쟁력을 확보한 뒤 동일 타겟으로 재TEST하여 가격 개선 효과를 확인하는 것이 필요합니다."
-        action_evidence = "발송일 최저가 미확보"
+        action_sentence = "현재 가격 조건에서는 재편성 우선순위를 낮추고, 발송일 비교 최저가 대비 유의미한 가격 경쟁력 또는 구성 혜택을 확보한 뒤 재TEST하는 것이 필요합니다."
+        action_evidence = "발송일 최저가 대비 1% 초과 가격 열위"
+    elif summary["운영횟수"] == 0 and amount < 1_000_000:
+        if price_eval and price_eval.get("level") in {"same","moderate"}:
+            action_sentence = "첫 운영 부진을 상품 적합도만의 문제로 단정하기 어렵습니다. 실질적인 가격 차별화 또는 구성 혜택을 보강하고 타겟을 변경해 1회 재TEST한 뒤 가격·타겟 요인을 구분해 판단하는 것이 필요합니다."
+            action_evidence = "신규 첫 운영 + 100만원 미만 + 가격 차별화 제한"
+        else:
+            action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요합니다."
+            action_evidence = "신규 첫 운영 100만원 미만"
+    elif summary["운영횟수"] == 0 and amount >= 2_000_000 and season_ctx:
+        action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인했습니다. {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
+        action_evidence = "신규 첫 운영 + 안정 이상 성과 + 시즌 적합성"
     elif "프로모션 의존" in risks:
         action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요합니다."
         action_evidence = "프로모션·일반기간 평균 비교"
+    elif "최근 성과 둔화" in risks and amount < 2_000_000:
+        action_sentence = "직전 회차 대비 유지 여부와 별개로 절대 매출과 과거 평균 대비 성과가 모두 낮은 만큼 단기 반복 편성은 제한하고, 과거 고성과 타겟·가격·시즌 조건을 재확인한 후 재운영하는 것이 적절합니다."
+        action_evidence = "절대 성과 + 과거 평균 동시 부진"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
         action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요합니다."
         action_evidence = "최근 운영 간격 및 성과 하락 기준"
@@ -1422,16 +1484,17 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = f"{current_target or '현재 타겟'}에 우선 재편성해 성과를 한 차례 더 확인하고, 유사 실적이 유지되면 운영 비중 확대를 검토하는 것이 좋습니다."
         action_evidence = "우수 상품 기준"
     elif amount >= 2_000_000:
-        action_sentence = "동일 조건으로 1회 추가 TEST한 뒤 250만원 이상 성과가 유지되는지 확인하고 확대 여부를 판단하는 것이 좋습니다."
-        action_evidence = "안정 상품 및 목표 250만원 기준"
+        if price_eval and price_eval.get("level") == "strong":
+            action_sentence = "가격 경쟁력을 확보한 상태에서 안정 수준의 성과를 기록한 만큼 동일 조건 또는 미발송 SEG로 1회 추가 TEST해 250만원 이상 성과 재현 여부를 확인하는 것이 좋습니다."
+            action_evidence = "안정 상품 + 유의미한 가격 경쟁력"
+        else:
+            action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 250만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
+            action_evidence = "안정 상품 및 목표 250만원 기준"
     elif amount >= 1_000_000:
         action_sentence = "가격·타겟·전시순서 중 한 가지 조건을 조정해 선택적으로 재TEST하고, 200만원 이상 회복 여부를 확인하는 것이 필요합니다."
         action_evidence = "관찰 상품 기준"
-    elif summary["운영횟수"] == 0:
-        action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격 또는 타겟 조건을 보완해 1회 추가 TEST 후 판단하는 것이 필요합니다."
-        action_evidence = "신규 운영 1회"
     else:
-        action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 근거가 확보된 경우에만 재TEST하는 것이 필요합니다."
+        action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요합니다."
         action_evidence = "부진 상품 기준"
 
     # 중요도·중복 제어: 분석 5개 + 다음 운영 제안 1개로 최대 6개를 유지합니다.
