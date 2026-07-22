@@ -1691,7 +1691,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 250만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
             action_evidence = "안정 상품 및 목표 250만원 기준"
     elif amount >= 1_000_000:
-        action_sentence = "가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 200만원 이상 회복 여부 확인 필요"
+        action_sentence = "관찰 수준으로 즉시 반복 편성보다 가격·타겟·전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 시 재편성 확대, 미달 시 우선순위 하향"
         action_evidence = "관찰 상품 기준"
     else:
         action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요합니다."
@@ -5378,11 +5378,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = s.replace("확장검토", "확장 검토")
             s = s.replace("확인검토", "확인 검토")
             s = s.replace("재운영을 우선 검토하고", "재운영 우선 검토,")
-            s = re.sub(r"([가-힣A-Za-z0-9])검토$", r"\ >  검토", s)
+            # 문장 끝 '검토'는 정상 텍스트를 보존한다. 캡처문자/백레퍼런스를 삽입하지 않는다.
+            s = re.sub(r"\s+검토$", " 검토", s)
             s = re.sub(r"운영 확대를 검토할 수 있습니다", "운영 확대 검토", s)
             s = re.sub(r"\s*/\s*당시와 유사한 가격 조건 확보 시", " > 당시와 유사한 가격 조건 확보 시", s)
             s = re.sub(r"\s*,\s*,+", ",", s)
-            s = re.sub(r"\s+([,>.])", r"\ > ", s)
+            # 구두점 앞 공백만 제거. 정상 숫자·브랜드·타겟 문자열을 치환하지 않는다.
+            s = re.sub(r"\s+([,>.])", r"\1", s)
+            # 액션 구분자는 명시적인 ' > '로만 정규화한다.
+            s = re.sub(r"\s*>\s*", " > ", s)
             s = re.sub(r"동일 성별·연령에서 반복 성과가 유지돼 해당 타겟 적합도가 확인된 상품으로,?", "동일 성별·연령 내 반복 고성과 확인,", s)
             s = re.sub(r"\s+", " ", s).strip()
             out.append(s)
@@ -5392,10 +5396,20 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_op = _final_clean(dyn_op)
     dyn_next = _final_clean(dyn_next)
 
-    # 최종 출력 안전장치: 정규식 backreference 문자열이 사용자 화면에 노출되지 않도록 제거
-    dyn_product = [x.replace("\\1", " > ") for x in dyn_product]
-    dyn_op = [x.replace("\\1", " > ") for x in dyn_op]
-    dyn_next = [x.replace("\\1", " > ") for x in dyn_next]
+    # 최종 출력 안전장치: 과거 잘못된 backreference 리터럴만 제거.
+    # 정상 텍스트/숫자/브랜드/타겟은 절대 캡처 치환하지 않는다.
+    def _strip_bad_backrefs(items):
+        cleaned = []
+        for x in items:
+            x = str(x).replace("\\\\1", "").replace("\\1", "")
+            x = x.replace("\\ >", " > ")
+            x = re.sub(r"\s*>\s*", " > ", x)
+            x = re.sub(r"[ \t]+", " ", x).strip()
+            cleaned.append(x)
+        return cleaned
+    dyn_product = _strip_bad_backrefs(dyn_product)
+    dyn_op = _strip_bad_backrefs(dyn_op)
+    dyn_next = _strip_bad_backrefs(dyn_next)
 
     return "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
@@ -5462,8 +5476,18 @@ def _finalize_daily_insight_text(text):
     # 괄호형 내부 근거는 본문과 중복되는 경우가 많아 제거.
     s = re.sub(r"\s*\((?:현재 주문금액 기준|발송일 최저가 및 현재 주문금액 기준|발송일 최저가 기준|발송일 최저가 ±1% 이내|직전 운영 비교|관찰 상품 기준|절대 성과 \+ 과거 평균 동시 부진|신규 첫 운영 \+ 100만원 미만 \+ 가격 차별화 제한|동일 타겟군 내 신규 SEG 핵심 상품 성과|동일 성별·연령 과거 운영 \d+회 / 해당 SEG 첫 운영)\)", "", s)
 
-    # 별도 주의 문구가 본문과 중복되면 제거.
-    s = re.sub(r"(?m)^\s*주의:\s*(가격 차별화 제한|최근 성과 둔화)\s*$", "", s)
+    # 별도 주의 문구는 본문 인사이트와 중복되므로 일일실적 전체에서 제거.
+    s = re.sub(r"(?m)^\s*주의:\s*[^\n]+\s*$", "", s)
+
+    # 다음 운영 제안은 실행형 보고체로 통일.
+    s = s.replace("다음 운영 제안: 가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 200만원 이상 회복 여부 확인 필요",
+                  "다음 운영 제안: 관찰 수준으로 즉시 반복 편성보다 가격·타겟·전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 시 재편성 확대, 미달 시 우선순위 하향")
+    s = s.replace("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외",
+                  "신규 첫 운영으로 상품 자체 부진 단정은 보류하되 현재 타겟 반응은 낮음 > 가격·구성 혜택 보강 및 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외")
+    s = s.replace("절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외",
+                  "절대 매출과 과거 평균 대비 모두 부진해 단기 반복 편성 제외 > 과거 고성과 타겟·가격·시즌 조건 재확인 후 조건 변경 시에만 재TEST")
+    s = s.replace("손질 편의성·중량·구성 혜택이 명확한 상품 중심으로 상품 매력을 강화해 운영하는 것이 적절",
+                  "손질 편의성·중량·구성 혜택을 명확히 보강한 조건으로 운영 필요")
 
     # 중복 공백/구두점
     s = re.sub(r"[ \t]+", " ", s)
