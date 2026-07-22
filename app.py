@@ -4467,6 +4467,172 @@ def _weekly_section_join(title: str, lines: list[str]) -> str:
     clean = [str(x).strip() for x in lines if str(x).strip()]
     return title + ("\n" + "\n".join(clean) if clean else "")
 
+
+def _weekly_detect_operation_type_col(df: pd.DataFrame):
+    """
+    신규/유사신규/재편성 정보를 실제 값 기준으로 탐색.
+    컬럼명이 바뀌어도 문자열 값에 신규/유사신규/재편성이 있으면 자동 인식.
+    """
+    if df is None or df.empty:
+        return None
+    preferred = ["상품구분", "신규구분", "운영구분", "편성구분", "구분", "재편성"]
+    for c in preferred:
+        if c in df.columns:
+            vals = df[c].fillna("").astype(str)
+            if vals.str.contains("신규|유사신규|재편성", regex=True, na=False).any():
+                return c
+    for c in df.columns:
+        try:
+            if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]):
+                vals = df[c].fillna("").astype(str)
+                if vals.str.contains("신규|유사신규|재편성", regex=True, na=False).mean() >= 0.05:
+                    return c
+        except Exception:
+            pass
+    return None
+
+
+def _weekly_normalize_product_key(name: str) -> str:
+    """
+    집계/중복판정용 상품키.
+    표시용 축약과 분리하여 모델명·구성 차이로 다른 상품이 합쳐지는 것을 최소화.
+    """
+    s = str(name or "").strip().lower()
+    s = re.sub(r"^\[m\]\s*", "", s)
+    s = re.sub(r"^★단독\s*", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _weekly_short_display_name(name: str) -> str:
+    """보고서 표시용 상품명 축약. 집계키에는 사용하지 않음."""
+    s = str(name or "").strip()
+    s = re.sub(r"^\[M\]\s*", "", s, flags=re.I)
+    s = re.sub(r"^★단독\s*", "", s)
+    aliases = [
+        ("비에날씬 프로 BNR17", "비에날씬 BNR17"),
+        ("비에날씬 BNR17 다이어트 유산균 체지방감소 캡슐 3개월분", "비에날씬 BNR17"),
+        ("필립스 이지프로 S2883/00 전기면도기", "필립스 이지프로"),
+        ("락앤락 바로한끼 밥용기 LITE 3P 320ML", "락앤락 바로한끼 밥용기"),
+    ]
+    for a, b in aliases:
+        if a in s:
+            return b
+    # 너무 긴 구성은 40자 내외에서만 표시 축약
+    if len(s) > 44:
+        return s[:44].rstrip() + "…"
+    return s
+
+
+def _weekly_cutoff_history(products_all: pd.DataFrame, week_end):
+    """선택 주차 종료일까지의 이력만 반환. 미래 데이터 누수 방지."""
+    if products_all is None or products_all.empty:
+        return products_all.copy() if products_all is not None else pd.DataFrame()
+    out = products_all.copy()
+    dcol = "_date" if "_date" in out.columns else first_col(out, ["발송일", "발송일자", "날짜", "일자"])
+    if dcol and pd.notna(pd.to_datetime(week_end, errors="coerce")):
+        ds = pd.to_datetime(out[dcol], errors="coerce")
+        out = out[ds.notna() & (ds <= pd.to_datetime(week_end))].copy()
+    return out
+
+
+def _weekly_product_history_table(products_all: pd.DataFrame, week_end):
+    """
+    선택 주차 종료일까지 상품별 누적 통계.
+    운영횟수/300만원+/500만원+/평균/최고를 모두 동일 원천 row로 계산.
+    """
+    hist = _weekly_cutoff_history(products_all, week_end)
+    if hist.empty or "상품명" not in hist.columns or "주문금액" not in hist.columns:
+        return pd.DataFrame(columns=["상품키","상품명","운영횟수","300만원이상","500만원이상","평균매출","최고매출"])
+    hist = hist.copy()
+    hist["_상품키"] = hist["상품명"].map(_weekly_normalize_product_key)
+    hist["_amt"] = pd.to_numeric(hist["주문금액"], errors="coerce").fillna(0)
+    rows = []
+    for key, g in hist.groupby("_상품키", dropna=False):
+        rows.append({
+            "상품키": key,
+            "상품명": str(g["상품명"].iloc[-1]),
+            "운영횟수": len(g),
+            "300만원이상": int((g["_amt"] >= 3_000_000).sum()),
+            "500만원이상": int((g["_amt"] >= 5_000_000).sum()),
+            "평균매출": float(g["_amt"].mean()),
+            "최고매출": float(g["_amt"].max()),
+        })
+    return pd.DataFrame(rows)
+
+
+def _weekly_current_core_rows(pw: pd.DataFrame):
+    """핵심성과는 고유상품 합산이 아니라 선택 주차의 개별 편성 row 기준."""
+    if pw is None or pw.empty or "주문금액" not in pw.columns:
+        return pd.DataFrame()
+    amt = pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0)
+    return pw[amt >= 5_000_000].copy()
+
+
+def _weekly_category_name_for_product(pw: pd.DataFrame, product_name: str) -> str:
+    """저성과 상품의 실제 대카테고리를 row에서 직접 조회."""
+    if pw is None or pw.empty:
+        return ""
+    pcol = first_col(pw, ["상품명", "MMS 상품명", "상품"])
+    ccol = first_col(pw, ["대카", "대카테고리", "카테고리"])
+    if not pcol or not ccol:
+        return ""
+    key = _weekly_normalize_product_key(product_name)
+    tmp = pw.copy()
+    tmp["_k"] = tmp[pcol].map(_weekly_normalize_product_key)
+    m = tmp[tmp["_k"].eq(key)]
+    if m.empty:
+        return ""
+    vals = m[ccol].dropna().astype(str)
+    return vals.iloc[-1].strip() if not vals.empty else ""
+
+
+def validate_weekly_analysis_all_weeks(products_all: pd.DataFrame, sends_all: pd.DataFrame):
+    """
+    2025년부터 데이터에 존재하는 전체 주차 자동 회귀검증.
+    신규 주차가 추가돼도 동일 규칙으로 검사 가능.
+    반환: 오류 DataFrame
+    """
+    issues = []
+    if products_all is None or products_all.empty:
+        return pd.DataFrame(issues)
+
+    p = products_all.copy()
+    if "_date" not in p.columns:
+        dcol = first_col(p, ["발송일", "발송일자", "날짜", "일자"])
+        if dcol:
+            p["_date"] = pd.to_datetime(p[dcol], errors="coerce")
+    else:
+        p["_date"] = pd.to_datetime(p["_date"], errors="coerce")
+
+    p = p[p["_date"].dt.year >= 2025].copy()
+    if p.empty:
+        return pd.DataFrame(issues)
+
+    # 연도/주차 조합 전체 순회
+    for (yr, wk), g in p.groupby([p["_date"].dt.year, "주차"], dropna=False):
+        week_end = g["_date"].max()
+        # 500만원 핵심성과 row 직접 검증
+        amts = pd.to_numeric(g["주문금액"], errors="coerce").fillna(0)
+        core_count = int((amts >= 5_000_000).sum())
+        core_sum = float(amts[amts >= 5_000_000].sum())
+        total = float(amts.sum())
+        if core_count < 0 or core_sum > total + 1:
+            issues.append({"연도":yr,"주차":wk,"유형":"핵심성과 집계","내용":"핵심성과 건수/금액 비정상"})
+
+        # 현재 주차 500만원 이상 상품이 누적 500만원이상 0회가 되는 모순 검사
+        hist = _weekly_product_history_table(p, week_end)
+        if not hist.empty:
+            hmap = hist.set_index("상품키")
+            for _, r in g.iterrows():
+                amt = float(pd.to_numeric(pd.Series([r.get("주문금액",0)]), errors="coerce").fillna(0).iloc[0])
+                if amt >= 5_000_000:
+                    k = _weekly_normalize_product_key(r.get("상품명",""))
+                    if k in hmap.index and int(hmap.loc[k, "500만원이상"]) < 1:
+                        issues.append({"연도":yr,"주차":wk,"유형":"누적성과 모순","내용":f"{r.get('상품명','')} 금주 500만원 이상이나 누적 0회"})
+
+    return pd.DataFrame(issues)
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
@@ -4544,23 +4710,35 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         주문금액=("주문금액","sum"),
         운영횟수=("상품명","size")
     ).sort_values("주문금액",ascending=False)
-    core = rank[rank["주문금액"]>=5_000_000]
+
+    # 핵심성과는 "편성 건" 기준으로 직접 계산
+    core_rows = _weekly_current_core_rows(pw)
+
+    # 저성과는 상품 주간합산 기준을 유지
     poor = rank[rank["주문금액"]<1_000_000]
 
     product_points = []
 
-    # 핵심상품 집중도: 실제 비중을 계산한 경우에만
-    if not core.empty and amount > 0:
-        core_sum = float(core["주문금액"].sum())
+    # 핵심상품 집중도: 편성 건 기준 500만원 이상 row 직접 집계
+    if not core_rows.empty and amount > 0:
+        core_amt = pd.to_numeric(core_rows["주문금액"], errors="coerce").fillna(0)
+        core_sum = float(core_amt.sum())
         core_share = core_sum / amount * 100
-        core_names = ", ".join(_short_weekly_product_name(x) for x in core.head(4)["상품명"].astype(str))
+        core_names_raw = (
+            core_rows.assign(_amt=core_amt)
+            .sort_values("_amt", ascending=False)["상품명"]
+            .astype(str).drop_duplicates().head(4).tolist()
+        )
+        core_names = "·".join(_weekly_short_display_name(x) for x in core_names_raw)
         if core_share >= 50:
             product_points.append(
-                f"• 편성 건 기준 500만원 이상 핵심 성과 {len(core)}건이 전체 주문금액의 {core_share:.1f}%를 차지해 {core_names} 등 상위 상품 중심의 매출 집중도가 높았습니다. 차주에는 핵심 상품 재편성과 함께 신규·유사신규 후보를 병행해 매출원을 분산할 필요가 있습니다."
+                f"• 핵심 상품 매출 집중 : 편성 건 기준 500만원 이상 핵심 성과 {len(core_rows)}건이 전체 주문금액의 {core_share:.1f}% 차지, "
+                f"{core_names} 등 상위 상품 중심으로 매출 집중 > 검증 상품 재편성과 신규·유사신규 후보 발굴을 병행해 핵심 상품군 확대 필요"
             )
         else:
             product_points.append(
-                f"• 편성 건 기준 500만원 이상 핵심 성과 {len(core)}건이 전체 주문금액의 {core_share:.1f}%를 차지했으며 {core_names} 등이 주간 매출을 견인했습니다. 핵심 상품은 유지하되 특정 상품 의존 여부를 지속 점검할 필요가 있습니다."
+                f"• 핵심 상품 매출 집중 : 편성 건 기준 500만원 이상 핵심 성과 {len(core_rows)}건이 전체 주문금액의 {core_share:.1f}% 차지, "
+                f"{core_names} 등이 주간 매출 견인 > 핵심 상품은 유지하되 특정 상품 의존도 점검 필요"
             )
 
     # 최고매출 상품: 실제 반복횟수/회당 성과 근거 반영
@@ -5042,6 +5220,29 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     dyn_next = [_normalize_weekly_bullet(x, "차주 운영") for x in _next_raw]
     dyn_next = _dedupe_keep_order([x for x in dyn_next if x])
 
+    # 신규·유사신규 vs 재편성: 데이터가 존재하면 모든 주차에서 항상 생성
+    try:
+        type_col = _weekly_detect_operation_type_col(pw)
+        if type_col and "주문금액" in pw.columns:
+            labels = pw[type_col].fillna("").astype(str).str.strip()
+            new_mask = labels.str.contains("신규", na=False)
+            # '유사신규'도 신규 그룹에 포함
+            re_mask = labels.str.contains("재편성", na=False)
+            new_df = pw[new_mask].copy()
+            re_df = pw[re_mask].copy()
+            if not new_df.empty and not re_df.empty:
+                n_amt = pd.to_numeric(new_df["주문금액"], errors="coerce").fillna(0)
+                r_amt = pd.to_numeric(re_df["주문금액"], errors="coerce").fillna(0)
+                line = (
+                    f"• 신규·유사신규 vs 재편성 : 신규·유사신규 {len(new_df)}건 평균 {compact_money(float(n_amt.mean()))}·300만원 이상 비중 {(n_amt>=3_000_000).mean()*100:.1f}%, "
+                    f"재편성 {len(re_df)}건 평균 {compact_money(float(r_amt.mean()))}·300만원 이상 비중 {(r_amt>=3_000_000).mean()*100:.1f}% > "
+                    "평균매출과 300만원 이상 성공률을 함께 비교해 검증 상품 재편성과 신규 후보 TEST 병행 필요"
+                )
+                if not any("신규·유사신규 vs 재편성" in x for x in dyn_op):
+                    dyn_op.insert(0, line)
+    except Exception:
+        pass
+
     # 편성 운영 시사점 fallback:
     # 기존 동적 엔진 결과가 비어 있을 때도 현재 선택 주차 pw 데이터에서만 생성
     if not dyn_op:
@@ -5118,6 +5319,26 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     dyn_next = _merge_next_duplicates(dyn_next)
 
+    # 동일 실제 상품의 재편성 추천이 여러 경로에서 중복되면 하나로 정리
+    def _dedupe_next_by_product_identity(items):
+        out = []
+        seen = set()
+        for line in items:
+            s = str(line or "").strip()
+            # 시즌 발굴은 상품 재편성과 별도 인사이트이므로 유지
+            if any(k in s for k in ["신규·유사신규 발굴", "상품 교체", "시즌 재운영"]):
+                out.append(s)
+                continue
+            title = s[2:].split(" : ",1)[0].strip() if s.startswith("• ") else s
+            key = _weekly_normalize_product_key(title)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
+
+    dyn_next = _dedupe_next_by_product_identity(dyn_next)
+
     # Final guard: malformed mechanical suffixes must never reach the report.
     def _final_clean(items):
         out = []
@@ -5139,6 +5360,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             s = re.sub(r"운영했습니다", "운영", s)
             s = re.sub(r"병행할 수 있습니다", "병행 가능", s)
             s = re.sub(r"순으로 구성됐습니다", "순으로 매출 구성", s)
+            s = s.replace(",,", ",")
+            s = s.replace("..", ".")
+            s = s.replace(", >", " >")
+            s = s.replace("교체검토", "교체 검토")
+            s = s.replace("확장검토", "확장 검토")
+            s = re.sub(r"운영 확대를 검토할 수 있습니다", "운영 확대 검토", s)
+            s = re.sub(r"동일 성별·연령에서 반복 성과가 유지돼 해당 타겟 적합도가 확인된 상품으로,?", "동일 성별·연령 내 반복 고성과 확인,", s)
+            s = re.sub(r"\s+", " ", s).strip()
             out.append(s)
         return out
 
