@@ -16,9 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.81-SEASON-MATCHING-HARDENING
-
-from __future__ import annotations
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.82-DAILY-0722-MATCHING-FIXnnotations
 
 import io
 import math
@@ -1571,6 +1569,37 @@ def _v4481_match_season_context(row: pd.Series, month: int | None = None) -> dic
             }
 
     return {"matched": False, "key": "", "context": "", "score": 0}
+
+def _v4482_time_key(v):
+    """일일실적 발송시간 join/display 공통 정규화: time/datetime/string/Excel fraction 지원."""
+    import datetime as _dt
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    if isinstance(v, _dt.time):
+        return v.strftime("%H:%M")
+    if isinstance(v, (_dt.datetime, pd.Timestamp)):
+        return v.strftime("%H:%M")
+    if isinstance(v, (int, float)):
+        x=float(v)
+        if 0 <= x < 1:
+            mins=int(round(x*1440)) % 1440
+            return f"{mins//60:02d}:{mins%60:02d}"
+    s=str(v).strip()
+    if s.lower() in {"", "nan", "nat", "none"}:
+        return ""
+    m=re.search(r"(\\d{1,2}):(\\d{2})(?::\\d{2})?", s)
+    if m:
+        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+    try:
+        z=pd.to_datetime(s, errors="coerce")
+        return z.strftime("%H:%M") if pd.notna(z) else ""
+    except Exception:
+        return ""
 
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
