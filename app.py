@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.85-MMS-CAMPAIGN-PARTIAL-MATCH
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.86-SCHEDULE-SLOT-RESET-FIX
 
 import io
 import math
@@ -8163,7 +8163,11 @@ elif menu == "편성 프로그램":
             },
             key="schedule_slots_editor_v2",
         )
-        st.session_state.schedule_slots = edited_slots
+        # V4.4.86:
+        # data_editor는 widget key(schedule_slots_editor_v2) 자체가 편집 상태를 유지한다.
+        # 매 rerun마다 edited_slots를 다시 data 원본(session_state.schedule_slots)에 덮어쓰면
+        # 편집 도중 widget state가 재초기화되어 중간 입력값이 리셋될 수 있으므로 덮어쓰지 않는다.
+        # 자동편성 실행 시에는 현재 editor 반환값인 edited_slots를 그대로 사용한다.
 
         st.markdown('<div class="subsection-title">주력 상품 입력</div>', unsafe_allow_html=True)
         st.caption("알파코드·쇼라코드·상품명·정상가·행사가를 입력하세요. 할인율은 자동 편성 결과에서 자동 계산됩니다.")
