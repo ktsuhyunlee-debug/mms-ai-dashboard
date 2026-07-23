@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.82-DAILY-0722-MATCHING-FIXnnotations
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.83-DAILY-NAN-TIME-MATCH-FIX
 
 import io
 import math
@@ -7016,22 +7016,52 @@ elif menu == "일일실적":
         sday = sday.sort_values(["_sort_time", "소재"] if "소재" in sday.columns else ["_sort_time"])
 
     for idx, send_row in sday.iterrows():
-        time_value = str(send_row.get("시간대", ""))
-        material = str(send_row.get("소재", ""))
-        part_title = f"{time_value} · {material}" if material else time_value
-        st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
+        # V4.4.83: sends의 시간대가 NaN이어도 소재 기준으로 상품을 먼저 연결하고,
+        # 연결된 상품의 시간대를 fallback으로 사용.
+        raw_time_value = send_row.get("시간대", "")
+        time_value = _v4482_time_key(raw_time_value)
+        material = str(send_row.get("소재", "") or "").strip()
+        if material.lower() in {"nan", "nat", "none"}:
+            material = ""
 
         matched = pday.copy()
-        if "시간대" in matched.columns and time_value:
-            matched = matched[matched["시간대"].astype(str) == time_value]
+
+        # 1순위: 소재. 7/22처럼 sends 시간대가 비어 있어도 멤특1/최저가도전1로 정확히 연결 가능.
         if "소재" in matched.columns and material:
-            material_match = matched[matched["소재"].astype(str) == material]
+            material_match = matched[
+                matched["소재"].fillna("").astype(str).str.strip().eq(material)
+            ]
             if not material_match.empty:
                 matched = material_match
 
+        # 2순위: 유효한 시간값이 있을 때만 시간 필터 적용.
+        # str(np.nan) == "nan"은 truthy이므로 기존처럼 그대로 비교하면 전체가 0건이 되는 오류 방지.
+        if "시간대" in matched.columns and time_value:
+            _time_match = matched[
+                matched["시간대"].apply(_v4482_time_key).eq(time_value)
+            ]
+            if not _time_match.empty:
+                matched = _time_match
+
         if matched.empty:
+            display_time = time_value or "-"
+            part_title = f"{display_time} · {material}" if material else display_time
+            st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
             st.info("해당 발송 건과 연결된 상품 실적이 없습니다.")
             continue
+
+        # sends 시간대가 비어 있으면 연결된 상품 데이터의 시간대를 화면/소재키에 사용.
+        if not time_value and "시간대" in matched.columns:
+            _matched_times = [
+                _v4482_time_key(v) for v in matched["시간대"].tolist()
+                if _v4482_time_key(v)
+            ]
+            if _matched_times:
+                time_value = _matched_times[0]
+
+        display_time = time_value or "-"
+        part_title = f"{display_time} · {material}" if material else display_time
+        st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
 
         asset_key = daily_asset_key(selected_date, time_value)
         campaign_name = str(send_row.get("캠페인명", "")).strip()
