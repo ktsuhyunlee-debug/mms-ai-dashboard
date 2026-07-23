@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.83-DAILY-NAN-TIME-MATCH-FIX
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.85-MMS-CAMPAIGN-PARTIAL-MATCH
 
 import io
 import math
@@ -653,24 +653,54 @@ def normalize_send(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_message(df: pd.DataFrame | None) -> pd.DataFrame:
-    """선택적인 '문구' 시트를 정규화합니다."""
+    """문구 시트 정규화.
+    캠페인명 예: 260722_1000_쇼핑라운지_멤특1_크리넥스
+    → 날짜/시간/소재를 파생해 일일실적 매칭에 활용.
+    """
     if df is None or df.empty:
-        return pd.DataFrame(columns=["캠페인명", "MMS문구"])
+        return pd.DataFrame(columns=["캠페인명", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
 
     d = df.copy()
     campaign_col = first_col(d, ["캠페인명", "캠페인", "Campaign", "campaign"])
     message_col = first_col(d, ["MMS문구", "MMS 문구", "발송문구", "문구"])
 
     if campaign_col is None or message_col is None:
-        return pd.DataFrame(columns=["캠페인명", "MMS문구"])
+        return pd.DataFrame(columns=["캠페인명", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
 
-    d = d[[campaign_col, message_col]].copy()
-    d.columns = ["캠페인명", "MMS문구"]
-    d["캠페인명"] = d["캠페인명"].fillna("").astype(str).str.strip()
-    d["MMS문구"] = d["MMS문구"].apply(clean_mms_message if "clean_mms_message" in globals() else lambda x: str(x))
-    d = d[d["캠페인명"].ne("")].drop_duplicates("캠페인명", keep="last")
-    return d.reset_index(drop=True)
+    out = d[[campaign_col, message_col]].copy()
+    out.columns = ["캠페인명", "MMS문구"]
+    out["캠페인명"] = out["캠페인명"].fillna("").astype(str).str.strip()
+    out["MMS문구"] = out["MMS문구"].apply(
+        clean_mms_message if "clean_mms_message" in globals() else lambda x: str(x)
+    )
 
+    def _parse_campaign(name):
+        s = str(name or "").strip()
+        parts = s.split("_")
+        date_key, time_key, material = "", "", ""
+        if parts:
+            m = re.fullmatch(r"(\d{6})", parts[0])
+            if m:
+                raw = m.group(1)
+                date_key = f"20{raw[:2]}-{raw[2:4]}-{raw[4:6]}"
+        if len(parts) >= 2 and re.fullmatch(r"\d{3,4}", parts[1] or ""):
+            tm = parts[1].zfill(4)
+            time_key = f"{tm[:2]}:{tm[2:]}"
+        # 쇼핑라운지 다음 토큰을 소재로 사용
+        if "쇼핑라운지" in parts:
+            i = parts.index("쇼핑라운지")
+            if i + 1 < len(parts):
+                material = parts[i + 1].strip()
+        elif len(parts) >= 4:
+            material = parts[3].strip()
+        return pd.Series([date_key, time_key, material])
+
+    parsed = out["캠페인명"].apply(_parse_campaign)
+    parsed.columns = ["_msg_date", "_msg_time", "_msg_material"]
+    out = pd.concat([out, parsed], axis=1)
+
+    out = out[out["캠페인명"].ne("")].drop_duplicates("캠페인명", keep="last")
+    return out.reset_index(drop=True)
 
 def normalize_lowest(df: pd.DataFrame | None) -> pd.DataFrame:
     """선택적인 '최저가' 시트를 정규화합니다."""
@@ -6281,27 +6311,91 @@ def extract_mms_message(
     send_row: pd.Series,
     messages_df: pd.DataFrame | None = None,
 ) -> str:
-    """문구 시트의 캠페인명을 우선 매칭하고 기존 RAW 컬럼은 보조로 사용합니다."""
-    campaign_name = str(send_row.get("캠페인명", "")).strip()
-
-    if messages_df is not None and not messages_df.empty and campaign_name:
-        matched_message = messages_df[
-            messages_df["캠페인명"].astype(str).str.strip().eq(campaign_name)
-        ]
-        if not matched_message.empty:
-            cleaned = clean_mms_message(matched_message.iloc[-1]["MMS문구"])
-            if cleaned:
-                return cleaned
-
+    """일일실적 MMS 문구 추출.
+    1) 문구 시트의 날짜+소재(+시간) 파생키
+    2) 캠페인명 정확/부분일치
+    3) 연결 상품 로우 MMS문구
+    4) send_row 자체 문구
+    """
     candidate_cols = ["MMS문구", "MMS 문구", "발송문구", "문구"]
+    material = str(send_row.get("소재", "") or "").strip()
+    campaign_name = str(send_row.get("캠페인명", "") or "").strip()
+    send_time = _v4482_time_key(send_row.get("시간대", ""))
 
+    # 연결된 상품의 날짜/시간을 fallback으로 활용
+    date_key = ""
+    if isinstance(matched, pd.DataFrame) and not matched.empty:
+        if "_date" in matched.columns:
+            dt = pd.to_datetime(matched["_date"].iloc[0], errors="coerce")
+            if pd.notna(dt):
+                date_key = dt.strftime("%Y-%m-%d")
+        if not send_time and "시간대" in matched.columns:
+            vals = [_v4482_time_key(v) for v in matched["시간대"].tolist()]
+            vals = [v for v in vals if v]
+            if vals:
+                send_time = vals[0]
+
+    if messages_df is not None and not messages_df.empty:
+        work = messages_df.copy()
+
+        # 1. 날짜 + 소재 기준을 최우선. 7/22처럼 소재 시트 시간대가 NaN이어도 정확 매칭.
+        if "_msg_date" in work.columns and date_key:
+            cur = work[work["_msg_date"].astype(str).eq(date_key)]
+            if not cur.empty:
+                work = cur
+
+        if "_msg_material" in work.columns and material:
+            cur = work[work["_msg_material"].fillna("").astype(str).str.strip().eq(material)]
+            if not cur.empty:
+                work = cur
+
+        # 시간은 유효할 때만 보조 필터
+        if "_msg_time" in work.columns and send_time:
+            cur = work[work["_msg_time"].astype(str).eq(send_time)]
+            if not cur.empty:
+                work = cur
+
+        if not work.empty and "MMS문구" in work.columns:
+            vals = [clean_mms_message(v) for v in work["MMS문구"].tolist()]
+            vals = [v for v in vals if v]
+            if vals:
+                return vals[-1]
+
+        # 2. 캠페인명 정확 일치 또는 소재 포함 부분 일치 fallback
+        work = messages_df.copy()
+        if campaign_name and "캠페인명" in work.columns:
+            exact = work[work["캠페인명"].astype(str).str.strip().eq(campaign_name)]
+            if not exact.empty:
+                cleaned = clean_mms_message(exact.iloc[-1]["MMS문구"])
+                if cleaned:
+                    return cleaned
+
+        if material and "캠페인명" in work.columns:
+            partial = work[
+                work["캠페인명"].astype(str).str.contains(
+                    re.escape(f"_{material}_"), regex=True, na=False
+                )
+            ]
+            if partial.empty:
+                partial = work[
+                    work["캠페인명"].astype(str).str.contains(
+                        re.escape(f"_{material}"), regex=True, na=False
+                    )
+                ]
+            if not partial.empty:
+                cleaned = clean_mms_message(partial.iloc[-1]["MMS문구"])
+                if cleaned:
+                    return cleaned
+
+    # 3. 상품 로우의 MMS문구
     for col in candidate_cols:
-        if col in matched.columns:
+        if isinstance(matched, pd.DataFrame) and col in matched.columns:
             for value in matched[col].tolist():
                 cleaned = clean_mms_message(value)
                 if cleaned:
                     return cleaned
 
+    # 4. 발송 로우 자체 문구
     for col in candidate_cols:
         if col in send_row.index:
             cleaned = clean_mms_message(send_row.get(col))
@@ -6309,7 +6403,6 @@ def extract_mms_message(
                 return cleaned
 
     return ""
-
 
 def format_discount_percent(x):
     if pd.isna(x) or str(x).strip() in ["", "nan", "None"]:
