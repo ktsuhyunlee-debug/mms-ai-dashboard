@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.86-SCHEDULE-SLOT-RESET-FIX
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.87-OPERATION-ISSUE-SHEET
 
 import io
 import math
@@ -730,6 +730,77 @@ def normalize_lowest(df: pd.DataFrame | None) -> pd.DataFrame:
     return d
 
 
+
+def normalize_operation_issues(df: pd.DataFrame | None) -> pd.DataFrame:
+    """구글시트/엑셀 '운영이슈' 탭을 일일실적 인사이트용으로 정규화합니다."""
+    cols = ["이슈유형","발송일","기준알파코드","기준쇼라코드","기존알파코드","기존쇼라코드","이슈내용"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols + ["_date"])
+    d = df.copy()
+    for c in cols:
+        if c not in d.columns:
+            d[c] = ""
+    d = d[cols].copy()
+    d["_date"] = parse_yyyymmdd_date(d["발송일"]).dt.normalize()
+    for c in ["기준알파코드","기준쇼라코드","기존알파코드","기존쇼라코드"]:
+        d[c] = d[c].map(clean_identifier_value)
+    for c in ["이슈유형","이슈내용"]:
+        d[c] = d[c].fillna("").astype(str).str.strip()
+    return d[d["_date"].notna() & d["이슈유형"].ne("")].reset_index(drop=True)
+
+
+def get_sheet_operation_issue(row: pd.Series) -> dict:
+    """발송일 + 기준 알파/쇼라코드로 운영이슈 시트의 이슈를 찾습니다."""
+    issues = st.session_state.get("operation_issues")
+    if issues is None or not isinstance(issues, pd.DataFrame) or issues.empty:
+        return {}
+    dt = pd.to_datetime(row.get("_date"), errors="coerce")
+    if pd.isna(dt):
+        return {}
+    alpha = clean_identifier_value(row.get("알파코드", ""))
+    shora = clean_identifier_value(row.get("쇼라코드", ""))
+    m = issues["_date"].eq(dt.normalize())
+    if alpha:
+        m &= issues["기준알파코드"].eq(alpha)
+    elif shora:
+        m &= issues["기준쇼라코드"].eq(shora)
+    else:
+        return {}
+    if shora:
+        exact = m & issues["기준쇼라코드"].eq(shora)
+        if exact.any():
+            m = exact
+    hit = issues[m]
+    if hit.empty:
+        return {}
+    r = hit.iloc[-1]
+    typ = str(r.get("이슈유형","")).strip()
+    memo = str(r.get("이슈내용","")).strip()
+    old_a = clean_identifier_value(r.get("기존알파코드",""))
+    old_s = clean_identifier_value(r.get("기존쇼라코드",""))
+    if typ == "코드 변경":
+        detail = f"(기존) 알파:{old_a or '-'} 쇼라:{old_s or '-'}"
+        display = f"이슈: 코드 변경 / {detail}"
+    else:
+        display = f"이슈: {typ}" + (f" / {memo}" if memo else "")
+    return {
+        "유형": [typ] if typ else [],
+        "메모": memo,
+        "표시문구": display,
+        "기존알파코드": old_a,
+        "기존쇼라코드": old_s,
+        "source": "운영이슈 시트",
+    }
+
+
+def get_effective_issue(row: pd.Series) -> dict:
+    """시트 이슈를 우선하고, 없으면 기존 세션 저장 이슈를 사용합니다."""
+    sheet_issue = get_sheet_operation_issue(row)
+    if sheet_issue:
+        return sheet_issue
+    return get_saved_issue(row)
+
+
 def normalize_promotion(df: pd.DataFrame | None) -> pd.DataFrame:
     """로우 프로모션 시트의 프로모션명·시작일·종료일을 정규화합니다."""
     if df is None or df.empty:
@@ -784,6 +855,11 @@ def load_excel_bytes(file_bytes: bytes):
     )
     promotion_sheet = "로우 프로모션" if "로우 프로모션" in workbook.sheet_names else ("프로모션" if "프로모션" in workbook.sheet_names else None)
     promotions = pd.read_excel(workbook, sheet_name=promotion_sheet) if promotion_sheet else pd.DataFrame()
+    operation_issues = (
+        pd.read_excel(workbook, sheet_name="운영이슈")
+        if "운영이슈" in workbook.sheet_names
+        else pd.DataFrame()
+    )
     normalized_promotions = normalize_promotion(promotions)
     normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
     return (
@@ -792,6 +868,7 @@ def load_excel_bytes(file_bytes: bytes):
         normalize_lowest(lowest),
         normalize_message(messages),
         normalized_promotions,
+        normalize_operation_issues(operation_issues),
     )
 
 
@@ -875,6 +952,10 @@ def load_google_sheet(url: str):
                 promotions_raw = read_google_csv(sheet_id, "프로모션")
             except Exception:
                 promotions_raw = pd.DataFrame()
+        try:
+            operation_issues_raw = read_google_csv(sheet_id, "운영이슈")
+        except Exception:
+            operation_issues_raw = pd.DataFrame()
         normalized_promotions = normalize_promotion(promotions_raw)
         normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
         return (
@@ -883,6 +964,7 @@ def load_google_sheet(url: str):
             normalize_lowest(lowest),
             normalize_message(messages),
             normalized_promotions,
+            normalize_operation_issues(operation_issues_raw),
         )
     except Exception as exc:
         errors.append(f"상품·소재 CSV 불러오기 실패: {exc}")
@@ -895,12 +977,13 @@ def sync_google_sheet(url: str, force: bool = False):
     if force:
         load_google_sheet.clear()
 
-    products, sends, lowest, messages, promotions = load_google_sheet(url)
+    products, sends, lowest, messages, promotions, operation_issues = load_google_sheet(url)
     st.session_state.products = products
     st.session_state.sends = sends
     st.session_state.lowest = lowest
     st.session_state.messages = messages
     st.session_state.promotions = promotions
+    st.session_state.operation_issues = operation_issues
     st.session_state.source_name = "구글시트 자동연동"
     st.session_state.synced_at = datetime.now()
     st.session_state.google_sync_error = None
@@ -1092,20 +1175,35 @@ def classify_cases(row: pd.Series, history: pd.DataFrame) -> list[str]:
 
 
 def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
-    """현재 행보다 이전의 동일 상품 이력을 코드 우선순위로 찾습니다."""
+    """현재 행보다 이전의 동일 상품 이력을 찾습니다. 코드 변경 이슈가 있으면 기존 코드 이력도 연결합니다."""
     prior = history[history["_date"] < row["_date"]].copy()
+    masks = []
 
     for key in ["쇼라코드", "알파코드"]:
         current = clean_identifier_value(row.get(key, ""))
         if current and key in prior.columns:
-            candidates = prior[prior[key].map(clean_identifier_value).eq(current)]
-            if not candidates.empty:
-                return candidates.sort_values("_date")
+            masks.append(prior[key].map(clean_identifier_value).eq(current))
+
+    issue = get_sheet_operation_issue(row)
+    old_pairs = [
+        ("쇼라코드", clean_identifier_value(issue.get("기존쇼라코드",""))),
+        ("알파코드", clean_identifier_value(issue.get("기존알파코드",""))),
+    ]
+    for key, value in old_pairs:
+        if value and key in prior.columns:
+            masks.append(prior[key].map(clean_identifier_value).eq(value))
+
+    if masks:
+        combined = masks[0].copy()
+        for m in masks[1:]:
+            combined = combined | m
+        candidates = prior[combined]
+        if not candidates.empty:
+            return candidates.sort_values("_date")
 
     name = str(row.get("상품명", "")).strip()
     if name and "상품명" in prior.columns:
         return prior[prior["상품명"].astype(str).str.strip().eq(name)].sort_values("_date")
-
     return prior.iloc[0:0].copy()
 
 
@@ -1698,10 +1796,15 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     if issue_types:
         issue_text = "·".join(sorted(issue_types))
         detail = issue.get("메모", "")
-        sentence = f"금번 운영에서 {issue_text} 이슈가 등록되어 주문금액만으로 정상적인 상품 반응을 판단하기 어렵습니다."
-        if detail:
-            sentence += f" ({detail})"
-        add(120, "운영 이슈", sentence, "운영 이슈 등록", "높음")
+        if issue.get("source") == "운영이슈 시트" and issue_text == "코드 변경":
+            # 화면 최상단의 '이슈: 코드 변경 / (기존)...'에서 명확히 표시하므로
+            # 성과 인사이트에는 중복 설명을 추가하지 않음.
+            pass
+        else:
+            sentence = f"금번 운영에서 {issue_text} 이슈가 등록되어 주문금액만으로 정상적인 상품 반응을 판단하기 어렵습니다."
+            if detail:
+                sentence += f" ({detail})"
+            add(120, "운영 이슈", sentence, "운영 이슈 등록", "높음")
 
     # 신규/유사신규 첫 TEST 인사이트는 일반 등급 문구보다 우선 노출
     if _new_product_insight:
@@ -2132,7 +2235,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
     """상품구분·상품분석·PPT에서 사용할 한 줄형 호환 함수입니다."""
-    report = generate_insight_report(row, history, get_saved_issue(row))
+    report = generate_insight_report(row, history, get_effective_issue(row))
     sentences = [item["sentence"] for item in report["인사이트"]]
     return f"[{report['상품명']}] " + " > ".join(sentences)
 
@@ -6810,12 +6913,13 @@ else:
     uploaded = st.sidebar.file_uploader("📁 MMS 파일 업로드", type=["xlsx", "xlsm"])
     if uploaded is not None:
         try:
-            products, sends, lowest, messages, promotions = load_excel_bytes(uploaded.getvalue())
+            products, sends, lowest, messages, promotions, operation_issues = load_excel_bytes(uploaded.getvalue())
             st.session_state.products = products
             st.session_state.sends = sends
             st.session_state.lowest = lowest
             st.session_state.messages = messages
             st.session_state.promotions = promotions
+            st.session_state.operation_issues = operation_issues
             st.session_state.source_name = uploaded.name
             st.session_state.synced_at = datetime.now()
             st.session_state.google_sync_error = None
@@ -7280,7 +7384,7 @@ elif menu == "일일실적":
         st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트와 최근 발송 이력을 확인할 수 있습니다.")
 
         for _, product_row in matched.iterrows():
-            saved_issue = get_saved_issue(product_row)
+            saved_issue = get_effective_issue(product_row)
             report = generate_insight_report(product_row, products, saved_issue)
             product_name = report["상품명"] or "상품명 없음"
             amount_text = compact_money(float(product_row.get("주문금액", 0) or 0))
@@ -7291,6 +7395,9 @@ elif menu == "일일실적":
                 f"{product_name} · {target_text} · {amount_text} · {grade_text}",
                 expanded=False,
             ):
+                issue_display = str((saved_issue or {}).get("표시문구", "")).strip()
+                if issue_display:
+                    st.markdown(f"**{issue_display}**")
                 rows_html = []
                 for item in report["인사이트"]:
                     evidence = f" <span class='evidence'>({item['evidence']})</span>" if item.get("evidence") else ""
