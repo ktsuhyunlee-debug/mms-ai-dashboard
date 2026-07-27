@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.90-DAILY-REPORT-NOUN-TONE
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.92-DAILY-DATA-INTERPRETATION-ACTION
 
 import io
 import math
@@ -1480,58 +1480,46 @@ def _v4480_daily_evidence_display(sentence: str, evidence: str, category: str = 
     return s
 
 def _v4464_report_tone(text):
-    """일일 상품 인사이트 전체 문장을 보고서형 명사 종결로 통일합니다."""
+    """일일 상품 인사이트를 '데이터 → 해석 → 운영 시사점' 형식으로 통일합니다."""
     if text is None:
         return text
+
     s = str(text).strip()
     if not s:
         return s
 
-    # 문장 전체 의미를 자연스럽게 유지하기 위한 우선 치환
     phrase_rules = [
-        (
-            "직전 운영 대비 주문금액은 증가했으나, 운영 타겟이 {from_target}에서 {to_target}으로 변경되어 동일 조건의 성과 개선으로 단정하기에는 한계가 있습니다. 타겟별 반응 차이를 함께 확인할 필요가 있습니다.",
-            "직전 운영 대비 주문금액 증가 확인. 다만 운영 타겟 변경에 따른 영향 고려 필요. 타겟별 반응 차이 추가 확인 필요.",
-        ),
-        ("동일 조건의 성과 개선으로 단정하기에는 한계가 있습니다.", "동일 조건의 성과 개선 판단에는 제한 존재."),
-        ("직접적인 성과 비교에는 한계가 있습니다.", "직접적인 성과 비교에는 제한 존재."),
-        ("타겟별 반응 차이를 고려한 해석이 필요합니다.", "타겟별 반응 차이를 고려한 해석 필요."),
-        ("타겟별 반응 차이를 함께 확인할 필요가 있습니다.", "타겟별 반응 차이 추가 확인 필요."),
-        ("역대 최고 실적을 경신했습니다.", "역대 최고 실적 경신."),
-        ("재TEST가 필요합니다.", "재TEST 필요."),
-        ("재TEST가 필요", "재TEST 필요"),
-        ("교체 편성이 필요합니다.", "교체 편성 필요."),
-        ("가격 차별화가 제한적입니다.", "가격 차별화 제한."),
-        ("검토하는 것이 좋습니다.", "검토 권장."),
-        ("검토하는 것이 필요합니다.", "검토 필요."),
-        ("검토하는 것이 적절합니다.", "검토 적절."),
-        ("확인하는 것이 필요합니다.", "확인 필요."),
-        ("확인할 필요가 있습니다.", "확인 필요."),
-        ("병행할 수 있습니다.", "병행 가능."),
-        ("진행하지 않는 것이 적절합니다.", "진행 제외."),
-        ("재편성을 진행하지 않는 것이 적절합니다.", "재편성 제외."),
-        ("가능성이 있습니다.", "가능성 존재."),
-        ("영향이 있을 수 있습니다.", "영향 가능성 존재."),
-        ("것으로 보입니다.", "것으로 판단."),
+        ("동일 조건의 성과 개선으로 단정하기에는 한계가 있습니다", "동일 조건의 성과 개선 판단 제한"),
+        ("직접적인 성과 비교에는 한계가 있습니다", "직접적인 성과 비교 제한"),
+        ("타겟별 반응 차이를 고려한 해석이 필요합니다", "타겟별 반응 차이 고려 필요"),
+        ("타겟별 반응 차이를 함께 확인할 필요가 있습니다", "타겟별 반응 차이 추가 확인 필요"),
+        ("역대 최고 실적을 경신했습니다", "역대 최고 실적 경신"),
+        ("재TEST가 필요합니다", "재TEST 필요"),
+        ("교체 편성이 필요합니다", "교체 편성 필요"),
+        ("가격 차별화가 제한적입니다", "가격 차별화 제한"),
+        ("검토하는 것이 좋습니다", "검토 권장"),
+        ("검토하는 것이 필요합니다", "검토 필요"),
+        ("검토하는 것이 적절합니다", "검토 적절"),
+        ("확인하는 것이 필요합니다", "확인 필요"),
+        ("확인할 필요가 있습니다", "확인 필요"),
+        ("병행할 수 있습니다", "병행 가능"),
+        ("재편성을 진행하지 않는 것이 적절합니다", "재편성 제외"),
+        ("진행하지 않는 것이 적절합니다", "진행 제외"),
+        ("가능성이 있습니다", "가능성 존재"),
+        ("영향이 있을 수 있습니다", "영향 가능성 존재"),
+        ("것으로 보입니다", "것으로 판단"),
+        ("확보했음에도", "확보 → 다만"),
+        ("기록했음에도", "기록 → 다만"),
+        ("확인했으나", "확인 → 다만"),
+        ("기록했으나", "기록 → 다만"),
+        ("증가했으나", "증가 확인 → 다만"),
+        ("감소했으나", "감소 확인 → 다만"),
+        ("그쳤습니다", "기록"),
+        ("그쳐", "기록으로"),
     ]
     for before, after in phrase_rules:
         s = s.replace(before, after)
 
-    # 조사까지 포함한 자주 쓰는 서술형 표현을 자연스러운 명사형으로 정리
-    sentence_patterns = [
-        (r"([가-힣A-Za-z0-9%·/()]+)(?:은|는|이|가) 증가했습니다\.", r"\1 증가 확인."),
-        (r"([가-힣A-Za-z0-9%·/()]+)(?:은|는|이|가) 감소했습니다\.", r"\1 감소 확인."),
-        (r"([가-힣A-Za-z0-9%·/()]+)(?:은|는|이|가) 개선되었습니다\.", r"\1 개선 확인."),
-        (r"([가-힣A-Za-z0-9%·/()]+)(?:을|를|이|가) 확인할 필요가 있습니다\.", r"\1 확인 필요."),
-        (r"([가-힣A-Za-z0-9%·/()]+)하는 것이 좋습니다\.", r"\1 권장."),
-        (r"([가-힣A-Za-z0-9%·/()]+)하는 것이 필요합니다\.", r"\1 필요."),
-        (r"([가-힣A-Za-z0-9%·/()]+)하는 것이 적절합니다\.", r"\1 적절."),
-        (r"([가-힣A-Za-z0-9%·/()]+)이 필요합니다\.", r"\1 필요."),
-    ]
-    for pattern, replacement in sentence_patterns:
-        s = re.sub(pattern, replacement, s)
-
-    # 마침표 단위의 모든 문장과 '>'로 구분된 모든 절에 동일한 종결 규칙 적용
     ending_rules = [
         (r"확인되었습니다$", "확인"),
         (r"확인됩니다$", "확인"),
@@ -1568,26 +1556,33 @@ def _v4464_report_tone(text):
         (r"합니다$", ""),
     ]
 
-    # 구분자는 그대로 보존하면서 각 문장/절을 개별 변환
-    chunks = re.split(r"(\s*>\s*|(?<=[.!?])\s+)", s)
-    for i in range(0, len(chunks), 2):
-        raw = chunks[i].strip()
-        if not raw:
-            continue
-        punctuation = "." if raw.endswith(".") else ""
-        seg = raw.rstrip(".!? ")
+    s = s.replace(">", "→")
+    s = re.sub(r"(?<!\d)[.!?]+(?=\s|$)", " → ", s)
+    s = re.sub(r"\s*→\s*", " → ", s)
+
+    segments = [seg.strip(" ,") for seg in s.split("→") if seg.strip(" ,")]
+    normalized = []
+
+    for seg in segments:
+        seg = re.sub(r"\s+", " ", seg).strip()
         for pattern, replacement in ending_rules:
             updated = re.sub(pattern, replacement, seg)
             if updated != seg:
                 seg = updated.strip()
                 break
-        chunks[i] = seg + punctuation
 
-    s = "".join(chunks).strip()
-    s = re.sub(r"\s+([.!?])", r"\1", s)
-    s = re.sub(r"\.{2,}", ".", s)
-    s = re.sub(r"\s{2,}", " ", s)
-    return s
+        seg = re.sub(r"(?<!\d)\.(?!\d)", "", seg)
+        seg = re.sub(r"\s+", " ", seg).strip(" ,")
+        if seg:
+            normalized.append(seg)
+
+    deduped = []
+    for seg in normalized:
+        if not deduped or deduped[-1] != seg:
+            deduped.append(seg)
+
+    return " → ".join(deduped)
+
 
 def _v4464_daily_action(*, order_amount, is_first_run=False,
                         benefit_price=None, compare_lowest=None,
@@ -1605,7 +1600,7 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
     issue_s = str(issue_text or "")
     if any(k in issue_s for k in ["판매중단", "판매 중단", "재고부족", "재고 부족",
                                   "품절", "가격오류", "가격 오류", "링크오류", "노출오류"]):
-        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과 판단 보류 > "
+        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과 판단 보류 → "
                 "정상 판매 조건 확보 후 동일 조건 재검증 필요")
 
     # 신규: 최초 TEST 후 성과 구간별 운영 정책
@@ -2183,7 +2178,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = f"일반기간 확대보다 {current_promo_name if current_promo_name != '-' else '프로모션'} 기간 우선 편성하고, 일반기간 운영은 가격·구성 보강 시 선택적으로 검토하는 것이 필요"
         action_evidence = "프로모션·일반기간 평균 비교"
     elif "최근 성과 둔화" in risks and amount < 2_000_000:
-        action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외"
+        action_sentence = "절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한 → 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST → 동일 조건 반복 편성 제외"
         action_evidence = "절대 성과 + 과거 평균 동시 부진"
     elif "단기 반복 피로도" in risks or (recent_gap is not None and recent_gap <= 21 and amount < 3_000_000):
         action_sentence = "단기 반복 편성은 줄이고 최소 2~3주 미편성 기간 후 기존 우수 타겟 중심으로 재편성하는 것이 필요"
@@ -2214,7 +2209,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             action_sentence = "동일 조건으로 1회 추가 TEST하되 가격·타겟 조건을 함께 점검하고 250만원 이상 성과가 재현되는지 확인한 뒤 확대 여부를 판단하는 것이 좋습니다."
             action_evidence = "안정 상품 및 목표 250만원 기준"
     elif amount >= 1_000_000:
-        action_sentence = "관찰 수준으로 즉시 반복 편성보다 가격·타겟·전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 시 재편성 확대, 미달 시 우선순위 하향"
+        action_sentence = "관찰 수준 확인 → 가격·타겟·전시순서 중 1개 조건 변경 후 1회 재TEST → 200만원 이상 회복 시 재편성 확대 → 미달 시 우선순위 하향"
         action_evidence = "관찰 상품 기준"
     else:
         action_sentence = "현재 조건의 반복 편성은 지양하고, 가격·구성·타겟 중 개선 가능한 조건을 먼저 확보한 뒤 재TEST 여부를 판단하는 것이 필요"
@@ -2308,7 +2303,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
         if _item.get("type") == "action":
             if 1_000_000 <= _amount_final < 2_000_000 and _has_price_advantage_final:
-                _sent = "다음 운영 제안: 가격 경쟁력은 유지하고 타겟 또는 전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 여부 확인 후 추가 편성 판단"
+                _sent = "다음 운영 제안: 가격 경쟁력 유지 → 타겟 또는 전시순서 중 1개 조건 변경 후 1회 재TEST → 200만원 이상 회복 여부 확인 후 추가 편성 판단"
             elif _is_first_run_final and _amount_final < 1_000_000:
                 # 신규·유사신규 100만원 미만은 최종 정책상 재TEST로 되돌리지 않음
                 if "추가 재편성 제외" not in _sent:
