@@ -16,7 +16,10 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.5.0-STEP1-V6-FEATURE-ENGINE
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.5.1-V6-WEEKLY-REPORT-FINAL-STYLE
+# - Weekly insight sentences joined with → and terminal periods removed
+# - New/core product names include actual order amounts
+# - Sourcing conditions use slash-separated display
 
 import io
 import math
@@ -6609,6 +6612,31 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         for x in dyn_next
     ]
 
+    def _v451_product_amount_name(name, amount) -> str:
+        """주간 보고서에서 상품명 뒤에 실제 주문금액을 표시합니다."""
+        label = _weekly_short_display_name(name)
+        value = pd.to_numeric(pd.Series([amount]), errors="coerce").fillna(0).iloc[0]
+        return f"{label}({compact_money(value)})"
+
+    def _v451_arrow_report_style(line: str) -> str:
+        """문장형 인사이트를 근거 → 해석 구조로 통일하고 종결 마침표를 제거합니다.
+
+        금액/비율의 소수점은 건드리지 않고, 문장 경계의 마침표만 변환합니다.
+        """
+        s = str(line or "").strip()
+        if not s:
+            return s
+        # 기존 보고서 연결기호 통일
+        s = re.sub(r"\s*>\s*", " → ", s)
+        # 문장 사이 마침표만 화살표로 연결 (숫자 소수점 제외)
+        s = re.sub(r"(?<=[가-힣A-Za-z)])\.\s+(?=[가-힣A-Za-z0-9])", " → ", s)
+        s = re.sub(r"(?<=[)])\.\s+(?=[가-힣A-Za-z0-9])", " → ", s)
+        # 최종 종결부호 제거
+        s = re.sub(r"[.]$", "", s).strip()
+        # 중복 화살표/공백 정리
+        s = re.sub(r"(?:\s*→\s*){2,}", " → ", s)
+        return s
+
     def _v4470_final_report_tone_guard(line: str) -> str:
         """Final weekly render guard: normalize only sentence endings; preserve facts/numbers/actions."""
         s = str(line or "").strip()
@@ -6634,9 +6662,9 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             parts[i] = seg
         return "".join(parts)
 
-    dyn_product = [_v4470_final_report_tone_guard(x) for x in dyn_product]
-    dyn_op = [_v4470_final_report_tone_guard(x) for x in dyn_op]
-    dyn_next = [_v4470_final_report_tone_guard(x) for x in dyn_next]
+    dyn_product = [_v451_arrow_report_style(_v4470_final_report_tone_guard(x)) for x in dyn_product]
+    dyn_op = [_v451_arrow_report_style(_v4470_final_report_tone_guard(x)) for x in dyn_op]
+    dyn_next = [_v451_arrow_report_style(_v4470_final_report_tone_guard(x)) for x in dyn_next]
 
     dyn_next = sorted(dyn_next, key=_weekly_next_priority)
 
@@ -6677,9 +6705,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             core = _weekly_current_core_rows(pw)
             if not core.empty:
                 core = core.assign(_amt=pd.to_numeric(core["주문금액"], errors="coerce").fillna(0))
+                core_sum = (
+                    core.groupby("상품명", as_index=False)["_amt"].sum()
+                    .sort_values("_amt", ascending=False)
+                    .head(3)
+                )
                 names = [
-                    _weekly_short_display_name(x)
-                    for x in core.sort_values("_amt", ascending=False)["상품명"].astype(str).drop_duplicates().head(3)
+                    _v451_product_amount_name(r["상품명"], r["_amt"])
+                    for _, r in core_sum.iterrows()
                 ]
                 if names and not buckets["핵심상품 재편성 확대"]:
                     buckets["핵심상품 재편성 확대"].append(
@@ -6697,10 +6730,19 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             if labels is not None:
                 new_mask, _ = _weekly_operation_masks(labels)
                 new_core = pw[new_mask & (pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0) >= 5_000_000)]
-                names = [_weekly_short_display_name(x) for x in new_core["상품명"].astype(str).drop_duplicates().head(3)]
+                new_core = new_core.assign(_amt=pd.to_numeric(new_core["주문금액"], errors="coerce").fillna(0))
+                new_core_sum = (
+                    new_core.groupby("상품명", as_index=False)["_amt"].sum()
+                    .sort_values("_amt", ascending=False)
+                    .head(3)
+                )
+                names = [
+                    _v451_product_amount_name(r["상품명"], r["_amt"])
+                    for _, r in new_core_sum.iterrows()
+                ]
                 if names and not buckets["신규 핵심상품 검증 확대"]:
                     buckets["신규 핵심상품 검증 확대"].append(
-                        f"{'·'.join(names)} 우선 재편성"
+                        f"{', '.join(names)} 신규 첫 운영 핵심상품 기준 달성 → 우선 재편성"
                     )
                     buckets["신규 핵심상품 검증 확대"].append(
                         "추가 타겟 및 SEG 확대를 통한 성과 재현 여부 검증"
@@ -6736,12 +6778,12 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             if month in [6, 7, 8]:
                 buckets["시즌 상품 선제 확보"].extend([
                     "냉방가전·우양산 중심 신규·유사신규 상품 확대",
-                    "전년도 동일 시즌 고성과 가격대·기능·구성 조건을 우선 추출해 유사 상품 발굴 및 TEST 추진",
+                    "발굴 조건 : 전년도 동일 시즌 고성과 가격대 / 핵심 기능 / 상품 구성 / 고성과 타겟 / SEG",
                 ])
             else:
                 buckets["시즌 상품 선제 확보"].extend([
                     "선택 주차의 계절 수요와 전년도 동일 시즌 고성과 상품을 기준으로 신규·유사신규 후보 확대",
-                    "가격대·핵심 기능·상품 구성이 유사한 후보를 우선 선별해 TEST 추진",
+                    "발굴 조건 : 고성과 가격대 / 핵심 기능 / 상품 구성 / 고성과 타겟 / 운영 시기",
                 ])
 
         lines = []
@@ -6765,6 +6807,9 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         return lines
 
     numbered_next = _build_numbered_next_week_section(dyn_next, pw, weekly_context_products, _week_end)
+
+    summary = [_v451_arrow_report_style(x) if str(x).lstrip().startswith(":") else re.sub(r"[.]$", "", str(x).strip()) for x in summary]
+    numbered_next = [_v451_arrow_report_style(x) for x in numbered_next]
 
     _final_report = "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
