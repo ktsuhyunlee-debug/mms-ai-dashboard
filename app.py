@@ -3634,6 +3634,10 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
                         target_text = " ".join(bits)
                         target_amt = float(r0["_amt"])
 
+                _best_row = h.sort_values("_amt", ascending=False).iloc[0]
+                _best_date = _best_row.get("_date2", pd.NaT)
+                _best_price = pd.to_numeric(pd.Series([_best_row.get("_price", pd.NA)]), errors="coerce").iloc[0]
+
                 results.append({
                     "scope": scope_name,
                     "group": group_name,
@@ -3648,6 +3652,8 @@ def _seasonal_last_year_evidence(products_all: pd.DataFrame, week_end):
                     "hp5_price": hp5_price,
                     "target": target_text,
                     "target_avg": target_amt,
+                    "best_date": _best_date,
+                    "best_price": float(_best_price) if pd.notna(_best_price) else None,
                 })
 
         if results:
@@ -3882,8 +3888,16 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
         sg = _normalize_season_group(x["product"], x["group"])
         reason = _marketing_calendar_reason(sg, week_end)
         price = x.get("avg_price") or x.get("hp5_price") or x.get("hp3_price")
+        _best_date = pd.to_datetime(x.get("best_date"), errors="coerce")
+        _table_price = x.get("best_price")
+        if _table_price is None:
+            _table_price = price
         sourcing_rows.append({
             "시즌/상품군": sg,
+            "발송일": _best_date.strftime("%Y-%m-%d") if pd.notna(_best_date) else "-",
+            "상품명": _safe_product_label(x["product"]),
+            "멤버십 혜택가": f"{_table_price:,.0f}원" if _table_price is not None else "-",
+            "주문금액": compact_money(x["max_amt"]),
             "과거 고성과 사례": _safe_product_label(x["product"]),
             "성과": f"{x['scope']} {x['count']}회 / 평균 {compact_money(x['avg_amt'])} / 최고 {compact_money(x['max_amt'])}",
             "당시 가격": f"{price:,.0f}원" if price is not None else "-",
@@ -8072,6 +8086,59 @@ elif menu == "주간실적":
             '<div class="insight-box">' + "".join(report_html) + '</div>',
             unsafe_allow_html=True,
         )
+
+        # V4.5.2: 시즌 상품 제안은 문장뿐 아니라 실제 과거 고성과 사례 표로 표시
+        try:
+            _season_week_end = pd.to_datetime(pw["_date"], errors="coerce").max()
+            _, _season_src_df = _md_recommendation_tables(products, pw, _season_week_end)
+
+            if not _season_src_df.empty:
+                _season_groups = [
+                    ("냉방가전", ["냉방가전", "선풍기", "서큘레이터"]),
+                    ("우양산", ["우양산"]),
+                ]
+                _season_table_shown = False
+
+                for _season_title, _season_keywords in _season_groups:
+                    _mask = _season_src_df["시즌/상품군"].astype(str).apply(
+                        lambda x: any(k in x for k in _season_keywords)
+                    )
+                    _season_table = _season_src_df.loc[
+                        _mask,
+                        ["발송일", "상품명", "멤버십 혜택가", "주문금액"]
+                    ].drop_duplicates().head(5)
+
+                    if _season_table.empty:
+                        continue
+
+                    if not _season_table_shown:
+                        st.markdown("#### 전년 동일 시즌 고성과 사례")
+                        _season_table_shown = True
+
+                    st.markdown(f"**• {_season_title}**")
+                    st.dataframe(
+                        _season_table,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    if _season_title == "냉방가전":
+                        st.caption(
+                            "발굴 조건 : 3~5만원대 / 스탠드형 / BLDC / 리모컨 / 공기순환"
+                        )
+                    elif _season_title == "우양산":
+                        st.caption(
+                            "발굴 조건 : 1만원 내외 / 초경량 / 3단 접이식 / 암막 / 자동 개폐"
+                        )
+        except Exception as _season_table_error:
+            try:
+                print(
+                    "[WEEKLY_SEASON_TABLE_ERROR]",
+                    type(_season_table_error).__name__,
+                    str(_season_table_error)[:300],
+                )
+            except Exception:
+                pass
 
         st.markdown("### 상세 데이터 보기")
 
