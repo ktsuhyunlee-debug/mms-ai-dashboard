@@ -32,8 +32,6 @@ from plotly.subplots import make_subplots
 import requests
 import urllib3
 import streamlit as st
-from pptx import Presentation
-from pptx.util import Inches, Pt
 
 
 st.set_page_config(
@@ -794,11 +792,8 @@ def get_sheet_operation_issue(row: pd.Series) -> dict:
 
 
 def get_effective_issue(row: pd.Series) -> dict:
-    """시트 이슈를 우선하고, 없으면 기존 세션 저장 이슈를 사용합니다."""
-    sheet_issue = get_sheet_operation_issue(row)
-    if sheet_issue:
-        return sheet_issue
-    return get_saved_issue(row)
+    """운영이슈 시트에서 해당 발송 건의 이슈를 조회합니다."""
+    return get_sheet_operation_issue(row)
 
 
 def normalize_promotion(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -1391,37 +1386,6 @@ def make_product_history_table(row: pd.Series, history: pd.DataFrame, limit: int
         if col in view.columns:
             view[col] = view[col].map(format_integer_price)
     return view.reset_index(drop=True)
-
-
-def issue_storage_key(row: pd.Series) -> str:
-    date_value = pd.to_datetime(row.get("_date"), errors="coerce")
-    date_text = date_value.strftime("%Y-%m-%d") if pd.notna(date_value) else "no-date"
-    product_key = clean_identifier_value(row.get("쇼라코드", "")) or clean_identifier_value(row.get("알파코드", "")) or str(row.get("상품명", "")).strip()
-    target = target_label(row)
-    return f"{date_text}|{product_key}|{target}"
-
-
-def get_saved_issue(row: pd.Series) -> dict:
-    issues = st.session_state.setdefault("daily_operation_issues", {})
-    return issues.get(issue_storage_key(row), {})
-
-
-def save_operation_issue(row: pd.Series, issue_type: str, memo: str) -> None:
-    issues = st.session_state.setdefault("daily_operation_issues", {})
-    key = issue_storage_key(row)
-    normalized_type = "" if issue_type == "선택 안 함" else issue_type
-    if normalized_type or memo.strip():
-        issues[key] = {
-            "유형": [normalized_type] if normalized_type else [],
-            "메모": memo.strip(),
-            "저장일시": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    elif key in issues:
-        del issues[key]
-
-
-def delete_operation_issue(row: pd.Series) -> None:
-    st.session_state.setdefault("daily_operation_issues", {}).pop(issue_storage_key(row), None)
 
 
 def _daily_marketing_season_context(product_name: str, current_date) -> dict:
@@ -2340,55 +2304,10 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
 
 def make_insight(row: pd.Series, history: pd.DataFrame) -> str:
-    """상품구분·상품분석·PPT에서 사용할 한 줄형 호환 함수입니다."""
+    """상품구분·상품분석에서 사용할 한 줄형 호환 함수입니다."""
     report = generate_insight_report(row, history, get_effective_issue(row))
     sentences = [item["sentence"] for item in report["인사이트"]]
     return f"[{report['상품명']}] " + " > ".join(sentences)
-
-def build_ppt(title: str, lines: list[str], table_df: pd.DataFrame | None = None) -> bytes:
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    title_box = slide.shapes.add_textbox(Inches(.6), Inches(.35), Inches(12), Inches(.65))
-    p = title_box.text_frame.paragraphs[0]
-    p.text = title
-    p.font.size = Pt(26)
-    p.font.bold = True
-
-    body = slide.shapes.add_textbox(Inches(.7), Inches(1.2), Inches(12), Inches(5.7))
-    tf = body.text_frame
-    tf.word_wrap = True
-    for idx, line in enumerate(lines):
-        para = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
-        para.text = line
-        para.font.size = Pt(14)
-        para.space_after = Pt(7)
-
-    if table_df is not None and not table_df.empty:
-        slide2 = prs.slides.add_slide(prs.slide_layouts[6])
-        head = slide2.shapes.add_textbox(Inches(.6), Inches(.3), Inches(12), Inches(.6))
-        hp = head.text_frame.paragraphs[0]
-        hp.text = "상세 실적"
-        hp.font.size = Pt(24)
-        hp.font.bold = True
-
-        view = table_df.head(14).copy()
-        rows, cols = len(view) + 1, len(view.columns)
-        table = slide2.shapes.add_table(
-            rows, cols, Inches(.35), Inches(1), Inches(12.6), Inches(5.9)
-        ).table
-        for j, c in enumerate(view.columns):
-            table.cell(0, j).text = str(c)
-        for i, (_, r) in enumerate(view.iterrows(), start=1):
-            for j, c in enumerate(view.columns):
-                table.cell(i, j).text = str(r[c])
-
-    output = io.BytesIO()
-    prs.save(output)
-    return output.getvalue()
-
 
 def append_total_and_change_rows(raw: pd.DataFrame, mode: str) -> pd.DataFrame:
     """상세 기간 행 아래에 총합계와 최신 기간 증감을 추가합니다."""
@@ -5592,7 +5511,15 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     f"SPM {spm_delta*100:+.1f}%로 구매전환 및 매출 효율 크게 개선"
                 )
         elif amount_delta > 0:
-            summary.append(f": 주문금액 {amount_delta*100:+.1f}% 증가를 기록해 매출 성장 기여 상품과 타겟 중심의 재현 조건 확인 필요")
+            if order_delta < 0 and aov > paov:
+                summary.append(
+                    f": 주문건수 감소에도 객단가 상승으로 주문금액 {amount_delta*100:+.1f}% 증가 → "
+                    "고단가·핵심 상품의 매출 기여 확대"
+                )
+            else:
+                summary.append(
+                    f": 주문금액 {amount_delta*100:+.1f}% 증가 → 매출 성장 기여 상품과 타겟 중심의 재현 조건 확인 필요"
+                )
         elif amount_delta < 0:
             # 실제 확인된 하락 근거만 구체화
             _decline_evidence = []
@@ -5614,6 +5541,28 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                     f": 주문금액 {amount_delta*100:+.1f}%, SPM {spm_delta*100:+.1f}%로 매출 효율이 함께 둔화돼 "
                     "상품·타겟·편성 조건별 하락 요인 점검 필요"
                 )
+        # 고성과 상품·타겟 중심의 매출 형성 여부를 별도 해석
+        try:
+            _summary_core = _weekly_current_core_rows(pw)
+            _summary_core_share = (
+                float(pd.to_numeric(_summary_core["주문금액"], errors="coerce").fillna(0).sum()) / amount * 100
+                if not _summary_core.empty and amount else 0
+            )
+            if _summary_core_share > 0:
+                summary.append(
+                    ": 고성과 상품과 우수 타겟 중심 매출 형성 → "
+                    "상품·가격·타겟·SEG별 재현 조건 축적 필요"
+                )
+            else:
+                summary.append(
+                    ": 상품별 성과 편차를 기준으로 가격·타겟·SEG별 재현 조건 추가 축적 필요"
+                )
+        except Exception:
+            summary.append(
+                ": 고성과 상품과 우수 타겟 중심 매출 형성 여부 확인 → "
+                "상품·가격·타겟·SEG별 재현 조건 축적 필요"
+            )
+
     else:
         summary = [
             f"• 발송횟수 {len(sw):,}회 / 편성건수 {len(pw):,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
@@ -6691,11 +6640,137 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     dyn_next = sorted(dyn_next, key=_weekly_next_priority)
 
+    def _build_numbered_next_week_section(items, pw, products_all, week_end):
+        """차주 운영 제안을 ①~⑤ 실행 축으로 표준화한다.
+        기존 동적 추천을 우선 활용하고, 비어 있는 축만 현재 선택 주차 데이터로 보완한다.
+        """
+        buckets = {
+            "핵심상품 재편성 확대": [],
+            "신규 핵심상품 검증 확대": [],
+            "가격 전략 차별화": [],
+            "저성과 상품 교체": [],
+            "시즌 상품 선제 확보": [],
+        }
+
+        def _body(line):
+            return re.sub(r"^•\s*", "", str(line or "").strip())
+
+        for raw in items:
+            text = _body(raw)
+            if not text:
+                continue
+            if any(k in text for k in ["신규·유사신규 발굴", "시즌", "냉방", "우양산", "장마", "폭염"]):
+                key = "시즌 상품 선제 확보"
+            elif any(k in text for k in ["교체", "반복 부진", "100만원 미만", "저성과"]):
+                key = "저성과 상품 교체"
+            elif any(k in text for k in ["가격", "최저가", "혜택가", "가격대"]):
+                key = "가격 전략 차별화"
+            elif any(k in text for k in ["신규 첫", "신규 핵심", "신규·유사신규", "첫 TEST"]):
+                key = "신규 핵심상품 검증 확대"
+            else:
+                key = "핵심상품 재편성 확대"
+            if text not in buckets[key]:
+                buckets[key].append(text)
+
+        # 현재주차 핵심상품 기반 보완
+        try:
+            core = _weekly_current_core_rows(pw)
+            if not core.empty:
+                core = core.assign(_amt=pd.to_numeric(core["주문금액"], errors="coerce").fillna(0))
+                names = [
+                    _weekly_short_display_name(x)
+                    for x in core.sort_values("_amt", ascending=False)["상품명"].astype(str).drop_duplicates().head(3)
+                ]
+                if names and not buckets["핵심상품 재편성 확대"]:
+                    buckets["핵심상품 재편성 확대"].append(
+                        f"{'·'.join(names)} 중심 재편성 유지"
+                    )
+                    buckets["핵심상품 재편성 확대"].append(
+                        "고성과 타겟·SEG 순환 운영 및 미발송 SEG 우선 확대 TEST"
+                    )
+        except Exception:
+            pass
+
+        # 신규/유사신규 중 핵심 진입 상품 기반 보완
+        try:
+            labels = _weekly_normalize_operation_labels(pw)
+            if labels is not None:
+                new_mask, _ = _weekly_operation_masks(labels)
+                new_core = pw[new_mask & (pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0) >= 5_000_000)]
+                names = [_weekly_short_display_name(x) for x in new_core["상품명"].astype(str).drop_duplicates().head(3)]
+                if names and not buckets["신규 핵심상품 검증 확대"]:
+                    buckets["신규 핵심상품 검증 확대"].append(
+                        f"{'·'.join(names)} 우선 재편성"
+                    )
+                    buckets["신규 핵심상품 검증 확대"].append(
+                        "추가 타겟 및 SEG 확대를 통한 성과 재현 여부 검증"
+                    )
+        except Exception:
+            pass
+
+        # 가격 전략 축은 실제 가격 관련 추천이 없을 때 원칙형 보완
+        if not buckets["가격 전략 차별화"]:
+            buckets["가격 전략 차별화"].extend([
+                "가격 민감형 상품은 발송일 비교 최저가 확보 후 재편성",
+                "가격 영향이 제한적인 상품은 타겟 및 SEG 확대 중심 운영",
+            ])
+
+        # 저성과 상품명 기반 보완
+        try:
+            poor = (pw.groupby("상품명", as_index=False)["주문금액"].sum())
+            poor = poor[poor["주문금액"] < 1_000_000].sort_values("주문금액")
+            names = [_weekly_short_display_name(x) for x in poor["상품명"].astype(str).head(3)]
+            if names and not buckets["저성과 상품 교체"]:
+                buckets["저성과 상품 교체"].append(
+                    f"{'·'.join(names)} 등 반복 저성과 상품은 동일 카테고리 내 검증 상품으로 교체"
+                )
+                buckets["저성과 상품 교체"].append(
+                    "반복 저성과 상품 비중 축소를 통한 편성 효율 개선"
+                )
+        except Exception:
+            pass
+
+        # 시즌 축: 기존 근거 우선, 여름철에는 데이터 기반 탐색 조건을 명시
+        if not buckets["시즌 상품 선제 확보"]:
+            month = _weekly_selected_month(pw, week_end)
+            if month in [6, 7, 8]:
+                buckets["시즌 상품 선제 확보"].extend([
+                    "냉방가전·우양산 중심 신규·유사신규 상품 확대",
+                    "전년도 동일 시즌 고성과 가격대·기능·구성 조건을 우선 추출해 유사 상품 발굴 및 TEST 추진",
+                ])
+            else:
+                buckets["시즌 상품 선제 확보"].extend([
+                    "선택 주차의 계절 수요와 전년도 동일 시즌 고성과 상품을 기준으로 신규·유사신규 후보 확대",
+                    "가격대·핵심 기능·상품 구성이 유사한 후보를 우선 선별해 TEST 추진",
+                ])
+
+        lines = []
+        for idx, (title, values) in enumerate(buckets.items(), start=1):
+            # 의미가 유사한 문장을 제거하고 항목당 최대 2개 실행안 유지
+            clean, seen = [], set()
+            for value in values:
+                v = re.sub(r"^•\s*", "", str(value or "").strip())
+                if not v or v in seen:
+                    continue
+                seen.add(v)
+                clean.append(v)
+                if len(clean) >= 2:
+                    break
+            if not clean:
+                continue
+            lines.append(f"{chr(0x245F + idx)} {title}")
+            lines.extend(f"• {v}" for v in clean)
+            if idx < 5:
+                lines.append("")
+        return lines
+
+    numbered_next = _build_numbered_next_week_section(dyn_next, pw, weekly_context_products, _week_end)
+
     _final_report = "\n\n".join([
         _weekly_section_join("■ 주간 실적 요약", summary),
         _weekly_section_join("■ 상품 운영 시사점", dyn_product),
         _weekly_section_join("■ 편성 운영 시사점", dyn_op),
-        _weekly_section_join("■ 차주 운영 제안", dyn_next),
+        _weekly_section_join("■ 차주 운영 제안", numbered_next),
     ])
 
     # 최종 표시명 적용 이후 실제 사용자에게 보여질 문자열 기준 검증
@@ -7529,44 +7604,6 @@ elif menu == "일일실적":
         )
 
     # 오전/오후 또는 소재 단위로 분리
-    # 운영 이슈는 선택 날짜의 오전·오후 전체 상품을 묶어 상단에서 한 번만 관리
-    st.markdown('<div class="subsection-title">운영 이슈</div>', unsafe_allow_html=True)
-    issue_products = pday.copy()
-    issue_products = issue_products.sort_values([c for c in ["시간대", "전시순서", "상품명"] if c in issue_products.columns])
-    issue_rows = list(issue_products.iterrows())
-    if issue_rows:
-        issue_options = list(range(len(issue_rows)))
-        def issue_option_label(option_idx: int) -> str:
-            _, option_row = issue_rows[option_idx]
-            return str(option_row.get("상품명", "상품명 없음"))
-        issue_cols = st.columns([2.4, 1.2, 3.2, 0.8, 0.8], gap="small")
-        with issue_cols[0]:
-            selected_issue_idx = st.selectbox("상품 선택", issue_options, format_func=issue_option_label, key=f"daily_issue_product_top_{selected_date}")
-        selected_issue_row = issue_rows[selected_issue_idx][1]
-        saved_issue = get_saved_issue(selected_issue_row)
-        saved_type = (saved_issue.get("유형") or ["선택 안 함"])[0]
-        type_options = ["선택 안 함", "판매중단", "가격오류", "기타"]
-        with issue_cols[1]:
-            issue_type = st.selectbox("이슈 유형", type_options, index=type_options.index(saved_type) if saved_type in type_options else 0, key=f"daily_issue_type_{selected_date}_{selected_issue_idx}")
-        with issue_cols[2]:
-            issue_memo = st.text_input("상세 메모", value=saved_issue.get("메모", ""), placeholder="예: 11시 30분 판매중단 발생", key=f"daily_issue_memo_{selected_date}_{selected_issue_idx}")
-        with issue_cols[3]:
-            st.write("")
-            st.write("")
-            if st.button("저장", use_container_width=True, key=f"daily_issue_save_{selected_date}_{selected_issue_idx}"):
-                save_operation_issue(selected_issue_row, issue_type, issue_memo)
-                st.success("저장했습니다.")
-                st.rerun()
-        with issue_cols[4]:
-            st.write("")
-            st.write("")
-            if st.button("삭제", use_container_width=True, key=f"daily_issue_delete_{selected_date}_{selected_issue_idx}"):
-                delete_operation_issue(selected_issue_row)
-                st.success("삭제했습니다.")
-                st.rerun()
-    else:
-        st.caption("등록할 상품이 없습니다.")
-
     if "시간대" in sday.columns:
         sday["_sort_time"] = pd.to_datetime(sday["시간대"].astype(str), errors="coerce")
         sday = sday.sort_values(["_sort_time", "소재"] if "소재" in sday.columns else ["_sort_time"])
@@ -7777,17 +7814,6 @@ elif menu == "일일실적":
                         height=min(210, 38 * (len(report["발송이력"]) + 1)),
                     )
 
-    all_insights = [make_insight(r, products) for _, r in pday.iterrows()]
-    ppt = build_ppt(
-        f"{selected_date} MMS 일일실적",
-        all_insights,
-        pday[[c for c in ["상품명", "주문건수", "주문수량", "주문금액"] if c in pday.columns]],
-    )
-    st.download_button(
-        "📥 PPT 다운로드",
-        ppt,
-        file_name=f"{selected_date}_MMS_일일실적.pptx",
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8187,21 +8213,6 @@ elif menu == "주간실적":
             use_container_width=True, hide_index=True, height=680
         )
 
-    weekly_summary = [
-        f"{selected_year}년 {week} 주문금액 {fmt_num(pw['주문금액'].sum())}원",
-        f"발송횟수 {len(sw)}회 / 상품수 {len(pw)}건",
-        f"핵심 상품 {sum(pw['주문금액'].apply(product_grade) == '핵심 상품')}개",
-    ]
-    ppt = build_ppt(
-        f"{selected_year}년 {week} MMS 주간실적",
-        weekly_summary,
-        rank[[c for c in ["상품명", "발송횟수", "주문건수", "주문수량", "주문금액"] if c in rank.columns]],
-    )
-    st.download_button(
-        "📥 주간실적 PPT 다운로드",
-        ppt,
-        file_name=f"{selected_year}_{week}_MMS_주간실적.pptx",
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
