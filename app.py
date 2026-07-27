@@ -1,4 +1,9 @@
 # =============================================================================
+# V4.4.90 DAILY INSIGHT LOGIC FINAL
+# - Daily insight only: first-run under 1M policy, target recovery cause analysis,
+#   and target-change-aware comparison. Other menus/logic unchanged.
+# =============================================================================
+# =============================================================================
 # V4.4.71 WEEKLY DETAIL ENGINE FINALIZED
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
@@ -16,7 +21,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.87-OPERATION-ISSUE-SHEET
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.89-DAILY-INSIGHT-DECISION-POLICY
 
 import io
 import math
@@ -1561,12 +1566,8 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
         price_limited = abs(low - bp) / low <= 0.01
 
     if is_first_run and amount < 1_000_000:
-        if price_limited:
-            return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려우나 현재 타겟 반응은 낮게 확인"
-                    " > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, "
-                    "재차 100만원 미만 시 재편성 우선순위 제외")
-        return ("신규 첫 운영으로 상품 자체 부진으로 단정하기 어려움"
-                " > 가격·타겟·구성 중 핵심 조건을 조정해 1회 재TEST 후 재편성 여부 판단")
+        return (f"신규 첫 운영에서 {compact_money(amount)}을 기록하며 초기 구매 반응은 제한적으로 확인되었습니다. "
+                "운영 기준상 100만원 미만 상품은 추가 재편성을 진행하지 않는 것이 적절합니다.")
 
     if 1_000_000 <= amount < 2_000_000:
         return ("가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 "
@@ -1601,7 +1602,8 @@ def _build_new_product_grade_insight(amount, is_new=False, is_similar_new=False)
     label = "신규" if is_new else "유사신규"
     amt = compact_money(amount)
     if amount < 1_000_000:
-        return f"{label} 첫 TEST에서 {amt} 기록 > 초기 구매 반응은 제한적이나 단일 결과만으로 상품 경쟁력을 단정하기 어려워 조건 변경 후 추가 검증 필요"
+        return (f"{label} 첫 운영에서 {amt}을 기록하며 초기 구매 반응은 제한적으로 확인되었습니다. "
+                "운영 기준상 100만원 미만 상품은 추가 재편성을 진행하지 않는 것이 적절합니다.")
     if amount < 2_000_000:
         return f"{label} 첫 TEST에서 {amt} 기록 > 관찰 상품 수준으로 초기 판매 가능성 확인, 200만원 이상 확장 가능성 추가 검증 필요"
     if amount < 3_000_000:
@@ -1728,6 +1730,30 @@ def _v4482_time_key(v):
         return z.strftime("%H:%M") if pd.notna(z) else ""
     except Exception:
         return ""
+
+def _v4489_target_aware_recovery(cumulative: pd.DataFrame) -> dict:
+    """타겟 변경으로 발생한 일시적 저성과와 다음 회차 회복을 구분합니다."""
+    if cumulative is None or len(cumulative) < 3:
+        return {}
+    recent = cumulative.sort_values("_date").tail(5).copy()
+    recent["_base_target"] = recent.apply(base_target_label, axis=1)
+    last3 = recent.tail(3).reset_index(drop=True)
+    a, b, c = [float(v or 0) for v in last3["주문금액"].tolist()]
+    ta, tb, tc = last3["_base_target"].astype(str).tolist()
+    if ta and tc and ta == tc and tb != tc and b < min(a, c) * 0.5 and c >= 2_000_000:
+        baseline = recent[recent["_base_target"].eq(tc)]["주문금액"]
+        typical = float(baseline.median()) if not baseline.empty else c
+        typical_million = max(1, int(round(typical / 1_000_000))) * 100
+        dip_date = pd.to_datetime(last3.iloc[1]["_date"], errors="coerce")
+        date_text = f"{dip_date.month}/{dip_date.day}" if pd.notna(dip_date) else "직전 회차"
+        sentence = (
+            f"최근 운영 실적은 일시적인 변동은 있었으나 전반적으로 {typical_million}만원 내외의 성과를 유지하고 있습니다. "
+            f"{date_text} {tb} 타겟에서 성과가 낮았으나 다음날 {tc} 타겟에서 회복되어 "
+            "상품 경쟁력 저하보다는 타겟 영향 가능성을 우선 검토하는 것이 적절합니다."
+        )
+        return {"sentence": sentence, "evidence": "최근 3회 타겟 변경 및 회복 흐름", "recovered": True}
+    return {}
+
 
 def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict | None = None) -> dict:
     """상품별 핵심 인사이트를 생성합니다. 운영 이슈가 있으면 성과 판단보다 우선 반영합니다."""
@@ -1865,28 +1891,28 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적 경신", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
             add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액 성장 확인", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
-        elif past_avg > 0 and amount <= past_avg * 0.7:
+        elif past_avg > 0 and amount <= past_avg * 0.7 and not _target_recovery:
             decline_pct = (1 - amount / past_avg) * 100
             decline_sentence = stable_variant(sentence_key + "|decline", [
-                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인",
-                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화",
-                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한",
-                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요",
+                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인됩니다.",
+                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화되었습니다.",
+                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한적입니다.",
+                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요합니다.",
             ])
             add(88, "성과", decline_sentence, f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
             risks.append("최근 성과 둔화")
 
     recent3 = cumulative.tail(3)
-    if len(recent3) == 3:
+    if len(recent3) == 3 and not _target_recovery:
         vals = recent3["주문금액"].astype(float).tolist()
         growth = vals[2] / vals[0] - 1 if vals[0] > 0 else 0
         if vals[0] < vals[1] < vals[2] and growth >= 0.15:
             add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장 확인", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
         elif vals[0] > vals[1] > vals[2] and vals[0] > 0 and vals[2] <= vals[0] * 0.8:
-            add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
+            add(89, "성장 추세", "최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요합니다.", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
             risks.append("최근 3회 연속 하락")
         elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.25:
-            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
+            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인됩니다.", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
 
     if len(cumulative) >= 5:
         recent5 = cumulative.tail(5)
@@ -1951,6 +1977,11 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             elif promo_avg > 0 and normal_avg >= promo_avg * 0.85:
                 add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
 
+    # V4.4.89: 단순 기울기보다 타겟 변경에 따른 일시적 저성과와 회복을 우선 해석
+    _target_recovery = _v4489_target_aware_recovery(cumulative)
+    if _target_recovery:
+        add(96, "원인 분석", _target_recovery["sentence"], _target_recovery["evidence"], "높음")
+
     # 가격 경쟁력 및 탄력성: 비율보다 고객 체감 차액을 우선 표시하고 성과와 교차 해석
     lowest = float(row.get("발송일 최저가", 0) or 0)
     price_eval = _daily_price_competitiveness(current_price, lowest)
@@ -1998,14 +2029,32 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         if gap <= 21 and last_amount > 0:
             ratio = amount / last_amount
             past_avg_for_fatigue = float(prior["주문금액"].mean()) if not prior.empty else 0
-            if ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
+            last_target = target_label(last)
+            last_base_target = base_target_label(last)
+            current_base_target = base_target_label(row)
+            target_changed = bool(last_target and current_target and last_target != current_target)
+            if target_changed:
+                from_target = last_base_target or last_target
+                to_target = current_base_target or current_target
+                if ratio < 1:
+                    sentence = (
+                        f"직전 운영 대비 주문금액은 감소했으나, 운영 타겟이 {from_target}에서 {to_target}으로 변경되어 "
+                        "직접적인 성과 비교에는 한계가 있습니다. 타겟별 반응 차이를 고려한 해석이 필요합니다."
+                    )
+                else:
+                    sentence = (
+                        f"직전 운영 대비 주문금액은 증가했으나, 운영 타겟이 {from_target}에서 {to_target}으로 변경되어 "
+                        "동일 조건의 성과 개선으로 단정하기에는 한계가 있습니다. 타겟별 반응 차이를 함께 확인할 필요가 있습니다."
+                    )
+                add(94, "타겟 비교", sentence, "직전 운영 타겟 변경", "높음")
+            elif ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
                 if ratio >= 1.2:
                     _fatigue_msg = f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전 대비 {(ratio-1)*100:.0f}% 증가해 단기 반복 편성에서도 성과 확대 확인"
                 else:
                     _fatigue_msg = f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전의 {ratio*100:.0f}% 수준으로 유지돼 단기 반복에 따른 추가 하락 제한"
-                add(80, "운영 피로도", _fatigue_msg, "직전 운영 비교", "보통")
+                add(80, "운영 피로도", _fatigue_msg, "동일 타겟 직전 운영 비교", "보통")
             elif ratio < 0.75:
-                add(83, "운영 위험", f"직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요", "직전 운영 비교", "보통")
+                add(83, "운영 위험", f"동일 타겟 직전 운영 후 {gap}일 만의 재편성에서 주문금액이 직전 대비 {(1-ratio)*100:.0f}% 감소해 미편성 기간 부여가 필요", "동일 타겟 직전 운영 비교", "보통")
                 risks.append("단기 반복 피로도")
         elif gap >= 45 and amount >= 3_000_000:
             add(81, "운영 희소성", f"직전 운영 후 {gap}일 만의 재편성에서 {compact_money(amount)}을 기록해 장기간 미운영 후에도 우수한 반응이 확인", "재편성 간격 기준", "보통")
@@ -2022,9 +2071,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         trend = linear_trend_rate(cumulative.tail(8)["주문금액"])
         if trend >= 0.08:
             add(79, "생애주기", "중기 추세 상승 확인, 운영 비중 확대 검토", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
-        elif trend <= -0.08:
-            add(77, "생애주기", "중기 추세가 하락하는 성숙·하락 전환 구간으로 운영 조건 재설계가 필요", f"최근 최대 8회 추세율 {trend:.2f}", "보통")
-            risks.append("생애주기 하락 전환")
+        elif trend <= -0.08 and not _target_recovery:
+            _same_base = cumulative[cumulative.apply(base_target_label, axis=1).eq(base_target_label(row))].tail(5)
+            _same_target_trend = linear_trend_rate(_same_base["주문금액"]) if len(_same_base) >= 3 else 0.0
+            if len(_same_base) >= 3 and _same_target_trend <= -0.08:
+                add(77, "생애주기", "동일 타겟 기준 최근 성과가 완만하게 낮아져 가격·구성·운영 간격 변화 여부를 함께 점검할 필요가 있습니다.", "동일 타겟 최근 최대 5회 기준", "보통")
+                risks.append("생애주기 하락 전환")
     if len(cumulative) >= 5 and avg_all >= 5_000_000:
         add(91, "상품 포지션", f"누적 {len(cumulative)}회 평균 {compact_money(avg_all)}을 기록한 반복 검증형 대표 매출 견인 상품", f"누적 {len(cumulative)}회", "높음")
     elif summary["운영횟수"] == 0 and amount >= 3_000_000:
@@ -2059,12 +2111,9 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         action_sentence = "현재 가격 조건에서는 재편성 우선순위를 낮추고, 발송일 비교 최저가 대비 유의미한 가격 경쟁력 또는 구성 혜택을 확보한 뒤 재TEST하는 것이 필요"
         action_evidence = "발송일 최저가 대비 1% 초과 가격 열위"
     elif summary["운영횟수"] == 0 and amount < 1_000_000:
-        if price_eval and price_eval.get("level") in {"same","moderate"}:
-            action_sentence = "신규 첫 TEST에서 초기 구매 반응이 낮게 확인돼 1회 결과만으로 상품 자체 부진을 단정하기보다 가격·구성·타겟 조건 점검 필요 > 가격·구성 혜택 보강 후 타겟 변경 1회 재TEST, 재차 100만원 미만 시 재편성 우선순위 제외"
-            action_evidence = "신규 첫 운영 + 100만원 미만 + 가격 차별화 제한"
-        else:
-            action_sentence = "첫 운영만으로 상품 적합도를 단정하기 어려우므로 가격·구성·타겟 중 최소 한 가지 조건을 보완해 1회 재TEST 후 판단하는 것이 필요"
-            action_evidence = "신규 첫 운영 100만원 미만"
+        action_sentence = (f"신규 첫 운영에서 {compact_money(amount)}을 기록하며 초기 구매 반응은 제한적으로 확인되었습니다. "
+                           "운영 기준상 100만원 미만 상품은 추가 재편성을 진행하지 않는 것이 적절합니다.")
+        action_evidence = "신규 첫 운영 + 100만원 미만 운영 기준"
     elif summary["운영횟수"] == 0 and amount >= 2_000_000 and season_ctx:
         action_sentence = f"신규 첫 운영에서 {compact_money(amount)}을 기록해 기본 판매 가능성을 확인 {season_ctx['context']}인 만큼 동일 타겟 또는 미발송 SEG로 1회 추가 TEST해 시즌 내 성과 확장 여부를 확인하는 것이 좋습니다."
         action_evidence = "신규 첫 운영 + 안정 이상 성과 + 시즌 적합성"
