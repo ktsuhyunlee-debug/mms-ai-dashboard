@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.4.92-DAILY-DATA-INTERPRETATION-ACTION
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.5.0-STEP1-V6-FEATURE-ENGINE
 
 import io
 import math
@@ -5253,6 +5253,242 @@ def _safe_weekly_quality_check(report: str) -> list[str]:
     return list(dict.fromkeys(issues))
 
 
+
+# =============================================================================
+# V4.5.0 STEP 1 — V6 FEATURE ENGINE / PRIOR-YEAR LEARNING / ACTION PLAN
+# - 기존 화면·집계·일일/주간 출력 경로 유지
+# - 선택 주차 종료일 이후 데이터 차단
+# - 전년도 동일 시즌은 선택 주차 기준 ±21일 범위만 학습
+# - 근거가 부족한 경우 전년도 인사이트를 생성하지 않음
+# =============================================================================
+
+_V6_ATTRIBUTE_KEYWORDS = {
+    "냉방가전": ["BLDC", "스탠드", "리모컨", "저소음", "써큘", "서큘", "날개없는"],
+    "우양산": ["초경량", "암막", "자동개폐", "3단", "5단", "UV", "자외선"],
+    "패션": ["냉감", "메쉬", "흡한속건", "홈웨어", "반팔", "기능성"],
+    "식품": ["간편식", "냉동", "손질", "대용량", "개별포장", "국내산"],
+    "생활": ["대용량", "리필", "구성", "증정", "무향", "항균"],
+}
+
+
+def _v6_product_key(name: str) -> str:
+    """표시명과 무관한 보수적 상품 매칭 키."""
+    s = str(name or "").lower()
+    s = re.sub(r"\[[^\]]*\]", " ", s)
+    s = re.sub(r"\([^)]*\)", " ", s)
+    s = re.sub(r"[^0-9a-z가-힣]+", "", s)
+    return s
+
+
+def _v6_price_band(price: float) -> str:
+    p = _v4464_num(price)
+    if p <= 0:
+        return "정보 없음"
+    if p < 10_000:
+        return "1만원 미만"
+    if p < 30_000:
+        return "1~3만원대"
+    if p < 50_000:
+        return "3~5만원대"
+    if p < 100_000:
+        return "5~10만원대"
+    return "10만원 이상"
+
+
+def _v6_extract_attributes(product_name: str) -> list[str]:
+    name = str(product_name or "")
+    found = []
+    for keywords in _V6_ATTRIBUTE_KEYWORDS.values():
+        for keyword in keywords:
+            if keyword.lower() in name.lower() and keyword not in found:
+                found.append(keyword)
+    return found[:4]
+
+
+def _v6_same_season_prior_year(products_all: pd.DataFrame, week_end, window_days: int = 21) -> pd.DataFrame:
+    """선택 주차와 전년도 동일 시즌(±window_days) 데이터."""
+    if products_all is None or products_all.empty or pd.isna(week_end) or "_date" not in products_all.columns:
+        return pd.DataFrame()
+    dates = pd.to_datetime(products_all["_date"], errors="coerce")
+    center = pd.Timestamp(week_end) - pd.DateOffset(years=1)
+    start = center - pd.Timedelta(days=window_days)
+    end = center + pd.Timedelta(days=window_days)
+    return products_all[dates.notna() & dates.between(start, end, inclusive="both")].copy()
+
+
+def _v6_target_text(row: pd.Series) -> str:
+    vals = []
+    for col in ["성별", "연령"]:
+        value = clean_identifier_value(row.get(col, ""))
+        if value:
+            vals.append(value)
+    return "".join(vals)
+
+
+def build_v6_feature_engine(pw: pd.DataFrame, products_all: pd.DataFrame, week_end) -> pd.DataFrame:
+    """이번 주 + 올해 누적 + 전년도 동일 시즌을 상품 단위 Feature로 변환."""
+    if pw is None or pw.empty or "상품명" not in pw.columns:
+        return pd.DataFrame()
+
+    hist = _weekly_cutoff_history(products_all, week_end)
+    prior_year = _v6_same_season_prior_year(hist, week_end)
+    sale_col = first_col(hist, ["멤버십혜택가", "멤버십 혜택가", "행사가", "판매가", "혜택가"])
+
+    rows = []
+    for product_name, current in pw.groupby("상품명", dropna=False):
+        name = str(product_name).strip()
+        key = _v6_product_key(name)
+        if not key:
+            continue
+        amount_values = pd.to_numeric(current["주문금액"], errors="coerce").fillna(0)
+        current_amount = float(amount_values.sum())
+        current_max = float(amount_values.max()) if len(amount_values) else 0
+
+        all_keys = hist["상품명"].astype(str).map(_v6_product_key)
+        cumulative = hist[all_keys.eq(key)].copy()
+        cumulative_amount = pd.to_numeric(cumulative.get("주문금액", 0), errors="coerce").fillna(0)
+
+        py = pd.DataFrame()
+        if not prior_year.empty and "상품명" in prior_year.columns:
+            py_keys = prior_year["상품명"].astype(str).map(_v6_product_key)
+            py = prior_year[py_keys.eq(key)].copy()
+        py_amount = pd.to_numeric(py.get("주문금액", pd.Series(dtype=float)), errors="coerce").fillna(0)
+
+        current_price = 0.0
+        cumulative_price_min = 0.0
+        if sale_col and sale_col in current.columns:
+            cp = pd.to_numeric(current[sale_col], errors="coerce").dropna()
+            current_price = float(cp.iloc[-1]) if not cp.empty else 0.0
+        if sale_col and sale_col in cumulative.columns:
+            hp = pd.to_numeric(cumulative[sale_col], errors="coerce").dropna()
+            cumulative_price_min = float(hp.min()) if not hp.empty else 0.0
+
+        current_target = ""
+        if not current.empty:
+            target_amount = current.assign(_amt=amount_values).sort_values("_amt", ascending=False)
+            current_target = _v6_target_text(target_amount.iloc[0])
+
+        yoy_rate = None
+        if not py_amount.empty and float(py_amount.sum()) > 0:
+            yoy_rate = (current_amount - float(py_amount.sum())) / abs(float(py_amount.sum()))
+
+        repeat_count = int(len(cumulative))
+        cv = coefficient_of_variation(cumulative_amount) if repeat_count >= 2 else 0.0
+        if current_max >= 5_000_000:
+            grade = "핵심 상품"
+        elif current_max >= 3_000_000:
+            grade = "우수 상품"
+        elif current_max >= 2_000_000:
+            grade = "안정 상품"
+        elif current_max >= 1_000_000:
+            grade = "관찰 상품"
+        else:
+            grade = "부진 상품"
+
+        if repeat_count >= 5 and cv <= 0.45 and float((cumulative_amount >= 3_000_000).mean()) >= 0.6:
+            lifecycle = "핵심"
+        elif repeat_count >= 3 and current_max >= 3_000_000:
+            lifecycle = "성장"
+        elif repeat_count >= 2:
+            lifecycle = "검증"
+        else:
+            lifecycle = "신규"
+
+        rows.append({
+            "상품명": name,
+            "상품키": key,
+            "금주주문금액": current_amount,
+            "금주최고매출": current_max,
+            "등급": grade,
+            "누적운영횟수": repeat_count,
+            "누적평균매출": float(cumulative_amount.mean()) if repeat_count else 0.0,
+            "누적최고매출": float(cumulative_amount.max()) if repeat_count else 0.0,
+            "300만원이상횟수": int((cumulative_amount >= 3_000_000).sum()),
+            "500만원이상횟수": int((cumulative_amount >= 5_000_000).sum()),
+            "운영안정성": "높음" if repeat_count >= 3 and cv <= 0.45 else ("보통" if repeat_count >= 2 else "참고"),
+            "생애주기": lifecycle,
+            "현재혜택가": current_price,
+            "가격대": _v6_price_band(current_price),
+            "누적최저혜택가": cumulative_price_min,
+            "최적타겟": current_target,
+            "주요속성": _v6_extract_attributes(name),
+            "전년동일시즌운영횟수": int(len(py)),
+            "전년동일시즌매출": float(py_amount.sum()) if len(py_amount) else 0.0,
+            "전년동일시즌평균매출": float(py_amount.mean()) if len(py_amount) else 0.0,
+            "전년대비증감률": yoy_rate,
+        })
+
+    return pd.DataFrame(rows).sort_values("금주주문금액", ascending=False).reset_index(drop=True)
+
+
+def build_v6_prior_year_insights(features: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """전년도 근거가 실제 존재하는 상품만 상품/편성 인사이트 생성."""
+    product_lines, operation_lines = [], []
+    if features is None or features.empty:
+        return product_lines, operation_lines
+
+    comparable = features[features["전년동일시즌운영횟수"] > 0].copy()
+    if comparable.empty:
+        return product_lines, operation_lines
+
+    comparable = comparable.sort_values("금주주문금액", ascending=False)
+    for _, row in comparable.head(2).iterrows():
+        py = float(row["전년동일시즌매출"])
+        cur = float(row["금주주문금액"])
+        rate = row["전년대비증감률"]
+        direction = f"전년 동일 시즌 대비 {rate*100:+.1f}%" if pd.notna(rate) else "전년 동일 시즌과 비교 가능"
+        attrs = "·".join(row["주요속성"]) if row["주요속성"] else "상품 구성"
+        product_lines.append(
+            f"• {_weekly_short_display_name(row['상품명'])} 전년 동일 시즌 {compact_money(py)} 대비 금주 {compact_money(cur)}로 {direction} 기록 > "
+            f"{row['가격대']}·{attrs} 조건의 반복 성과를 기준으로 시즌 종료 전 재편성 우선순위 판단"
+        )
+
+    bands = comparable.groupby("가격대", dropna=False).agg(
+        상품수=("상품명", "nunique"),
+        금주매출=("금주주문금액", "sum"),
+        전년매출=("전년동일시즌매출", "sum"),
+    ).reset_index()
+    bands = bands[(bands["가격대"] != "정보 없음") & (bands["상품수"] >= 1)]
+    if not bands.empty:
+        top = bands.sort_values("금주매출", ascending=False).iloc[0]
+        operation_lines.append(
+            f"• 전년도 동일 시즌 비교 상품은 {top['가격대']}에서 금주 {compact_money(top['금주매출'])}, 전년 {compact_money(top['전년매출'])} 기록 > "
+            "시즌 상품 소싱 시 실제 반복 성과가 확인된 가격대를 우선 적용하고 상품별 기능·타겟 조건을 함께 검증"
+        )
+    return product_lines, operation_lines
+
+
+def build_v6_action_plan(features: pd.DataFrame) -> list[str]:
+    """Feature 근거 기반 차주 실행 항목. 기존 추천을 대체하지 않고 보강."""
+    actions = []
+    if features is None or features.empty:
+        return actions
+
+    core = features[(features["금주최고매출"] >= 5_000_000) & (features["운영안정성"].isin(["높음", "보통"]))]
+    if not core.empty:
+        names = "·".join(_weekly_short_display_name(x) for x in core.head(3)["상품명"])
+        actions.append(f"• 핵심상품 재편성 확대 : {names} 중심 우선 편성 유지 > 고성과 타겟 재현 후 미발송 SEG 순차 확대 TEST")
+
+    new_core = features[(features["생애주기"].isin(["신규", "검증"])) & (features["금주최고매출"] >= 3_000_000)]
+    if not new_core.empty:
+        names = "·".join(_weekly_short_display_name(x) for x in new_core.head(3)["상품명"])
+        actions.append(f"• 신규 핵심상품 검증 확대 : {names} 추가 검증 > 동일 타겟 1회 재현 후 유사 타겟·SEG 확대")
+
+    poor = features[(features["금주최고매출"] < 1_000_000) & (features["누적운영횟수"] >= 2)]
+    if not poor.empty:
+        names = "·".join(_weekly_short_display_name(x) for x in poor.head(3)["상품명"])
+        actions.append(f"• 저성과 상품 교체 : {names} 반복 저성과 상품 우선순위 하향 > 동일 카테고리 과거 300만원 이상 검증 상품으로 교체")
+
+    comparable = features[features["전년동일시즌운영횟수"] > 0]
+    if not comparable.empty:
+        best = comparable.sort_values("금주주문금액", ascending=False).iloc[0]
+        attrs = "·".join(best["주요속성"]) if best["주요속성"] else "주요 구성"
+        actions.append(
+            f"• 시즌 상품 선제 확보 : 전년 동일 시즌 반복 성과 상품의 {best['가격대']}·{attrs} 조건 활용 > "
+            "동일 가격대와 핵심 기능을 갖춘 신규·유사신규 상품 우선 발굴 및 TEST"
+        )
+    return actions
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     """선택 주차 기준 통합 주간 인사이트 엔진.
     2025년 최초 데이터부터 향후 누적되는 모든 주차에 동일 규칙을 적용하며,
@@ -5978,6 +6214,23 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
             seen.add(x)
             out.append(x)
         return out
+
+    # V4.5.0 STEP 1: V6 Feature Engine + 전년도 동일 시즌 학습 + Action Plan 보강
+    try:
+        _v6_features = build_v6_feature_engine(pw, weekly_context_products, _week_end)
+        _v6_product_lines, _v6_operation_lines = build_v6_prior_year_insights(_v6_features)
+        _v6_actions = build_v6_action_plan(_v6_features)
+        product_points.extend(_v6_product_lines)
+        op.extend(_v6_operation_lines)
+        nxt.extend(_v6_actions)
+        st.session_state["v6_weekly_features"] = _v6_features
+    except Exception as _v6_exc:
+        # V6 보강 로직 오류가 기존 주간 보고서 출력을 차단하지 않도록 격리
+        st.session_state["v6_weekly_features"] = pd.DataFrame()
+        try:
+            print("[V6_FEATURE_ENGINE]", year, week, _v6_exc)
+        except Exception:
+            pass
 
     # 기존 엔진이 현재 선택 주차로 계산한 결과만 사용
     _product_raw = [p for x in product_points for p in _split_embedded_bullets(x)]
