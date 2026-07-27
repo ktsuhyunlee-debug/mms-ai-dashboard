@@ -1480,33 +1480,31 @@ def _v4480_daily_evidence_display(sentence: str, evidence: str, category: str = 
     return s
 
 def _v4464_report_tone(text):
-    """Conservative Korean report-tone normalizer for generated insight text."""
+    """일일 상품 인사이트 문장을 간결한 보고서형 종결로 정리합니다."""
     if text is None:
         return text
     s = str(text).strip()
     if not s:
         return s
 
-    # Phrase-level fixes first so output does not become awkward intermediate Korean.
     phrase_rules = [
         ("역대 최고 실적을 경신했습니다.", "역대 최고 실적 경신"),
         ("재TEST가 필요합니다.", "재TEST 필요"),
         ("재TEST가 필요", "재TEST 필요"),
         ("교체 편성이 필요합니다.", "교체 편성 필요"),
-        ("교체 편성이 필요", "교체 편성 필요"),
         ("가격 차별화가 제한적입니다.", "가격 차별화 제한"),
-        ("가격 차별화가 제한적", "가격 차별화 제한"),
         ("검토하는 것이 좋습니다.", "검토 필요"),
         ("검토하는 것이 필요합니다.", "검토 필요"),
         ("검토하는 것이 적절합니다.", "검토 필요"),
         ("확인하는 것이 필요합니다.", "확인 필요"),
         ("확인할 필요가 있습니다.", "확인 필요"),
         ("병행할 수 있습니다.", "병행 가능"),
+        ("진행하지 않는 것이 적절합니다.", "진행 제외"),
+        ("재편성을 진행하지 않는 것이 적절합니다.", "재편성 제외"),
     ]
-    for a, b in phrase_rules:
-        s = s.replace(a, b)
+    for before, after in phrase_rules:
+        s = s.replace(before, after)
 
-    # Segment-level endings.
     ending_rules = [
         (r"확인됩니다\.?$", "확인"),
         (r"확인되었습니다\.?$", "확인"),
@@ -1529,14 +1527,15 @@ def _v4464_report_tone(text):
         (r"판단됩니다\.?$", "판단"),
         (r"예상됩니다\.?$", "예상"),
         (r"좋습니다\.?$", "권장"),
+        (r"바랍니다\.?$", "권장"),
     ]
     parts = re.split(r"(\s*>\s*)", s)
     for i in range(0, len(parts), 2):
         seg = parts[i].strip()
-        for pat, repl in ending_rules:
-            new_seg = re.sub(pat, repl, seg)
-            if new_seg != seg:
-                seg = new_seg
+        for pattern, replacement in ending_rules:
+            updated = re.sub(pattern, replacement, seg)
+            if updated != seg:
+                seg = updated
                 break
         parts[i] = seg
     return "".join(parts).strip()
@@ -1544,41 +1543,60 @@ def _v4464_report_tone(text):
 def _v4464_daily_action(*, order_amount, is_first_run=False,
                         benefit_price=None, compare_lowest=None,
                         historical_avg=None, run_count=0,
-                        issue_text=None):
-    """Daily action precedence agreed in the working standard."""
+                        issue_text=None, product_type=""):
+    """상품구분과 주문금액을 기준으로 일일실적의 최종 운영 제안을 결정합니다."""
     amount = _v4464_num(order_amount)
-    bp = _v4464_num(benefit_price, None)
-    low = _v4464_num(compare_lowest, None)
+    avg = _v4464_num(historical_avg)
+    runs = int(_v4464_num(run_count))
+    ptype = str(product_type or "").replace(" ", "")
+    is_similar_new = "유사신규" in ptype
+    is_new = ("신규" in ptype and not is_similar_new) or (not ptype and is_first_run)
+    is_replanned = "재편성" in ptype or (not is_new and not is_similar_new)
 
     issue_s = str(issue_text or "")
     if any(k in issue_s for k in ["판매중단", "판매 중단", "재고부족", "재고 부족",
                                   "품절", "가격오류", "가격 오류", "링크오류", "노출오류"]):
-        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과로 단정하지 않고 "
-                "정상 판매 조건 확보 후 재검증 필요")
+        return ("운영 이슈 영향이 포함된 회차로 상품 자체 성과 판단 보류 > "
+                "정상 판매 조건 확보 후 동일 조건 재검증 필요")
 
-    price_limited = False
-    if bp is not None and low is not None and low > 0:
-        price_limited = abs(low - bp) / low <= 0.01
+    # 신규: 최초 TEST 후 성과 구간별 운영 정책
+    if is_new:
+        if amount < 1_000_000:
+            return "신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
+        if amount < 2_000_000:
+            return "신규 관찰상품으로 조건 1개 조정 후 1회 재시도, 최대 2회 내 200만원 이상 회복 여부 확인"
+        if amount < 3_000_000:
+            return "신규 안정상품으로 재편성 검토, 총 2~3회 이내 성과 재현성 확인"
+        if amount < 5_000_000:
+            return "신규 우수상품 등록 후 동일 타겟 재검증 및 미발송 SEG 확대 검토"
+        return "신규 핵심 운영상품 등록 후 우선 재편성 및 타겟·SEG 확대 검토"
 
-    if is_first_run and amount < 1_000_000:
-        return (f"신규 첫 운영에서 {compact_money(amount)}을 기록하며 초기 구매 반응은 제한적으로 확인되었습니다. "
-                "운영 기준상 100만원 미만 상품은 추가 재편성을 진행하지 않는 것이 적절합니다.")
+    # 유사신규: 유사도별 기본 운영 범위를 적용하되 성과가 명확하면 등급 정책 우선
+    if is_similar_new:
+        if amount < 1_000_000:
+            return "유사신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
+        if amount < 2_000_000:
+            return "유사신규 관찰상품으로 유사도·가격·타겟 조건 조정 후 1회 재시도 검토"
+        if amount < 3_000_000:
+            return "유사신규 안정상품으로 중간 유사도 기준 1~3회 확대 TEST 검토"
+        if amount < 5_000_000:
+            return "유사신규 우수상품으로 기존 우수상품 기준 3~5회 운영 가능성 검토"
+        return "유사신규 핵심 운영상품으로 기존 우수상품 수준의 우선 편성 및 확장 검토"
 
-    if 1_000_000 <= amount < 2_000_000:
-        return ("가격·타겟·전시순서 중 1개 조건을 조정해 재TEST 후 "
-                "200만원 이상 회복 여부 확인 필요")
+    # 재편성: 누적 운영 상품의 절대 성과 기준
+    if is_replanned:
+        if amount < 1_000_000:
+            if runs >= 2 and avg > 0 and amount <= avg * 0.7:
+                return "재편성 100만원 미만 및 과거 평균 대비 부진으로 동일 조건 추가 편성 제외"
+            return "재편성 100만원 미만으로 원칙적 추가 편성 제외"
+        if amount < 2_000_000:
+            return "재편성 관찰상품으로 가격·타겟 개선 가능 시에만 필요 편성 검토"
+        if amount < 3_000_000:
+            return "재편성 안정상품으로 운영 유지, 가격·타겟별 성과 비교 후 우선순위 판단"
+        if amount < 5_000_000:
+            return "재편성 우수상품으로 동일 조건 재현성 확인 후 운영 비중 확대 검토"
+        return "재편성 핵심 운영상품으로 우선 편성 유지 및 미발송 SEG 확대 검토"
 
-    avg = _v4464_num(historical_avg)
-    if int(_v4464_num(run_count)) >= 2 and amount < 1_000_000 and avg > 0 and amount <= avg * 0.7:
-        return ("절대 매출과 과거 평균 대비 성과가 모두 낮아 단기 반복 편성 효율 제한"
-                " > 과거 고성과 타겟·가격·시즌 조건 확인 후 재TEST, 동일 조건 반복 편성 제외")
-
-    if amount >= 5_000_000:
-        return "고성과 타겟·SEG 재현성을 확인하며 미발송 SEG 순차 확대 TEST 검토"
-    if amount >= 3_000_000:
-        return "동일 조건 1회 추가 검증 후 500만원 이상 확장 가능성 확인"
-    if amount >= 2_000_000:
-        return "가격·타겟·전시 조건별 성과를 비교해 재편성 우선순위 판단"
     return "가격·타겟·상품 적합도 조건 재점검 후 선택적 재TEST"
 
 def _v4464_weekly_category_line(text):
@@ -1591,21 +1609,20 @@ def _v4464_weekly_category_line(text):
 
 
 def _build_new_product_grade_insight(amount, is_new=False, is_similar_new=False):
-    """신규/유사신규 상품의 첫 TEST 성과를 5단계 등급별로 해석."""
+    """신규·유사신규 첫 TEST 성과를 운영 정책과 동일한 5단계 기준으로 해석합니다."""
     if not (is_new or is_similar_new):
         return ""
     label = "신규" if is_new else "유사신규"
     amt = compact_money(amount)
     if amount < 1_000_000:
-        return (f"{label} 첫 운영에서 {amt}을 기록하며 초기 구매 반응은 제한적으로 확인되었습니다. "
-                "운영 기준상 100만원 미만 상품은 추가 재편성을 진행하지 않는 것이 적절합니다.")
+        return f"{label} 첫 TEST에서 {amt} 기록 > 초기 구매 반응 제한, 운영 기준상 추가 재편성 제외"
     if amount < 2_000_000:
-        return f"{label} 첫 TEST에서 {amt} 기록 > 관찰 상품 수준으로 초기 판매 가능성 확인, 200만원 이상 확장 가능성 추가 검증 필요"
+        return f"{label} 첫 TEST에서 {amt} 기록 > 관찰상품 수준, 조건 조정 후 1회 재시도 검토"
     if amount < 3_000_000:
-        return f"{label} 첫 TEST에서 {amt} 기록 > 안정 상품 수준 진입, 300만원 이상 성장 가능성 추가 검증 필요"
+        return f"{label} 첫 TEST에서 {amt} 기록 > 안정상품 수준, 2~3회 이내 성과 재현성 검토"
     if amount < 5_000_000:
-        return f"{label} 첫 TEST에서 {amt} 기록 > 우수 상품 수준의 초기 성과 확인, 타겟·SEG 확장 TEST 검토"
-    return f"{label} 첫 TEST에서 {amt} 기록 > 핵심 상품 수준의 초기 성과 확인, 차기 핵심상품 후보로 우선 재편성 및 타겟·SEG 확장 검토"
+        return f"{label} 첫 TEST에서 {amt} 기록 > 우수상품 수준, 우수상품 등록 및 타겟 확장 검토"
+    return f"{label} 첫 TEST에서 {amt} 기록 > 핵심상품 수준, 핵심 운영상품 등록 및 우선 재편성 검토"
 
 
 def _v4481_match_season_context(row: pd.Series, month: int | None = None) -> dict:
@@ -1973,6 +1990,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
                 add(76, "프로모션", f"일반 운영 기간에도 평균 {compact_money(normal_avg)}을 기록해 프로모션 의존도가 낮은 상품", f"프로모션 {len(promo_rows)}회 / 일반 {len(normal_rows)}회", "높음" if len(normal_rows) >= 3 else "보통")
 
     # V4.4.89: 단순 기울기보다 타겟 변경에 따른 일시적 저성과와 회복을 우선 해석
+    _target_recovery = {}
     _target_recovery = _v4489_target_aware_recovery(cumulative)
     if _target_recovery:
         add(96, "원인 분석", _target_recovery["sentence"], _target_recovery["evidence"], "높음")
@@ -2197,6 +2215,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         historical_avg=_historical_avg,
         run_count=summary["운영횟수"],
         issue_text=_issue_text,
+        product_type=_ptype_raw,
     )
     if _v4464_action:
         action_sentence = _v4464_action
@@ -2242,10 +2261,9 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if 1_000_000 <= _amount_final < 2_000_000 and _has_price_advantage_final:
                 _sent = "다음 운영 제안: 가격 경쟁력은 유지하고 타겟 또는 전시순서 중 1개 조건을 변경해 1회 재TEST > 200만원 이상 회복 여부 확인 후 추가 편성 판단"
             elif _is_first_run_final and _amount_final < 1_000_000:
-                if _is_seasonal_final:
-                    _sent = "다음 운영 제안: 시즌 수요가 유지되는 기간 내 가격 또는 구성 혜택을 보강하고 타겟을 변경해 1회 재TEST > 재차 100만원 미만 시 시즌 내 추가 편성 우선순위 하향 검토"
-                else:
-                    _sent = "다음 운영 제안: 가격 또는 구성 혜택을 보강하고 타겟 조건을 변경해 1회 재TEST > 재차 100만원 미만 시 재편성 우선순위 하향 검토"
+                # 신규·유사신규 100만원 미만은 최종 정책상 재TEST로 되돌리지 않음
+                if "추가 재편성 제외" not in _sent:
+                    _sent = "다음 운영 제안: 신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
             _item["evidence"] = _item.get("evidence") or "상품등급·운영횟수·가격 경쟁력·시즌성 통합 판단"
 
         _item["sentence"] = _sent
