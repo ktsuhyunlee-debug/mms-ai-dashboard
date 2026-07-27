@@ -1,9 +1,4 @@
 # =============================================================================
-# V4.4.90 DAILY INSIGHT LOGIC FINAL
-# - Daily insight only: first-run under 1M policy, target recovery cause analysis,
-#   and target-change-aware comparison. Other menus/logic unchanged.
-# =============================================================================
-# =============================================================================
 # V4.4.71 WEEKLY DETAIL ENGINE FINALIZED
 # - Strong dead-code cleanup only; critical daily/weekly paths preserved.
 # - No intentional output/logic changes.
@@ -1891,28 +1886,28 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             add(100, "성과", f"금번 {current_target or '운영 타겟'}에서 {compact_money(amount)}을 기록하며 역대 최고 실적 경신", f"과거 최고 {compact_money(past_max)}", insight_confidence(len(prior)))
         elif past_avg > 0 and amount >= past_avg * 1.5 and amount >= 3_000_000:
             add(90, "성과", f"과거 평균 대비 주문금액이 {((amount/past_avg)-1)*100:.0f}% 증가해 거래액 성장 확인", f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
-        elif past_avg > 0 and amount <= past_avg * 0.7 and not _target_recovery:
+        elif past_avg > 0 and amount <= past_avg * 0.7:
             decline_pct = (1 - amount / past_avg) * 100
             decline_sentence = stable_variant(sentence_key + "|decline", [
-                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인됩니다.",
-                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화되었습니다.",
-                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한적입니다.",
-                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요합니다.",
+                f"금번 주문금액이 과거 평균 대비 {decline_pct:.0f}% 낮아 성과 둔화가 확인",
+                f"과거 평균 대비 주문금액이 {decline_pct:.0f}% 감소해 최근 판매 흐름이 약화",
+                f"금번 실적은 과거 평균의 {amount/past_avg*100:.0f}% 수준으로, 이전 운영 대비 반응이 제한",
+                f"과거 평균 대비 {decline_pct:.0f}% 낮은 성과를 기록해 운영 조건 재점검이 필요",
             ])
             add(88, "성과", decline_sentence, f"과거 평균 {compact_money(past_avg)}", insight_confidence(len(prior)))
             risks.append("최근 성과 둔화")
 
     recent3 = cumulative.tail(3)
-    if len(recent3) == 3 and not _target_recovery:
+    if len(recent3) == 3:
         vals = recent3["주문금액"].astype(float).tolist()
         growth = vals[2] / vals[0] - 1 if vals[0] > 0 else 0
         if vals[0] < vals[1] < vals[2] and growth >= 0.15:
             add(95, "성장 추세", f"최근 3회 주문금액이 {compact_money(vals[0])} → {compact_money(vals[1])} → {compact_money(vals[2])}으로 연속 성장 확인", f"첫 회 대비 {growth*100:.0f}% 증가", "보통")
         elif vals[0] > vals[1] > vals[2] and vals[0] > 0 and vals[2] <= vals[0] * 0.8:
-            add(89, "성장 추세", "최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요합니다.", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
+            add(89, "성장 추세", f"최근 3회 주문금액이 연속 감소해 운영 조건 재점검이 필요", f"첫 회 대비 {(1-vals[2]/vals[0])*100:.0f}% 감소", "보통")
             risks.append("최근 3회 연속 하락")
         elif min(vals) >= 3_000_000 and coefficient_of_variation(recent3["주문금액"]) <= 0.25:
-            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인됩니다.", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
+            add(82, "운영 안정성", "최근 3회 모두 300만원 이상을 기록하고 실적 편차가 제한적이어서 안정적인 판매 흐름이 확인", f"변동계수 {coefficient_of_variation(recent3['주문금액']):.2f}", "보통")
 
     if len(cumulative) >= 5:
         recent5 = cumulative.tail(5)
