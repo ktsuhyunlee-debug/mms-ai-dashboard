@@ -1551,6 +1551,13 @@ def _v4464_report_tone(text):
     return " → ".join(deduped)
 
 
+# TODO(V6 Daily Insight)
+# - '신규 첫 TEST'는 동일 상품 과거 이력이 없을 때만 사용
+# - 동일 성별/연령에서 SEG만 변경되면 '타겟 변경'이 아닌 'SEG 변경'으로 표현
+# - 직전 대비 주문금액 증가 시 '성과 하락' 문구 금지
+# - 동일 가격이면 '가격 경쟁력 확보' 대신 '동일 가격 운영' 사용
+# - 최근 2회 이상 100만원 미만이면 반복 저성과 판단
+
 def _v4464_daily_action(*, order_amount, is_first_run=False,
                         benefit_price=None, compare_lowest=None,
                         historical_avg=None, run_count=0,
