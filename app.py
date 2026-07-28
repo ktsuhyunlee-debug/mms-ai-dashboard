@@ -16,7 +16,7 @@
 # - 성과 집계/재편성 추천에서 variant가 실질적으로 다른 판매구성이면 별도 행 유지
 
 # VERIFIED BASE: app_v4_2_8_gender_target_filter.py + promotion columns
-# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.5.1-V6-WEEKLY-REPORT-FINAL-STYLE
+# VERIFIED BUILD: V4.2.8-20260719-GENDER-TARGET-FILTER\n# PATCH BUILD: V4.5.4-V6-DAILY-HISTORY-TARGET-PRICE-FIX
 # - Weekly insight sentences joined with → and terminal periods removed
 # - New/core product names include actual order amounts
 # - Sourcing conditions use slash-separated display
@@ -1551,13 +1551,6 @@ def _v4464_report_tone(text):
     return " → ".join(deduped)
 
 
-# TODO(V6 Daily Insight)
-# - '신규 첫 TEST'는 동일 상품 과거 이력이 없을 때만 사용
-# - 동일 성별/연령에서 SEG만 변경되면 '타겟 변경'이 아닌 'SEG 변경'으로 표현
-# - 직전 대비 주문금액 증가 시 '성과 하락' 문구 금지
-# - 동일 가격이면 '가격 경쟁력 확보' 대신 '동일 가격 운영' 사용
-# - 최근 2회 이상 100만원 미만이면 반복 저성과 판단
-
 def _v4464_daily_action(*, order_amount, is_first_run=False,
                         benefit_price=None, compare_lowest=None,
                         historical_avg=None, run_count=0,
@@ -1578,7 +1571,7 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
                 "정상 판매 조건 확보 후 동일 조건 재검증 필요")
 
     # 신규: 최초 TEST 후 성과 구간별 운영 정책
-    if is_new:
+    if is_new and is_first_run:
         if amount < 1_000_000:
             return "신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
         if amount < 2_000_000:
@@ -1590,7 +1583,7 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
         return "신규 핵심 운영상품 등록 후 우선 재편성 및 타겟·SEG 확대 검토"
 
     # 유사신규: 유사도별 기본 운영 범위를 적용하되 성과가 명확하면 등급 정책 우선
-    if is_similar_new:
+    if is_similar_new and is_first_run:
         if amount < 1_000_000:
             return "유사신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
         if amount < 2_000_000:
@@ -1600,6 +1593,20 @@ def _v4464_daily_action(*, order_amount, is_first_run=False,
         if amount < 5_000_000:
             return "유사신규 우수상품으로 기존 우수상품 기준 3~5회 운영 가능성 검토"
         return "유사신규 핵심 운영상품으로 기존 우수상품 수준의 우선 편성 및 확장 검토"
+
+    # 신규·유사신규라도 과거 운영 이력이 있으면 첫 TEST가 아닌 누적 운영 기준 적용
+    if (is_new or is_similar_new) and not is_first_run:
+        if amount < 1_000_000:
+            if runs >= 1:
+                return "최근 2회 이상 100만원 미만으로 추가 재편성 우선순위 하향 → 동일 카테고리 내 검증 상품으로 교체 검토"
+            return "100만원 미만으로 추가 재편성 우선순위 하향"
+        if amount < 2_000_000:
+            return "최근 운영 이력을 반영해 조건 조정 후 1회 재검증 검토"
+        if amount < 3_000_000:
+            return "누적 운영 기준 안정상품으로 성과 재현성 추가 확인"
+        if amount < 5_000_000:
+            return "누적 운영 기준 우수상품으로 동일 타겟 재검증 및 미발송 SEG 확대 검토"
+        return "누적 운영 기준 핵심상품으로 우선 재편성 및 타겟·SEG 확대 검토"
 
     # 재편성: 누적 운영 상품의 절대 성과 기준
     if is_replanned:
@@ -2018,7 +2025,13 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
     price_eval = _daily_price_competitiveness(current_price, lowest)
     if price_eval:
         price_diff = lowest - current_price
-        if price_eval["level"] == "strong":
+        _same_recent_price = False
+        if not prior.empty and current_price > 0 and "멤버십혜택가" in prior.columns:
+            _last_price_for_compare = float(prior.iloc[-1].get("멤버십혜택가", 0) or 0)
+            _same_recent_price = _last_price_for_compare > 0 and abs(current_price - _last_price_for_compare) < 1
+        if _same_recent_price and amount < 2_000_000:
+            add(91, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 최근 운영과 동일 가격 유지 → 가격 변화보다 상품 경쟁력과 타겟·SEG 적합도 영향 점검 필요", "최근 동일 상품 가격 및 현재 주문금액 기준", "높음")
+        elif price_eval["level"] == "strong":
             if amount < 2_000_000:
                 add(90, "가격·성과", f"멤버십 혜택가 {fmt_num(current_price)}원으로 발송일 비교 최저가보다 {fmt_num(price_diff)}원 저렴한 가격 경쟁력을 확보했음에도 금번 {compact_money(amount)}에 그쳐, 가격 외 상품·타겟 적합도 점검이 필요", "발송일 최저가 및 현재 주문금액 기준", "높음")
             elif not prior.empty and float(prior["주문금액"].mean()) > 0 and amount <= float(prior["주문금액"].mean()) * 0.7:
@@ -2063,21 +2076,34 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             last_target = target_label(last)
             last_base_target = base_target_label(last)
             current_base_target = base_target_label(row)
-            target_changed = bool(last_target and current_target and last_target != current_target)
+            target_changed = bool(last_base_target and current_base_target and last_base_target != current_base_target)
+            seg_changed = bool(
+                not target_changed
+                and last_base_target
+                and current_base_target
+                and last_base_target == current_base_target
+                and last_target
+                and current_target
+                and last_target != current_target
+            )
             if target_changed:
                 from_target = last_base_target or last_target
                 to_target = current_base_target or current_target
-                if ratio < 1:
-                    sentence = (
-                        f"직전 운영 대비 주문금액은 감소했으나, 운영 타겟이 {from_target}에서 {to_target}으로 변경되어 "
-                        "직접적인 성과 비교에는 한계가 있습니다. 타겟별 반응 차이를 고려한 해석이 필요합니다."
-                    )
-                else:
-                    sentence = (
-                        f"직전 운영 대비 주문금액 증가 확인. 다만 운영 타겟이 {from_target}에서 {to_target}으로 변경되어 "
-                        "성과 개선에 대한 타겟 변경 영향 고려 필요. 타겟별 반응 차이 추가 확인 필요."
-                    )
+                direction = "증가" if ratio >= 1 else "감소"
+                sentence = (
+                    f"직전 운영 대비 주문금액 {direction} 확인 → 운영 타겟이 {from_target}에서 {to_target}으로 변경돼 "
+                    "동일 조건 직접 비교에는 한계 → 타겟별 반응 차이 추가 확인 필요"
+                )
                 add(94, "타겟 비교", sentence, "직전 운영 타겟 변경", "높음")
+            elif seg_changed:
+                last_seg = clean_identifier_value(last.get("SEG", ""))
+                current_seg = clean_identifier_value(row.get("SEG", ""))
+                direction = "증가" if ratio >= 1 else "감소"
+                sentence = (
+                    f"직전 운영 대비 주문금액 {direction} 확인 → 동일한 {current_base_target} 타겟 내 "
+                    f"SEG{last_seg or '-'}에서 SEG{current_seg or '-'}로 변경 운영 → SEG별 반응 차이 추가 확인 필요"
+                )
+                add(94, "SEG 비교", sentence, "동일 타겟 내 직전 SEG 변경", "높음")
             elif ratio >= 0.8 and amount >= 2_000_000 and (past_avg_for_fatigue <= 0 or amount >= past_avg_for_fatigue * 0.7):
                 if ratio >= 1.2:
                     _fatigue_msg = f"직전 운영 후 {gap}일 만에 재편성했음에도 주문금액이 직전 대비 {(ratio-1)*100:.0f}% 증가해 단기 반복 편성에서도 성과 확대 확인"
@@ -2249,7 +2275,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
 
     # V4.4.77: daily insight semantic polish
     # 신규 첫 TEST / 가격 경쟁력 확보 관찰상품 / 시즌 저성과 문장의 액션 정합성 보강
-    _is_first_run_final = bool(summary.get("운영횟수", 0) <= 1)
+    _is_first_run_final = bool(summary.get("운영횟수", 0) == 0)
     _amount_final = float(amount or 0)
     _has_price_advantage_final = any(
         ("최저가보다" in str(x.get("sentence", "")) and "저렴" in str(x.get("sentence", "")))
@@ -2260,8 +2286,22 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         for x in selected
     )
 
+    _prior_count_final = int(summary.get("운영횟수", 0) or 0)
+    _last_prior_final = prior.iloc[-1] if not prior.empty else None
+    _last_amount_final = float(_last_prior_final.get("주문금액", 0) or 0) if _last_prior_final is not None else 0.0
+
     for _item in selected:
         _sent = str(_item.get("sentence", ""))
+
+        if _prior_count_final >= 1 and _amount_final < 1_000_000 and _item.get("type") != "action":
+            if "신규 첫 TEST" in _sent or ("금번" in _sent and ("구매 반응" in _sent or "그치" in _sent)):
+                if _last_amount_final > 0:
+                    _delta_pct = ((_amount_final / _last_amount_final) - 1) * 100
+                    _direction = "증가" if _delta_pct >= 0 else "감소"
+                    _sent = (f"최근 2회 운영에서 {compact_money(_last_amount_final)} → {compact_money(_amount_final)}으로 "
+                             f"주문금액 {abs(_delta_pct):.1f}% {_direction} → 다만 최근 2회 모두 100만원 미만으로 성과 제한")
+                else:
+                    _sent = f"과거 운영 이력이 있는 상품으로 금번 {compact_money(_amount_final)} 기록 → 첫 TEST가 아닌 누적 운영 기준 판단 필요"
 
         if _is_first_run_final and _amount_final < 1_000_000 and _item.get("type") != "action":
             if ("금번" in _sent and ("구매 반응" in _sent or "그치" in _sent)) and "신규 첫 TEST" not in _sent:
@@ -2279,9 +2319,12 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
             if 1_000_000 <= _amount_final < 2_000_000 and _has_price_advantage_final:
                 _sent = "다음 운영 제안: 가격 경쟁력 유지 → 타겟 또는 전시순서 중 1개 조건 변경 후 1회 재TEST → 200만원 이상 회복 여부 확인 후 추가 편성 판단"
             elif _is_first_run_final and _amount_final < 1_000_000:
-                # 신규·유사신규 100만원 미만은 최종 정책상 재TEST로 되돌리지 않음
+                # 실제 첫 운영인 경우에만 첫 TEST 정책 적용
                 if "추가 재편성 제외" not in _sent:
                     _sent = "다음 운영 제안: 신규 첫 TEST 100만원 미만으로 추가 재편성 제외"
+            elif _prior_count_final >= 1 and _amount_final < 1_000_000:
+                _sent = "다음 운영 제안: 최근 2회 모두 100만원 미만으로 추가 재편성 우선순위 하향 → 동일 카테고리 내 검증 상품으로 교체 검토"
+                _item["evidence"] = "최근 2회 운영 성과 기준"
             _item["evidence"] = _item.get("evidence") or "상품등급·운영횟수·가격 경쟁력·시즌성 통합 판단"
 
         _item["sentence"] = _sent
