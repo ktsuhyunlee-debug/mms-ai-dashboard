@@ -435,45 +435,6 @@ hr {
     padding: 18px 14px 14px;
 }
 
-/* V4.4.73 동일 날짜·시간대 복수 이미지 전체 표시 */
-.daily-asset-pair .asset-image-card:has(.asset-image-list) {
-    position: static !important;
-    height: auto !important;
-    min-height: 0 !important;
-    padding: 14px !important;
-    overflow: visible !important;
-}
-.daily-asset-pair .asset-image-list {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    width: 100%;
-}
-.daily-asset-pair .asset-image-item {
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-    background: #ffffff;
-}
-.daily-asset-pair .asset-image-item img {
-    position: static !important;
-    inset: auto !important;
-    width: 100% !important;
-    height: auto !important;
-    min-width: 0 !important;
-    min-height: 0 !important;
-    max-width: 100% !important;
-    max-height: none !important;
-    object-fit: contain !important;
-    object-position: center center !important;
-    display: block !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    transform: none !important;
-    box-sizing: border-box !important;
-}
-
 @media (max-width: 900px) {
 
     [data-testid="stHorizontalBlock"]:has(.asset-message-card) > [data-testid="stColumn"],
@@ -6987,41 +6948,27 @@ def daily_asset_key(date_value, time_value) -> str:
     return f"{dt:%Y%m%d}_{slot}"
 
 
-def find_daily_images(asset_key: str, campaign_name: str = "") -> list[Path]:
-    """동일 발송일·시간대에 연결된 이미지를 파일명 순서대로 모두 반환합니다."""
+def find_daily_image(asset_key: str, campaign_name: str = ""):
     if not IMAGE_DIR.exists():
-        return []
+        return None
 
     valid_suffixes = [".jpg", ".jpeg", ".png", ".webp"]
-    files = sorted(
-        [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in valid_suffixes],
-        key=lambda p: p.name,
-    )
+    files = [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in valid_suffixes]
 
+    # 캠페인명과 동일한 파일명을 우선 사용
     campaign_name = str(campaign_name).strip()
-    campaign_matches = []
     if campaign_name:
-        # 캠페인명과 정확히 일치하거나 캠페인명 뒤에 순번이 붙은 이미지까지 포함
-        campaign_matches = [
-            p for p in files
-            if p.stem == campaign_name or p.stem.startswith(f"{campaign_name}_")
-        ]
+        exact = [p for p in files if p.stem == campaign_name]
+        if exact:
+            return sorted(exact, key=lambda p: p.name)[0]
 
-    asset_matches = []
+    # 기존 날짜_01/02 방식도 계속 지원
     if asset_key:
-        # 기존 날짜_01/02 방식으로 같은 날짜·시간대의 이미지를 모두 포함
-        asset_matches = [p for p in files if p.name.startswith(asset_key)]
+        matches = [p for p in files if p.name.startswith(asset_key)]
+        if matches:
+            return sorted(matches, key=lambda p: p.name)[0]
 
-    # 캠페인 매칭을 우선하되 날짜·시간대 매칭 결과도 함께 포함하고 중복 제거
-    combined = []
-    seen = set()
-    for path in campaign_matches + asset_matches:
-        resolved = str(path.resolve())
-        if resolved not in seen:
-            seen.add(resolved)
-            combined.append(path)
-
-    return combined
+    return None
 
 
 def clean_mms_message(value) -> str:
@@ -7853,7 +7800,7 @@ elif menu == "일일실적":
 
         asset_key = daily_asset_key(selected_date, time_value)
         campaign_name = str(send_row.get("캠페인명", "")).strip()
-        image_paths = find_daily_images(asset_key, campaign_name)
+        image_path = find_daily_image(asset_key, campaign_name)
         message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
@@ -7861,24 +7808,19 @@ elif menu == "일일실적":
         import base64
         import html
 
-        if image_paths:
+        if image_path is not None:
             mime_map = {
                 ".jpg": "image/jpeg",
                 ".jpeg": "image/jpeg",
                 ".png": "image/png",
                 ".webp": "image/webp",
             }
-            image_items = []
-            for image_path in image_paths:
-                mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
-                encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-                image_items.append(
-                    '<div class="asset-image-item">'
-                    f'<img src="data:{mime};base64,{encoded}" '
-                    f'alt="{html.escape(image_path.name)}">'
-                    '</div>'
-                )
-            image_body = '<div class="asset-image-list">' + ''.join(image_items) + '</div>'
+            mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
+            encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+            image_body = (
+                f'<img src="data:{mime};base64,{encoded}" '
+                f'alt="{html.escape(image_path.name)}">'
+            )
         else:
             image_body = (
                 '<div class="asset-empty">images 폴더에<br>'
@@ -7896,7 +7838,7 @@ elif menu == "일일실적":
             )
 
         # 같은 HTML Grid 안에서 렌더링해 좌우 카드가 항상 동일한 세로 높이를 사용합니다.
-        # 동일 날짜·시간대 이미지가 여러 개면 파일명 순서대로 모두 표시하며 원본 비율을 유지합니다.
+        # 이미지는 object-fit: contain으로 원본 비율/내용을 변경하지 않습니다.
         asset_pair_html = f"""
         <div class="daily-asset-pair">
             <div class="asset-card asset-image-card">{image_body}</div>
