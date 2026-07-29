@@ -1,7 +1,7 @@
 # =============================================================================
-# V4.4.71 WEEKLY DETAIL ENGINE FINALIZED
-# - Strong dead-code cleanup only; critical daily/weekly paths preserved.
-# - No intentional output/logic changes.
+# V4.4.72 LOW-PERFORMANCE AMOUNT HISTORY
+# - Weekly low-performance replacement lines now include every historical order amount
+# - Existing repeated-underperformance criteria and all other logic preserved.
 # =============================================================================
 # =============================================================================
 # V4.4.65 CLEAN / REFACTOR
@@ -3551,11 +3551,12 @@ def _next_week_action_candidates(pw, products_all, week_end):
                 continue
             catname=str(wkrow["대카"].iloc[0]).strip()
             short_name=_short_weekly_product_name(pname)
+            amount_history = " / ".join(compact_money(v) for v in vals.tolist())
             actions.append((
                 65,
                 "상품 교체",
-                f"{_with_topic(short_name)} 과거 {len(vals)}회 모두 300만원 미만으로 반복 부진 확인 > "
-                f"동일 카테고리 내 과거 300만원 이상 반복 성과가 확인된 검증 상품으로 교체 검토"
+                f"{_with_topic(short_name)}({amount_history}) 등 반복 운영 대비 성과가 제한적인 상품은 "
+                f"편성 우선순위를 조정하고 동일 카테고리 내 검증 상품으로 교체 검토"
             ))
 
     seen=set(); out=[]
@@ -5463,7 +5464,10 @@ def build_v6_action_plan(features: pd.DataFrame) -> list[str]:
     poor = features[(features["금주최고매출"] < 1_000_000) & (features["누적운영횟수"] >= 2)]
     if not poor.empty:
         names = "·".join(_weekly_short_display_name(x) for x in poor.head(3)["상품명"])
-        actions.append(f"• 저성과 상품 교체 : {names} 반복 저성과 상품 우선순위 하향 > 동일 카테고리 과거 300만원 이상 검증 상품으로 교체")
+        actions.append(
+            f"• 저성과 상품 교체 : {names} 등 반복 운영 대비 성과가 제한적인 상품은 "
+            "편성 우선순위를 조정하고 동일 카테고리 내 검증 상품으로 교체 검토"
+        )
 
     comparable = features[features["전년동일시즌운영횟수"] > 0]
     if not comparable.empty:
@@ -6833,6 +6837,35 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 buckets["저성과 상품 교체"].append(
                     "반복 저성과 상품 비중 축소를 통한 편성 효율 개선"
                 )
+        except Exception:
+            pass
+
+        # 반복 저성과 상품은 실제 누적 회차별 주문금액을 상품명 뒤에 표시해 교체 근거를 명확히 제시
+        try:
+            _hist = products_all.copy()
+            _hist_dates = pd.to_datetime(_hist.get("_date"), errors="coerce")
+            _current_names = set(pw["상품명"].dropna().astype(str))
+            _poor_items = []
+            for _pname, _rows in _hist[_hist_dates.notna() & (_hist_dates <= week_end)].groupby("상품명"):
+                _pname = str(_pname)
+                if _pname not in _current_names:
+                    continue
+                _rows = _rows.assign(_dt=pd.to_datetime(_rows["_date"], errors="coerce")).sort_values("_dt")
+                _vals = pd.to_numeric(_rows["주문금액"], errors="coerce").fillna(0)
+                if len(_vals) < 2 or int((_vals >= 3_000_000).sum()) > 0:
+                    continue
+                _amount_text = " / ".join(compact_money(v) for v in _vals.tolist())
+                _week_amount = float(pd.to_numeric(
+                    pw.loc[pw["상품명"].astype(str).eq(_pname), "주문금액"], errors="coerce"
+                ).fillna(0).sum())
+                _poor_items.append((_week_amount, f"{_weekly_short_display_name(_pname)}({_amount_text})"))
+
+            if _poor_items:
+                _poor_items = sorted(_poor_items, key=lambda x: x[0])[:3]
+                _poor_names = ", ".join(item[1] for item in _poor_items)
+                buckets["저성과 상품 교체"] = [
+                    f"{_poor_names} 등 반복 운영 대비 성과가 제한적인 상품은 편성 우선순위를 조정하고 동일 카테고리 내 검증 상품으로 교체 검토"
+                ]
         except Exception:
             pass
 
