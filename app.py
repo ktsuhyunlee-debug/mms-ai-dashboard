@@ -1041,15 +1041,6 @@ def aggregate_send(data: pd.DataFrame, mode: str) -> pd.DataFrame:
     return g.fillna(0).reset_index(drop=True)
 
 
-def add_changes(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["주문금액 증감"] = out["주문금액"].pct_change()
-    out["CTR 증감"] = out["반응율(Uniq CTR)"].diff()
-    out["SPM 증감"] = out["발송대비매출(SPM)"].pct_change()
-    out["발송당매출 증감"] = out["발송당매출(발송횟수)"].pct_change()
-    return out.replace([float("inf"), float("-inf")], pd.NA)
-
-
 def change_label(value, pp: bool = False) -> str:
     if pd.isna(value):
         return "-"
@@ -1435,16 +1426,6 @@ def _v4464_num(v, default=0.0):
     except Exception:
         return default
 
-
-def _v4480_daily_evidence_display(sentence: str, evidence: str, category: str = "") -> str:
-    """일일 인사이트 화면에서는 반복적인 근거 괄호를 최소화하되 데이터 자체는 유지."""
-    s = str(sentence or "").strip()
-    e = str(evidence or "").strip()
-    # 핵심 주의/특수근거가 아니면 본문 뒤 괄호를 생략
-    keep_keys = ["운영이슈", "재고", "판매중단", "프로모션", "보답프로그램"]
-    if e and any(k in e for k in keep_keys):
-        return f"{s} ({e})"
-    return s
 
 def _v4464_report_tone(text):
     """일일 상품 인사이트를 '데이터 → 해석 → 운영 시사점' 형식으로 통일합니다."""
@@ -3963,41 +3944,6 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
     return rec_df, src_df
 
 
-def _extract_product_from_insight_line(line: str) -> str:
-    m = re.match(r"\s*\[([^\]]+)\]", str(line))
-    return _clean_text_value(m.group(1)) if m else ""
-
-
-def _normalize_reco_product_key(name: str) -> str:
-    """DEPRECATED: 추천 중복 판정은 상품 마스터키 기준으로 전환. 이름 유사도 병합 금지."""
-    return _clean_text_value(name)
-
-def _extract_bracket_or_subject_product(sentence: str) -> str:
-    s = _clean_text_value(sentence)
-    m = re.search(r"\[([^\]]+)\]", s)
-    if m:
-        return _clean_text_value(m.group(1))
-    # bullet 뒤 첫 서술부를 상품명 후보로 사용
-    s = re.sub(r"^[•\-\s]+", "", s)
-    for token in [" 상품은 ", "은 ", "는 ", "이 ", "가 "]:
-        if token in s:
-            return _clean_text_value(s.split(token, 1)[0])
-    return ""
-
-def _recommendation_priority(sentence: str) -> int:
-    """같은 상품이 여러 추천 규칙에 걸릴 때 가장 정보량 높은 문장을 우선."""
-    s = str(sentence)
-    score = 0
-    if "동시즌" in s: score += 8
-    if "최근" in s and "미편성" in s: score += 5
-    if "누적" in s: score += 4
-    if "500만원 이상" in s: score += 4
-    if "평균" in s and "최고" in s: score += 3
-    if "혜택가" in s or "가격" in s: score += 3
-    if "타겟" in s or "SEG" in s: score += 2
-    if "신규·유사신규" in s: score += 1
-    return score
-
 def _clean_seg_display_text(s: str) -> str:
     """SEG 숫자가 1.0/2.0/3.0으로 노출되는 문제 및 조사 오류 보정."""
     s = str(s)
@@ -4191,29 +4137,6 @@ def _v4467_repeated_underperformer_keys(products_all: pd.DataFrame, week_end):
         if len(vals) >= 2 and int((vals >= 3_000_000).sum()) == 0:
             out.add(str(key))
     return out
-
-def _v4467_guard_season_conflicts(sentences, products_all: pd.DataFrame, week_end):
-    """반복부진 상품을 시즌 성공사례로 다시 '동일 상품 재운영' 추천하는 논리 충돌 방지."""
-    bad_keys = _v4467_repeated_underperformer_keys(products_all, week_end)
-    if not bad_keys:
-        return sentences
-    guarded = []
-    for raw in sentences or []:
-        s = str(raw)
-        key, _ = _sentence_product_master_key(s, products_all)
-        if key in bad_keys and ("동시즌" in s or "신규·유사신규" in s or "시즌" in s):
-            s = re.sub(
-                r"당시와 유사한 가격 조건 확보 시 동일 상품 재운영(?:을)? 우선 검토",
-                "과거 단일 고성과의 가격·기능 조건만 참고하되 동일 상품 재운영은 우선하지 않고 신규·유사신규 TEST 검토",
-                s
-            )
-            s = s.replace(
-                "단일 사례로 반복성을 단정하기보다",
-                "이후 반복 성과까지 함께 고려해 동일 상품의 재현성을 단정하지 않고"
-            )
-        guarded.append(s)
-    return guarded
-
 
 def _v4468_ensure_recommendation_action(sentences):
     """재편성 우선 후보가 액션 없이 끝나는 경우 누적 검증 수준에 맞는 최소 실행 액션을 보장."""
@@ -5009,31 +4932,6 @@ def _weekly_cutoff_history(products_all: pd.DataFrame, week_end):
         ds = pd.to_datetime(out[dcol], errors="coerce")
         out = out[ds.notna() & (ds <= pd.to_datetime(week_end))].copy()
     return out
-
-
-def _weekly_product_history_table(products_all: pd.DataFrame, week_end):
-    """
-    선택 주차 종료일까지 상품별 누적 통계.
-    운영횟수/300만원+/500만원+/평균/최고를 모두 동일 원천 row로 계산.
-    """
-    hist = _weekly_cutoff_history(products_all, week_end)
-    if hist.empty or "상품명" not in hist.columns or "주문금액" not in hist.columns:
-        return pd.DataFrame(columns=["상품키","상품명","운영횟수","300만원이상","500만원이상","평균매출","최고매출"])
-    hist = hist.copy()
-    hist["_상품키"] = hist["상품명"].map(_weekly_normalize_product_key)
-    hist["_amt"] = pd.to_numeric(hist["주문금액"], errors="coerce").fillna(0)
-    rows = []
-    for key, g in hist.groupby("_상품키", dropna=False):
-        rows.append({
-            "상품키": key,
-            "상품명": str(g["상품명"].iloc[-1]),
-            "운영횟수": len(g),
-            "300만원이상": int((g["_amt"] >= 3_000_000).sum()),
-            "500만원이상": int((g["_amt"] >= 5_000_000).sum()),
-            "평균매출": float(g["_amt"].mean()),
-            "최고매출": float(g["_amt"].max()),
-        })
-    return pd.DataFrame(rows)
 
 
 def _weekly_current_core_rows(pw: pd.DataFrame):
@@ -8510,13 +8408,20 @@ elif menu == "상품구분":
     result = grouped[grouped["등급"].isin(grade_filter)].copy()
 
     if product_number_search.strip():
-        number_query = product_number_search.strip()
+        # 쉼표·줄바꿈·공백 등으로 여러 상품번호를 입력할 수 있도록 분리
+        number_queries = [
+            query.strip()
+            for query in re.split(r"[,;|\s]+", product_number_search.strip())
+            if query.strip()
+        ]
         number_mask = pd.Series(False, index=result.index)
         for code_col in ["쇼라코드", "알파코드"]:
             if code_col in result.columns:
-                number_mask |= result[code_col].astype(str).str.contains(
-                    number_query, case=False, na=False, regex=False
-                )
+                code_values = result[code_col].astype(str)
+                for number_query in number_queries:
+                    number_mask |= code_values.str.contains(
+                        number_query, case=False, na=False, regex=False
+                    )
         result = result[number_mask]
 
     if product_name_search.strip():
@@ -8537,6 +8442,20 @@ elif menu == "상품구분":
             display_df[money_col] = display_df[money_col].map(format_integer_price)
 
     st.caption(f"조회 상품 {len(display_df):,}개 · 행을 선택하면 아래에 발송 이력이 표시됩니다.")
+
+    # 검색·필터 조건이 바뀌면 이전 행 선택값이 남지 않도록 표 key를 갱신
+    selection_signature_text = "|".join([
+        str(date_range),
+        ",".join(map(str, grade_filter)),
+        product_number_search.strip(),
+        product_name_search.strip(),
+        str(len(display_df)),
+    ])
+    selection_signature = sum(
+        (idx + 1) * ord(char)
+        for idx, char in enumerate(selection_signature_text)
+    ) % 10_000_000_000
+
     selection_event = st.dataframe(
         display_df,
         use_container_width=True,
@@ -8544,54 +8463,62 @@ elif menu == "상품구분":
         height=500,
         on_select="rerun",
         selection_mode="single-row",
-        key="product_group_summary_table",
+        key=f"product_group_summary_table_{selection_signature}",
     )
 
     selected_rows = getattr(getattr(selection_event, "selection", None), "rows", [])
+    result_reset = result.reset_index(drop=True)
+
     if selected_rows:
-        selected_pos = selected_rows[0]
-        selected_record = result.reset_index(drop=True).iloc[selected_pos]
+        selected_pos = int(selected_rows[0])
+        if 0 <= selected_pos < len(result_reset):
+            selected_record = result_reset.iloc[selected_pos]
+        else:
+            # 필터 변경 직후 남아 있는 오래된 선택 위치는 무시
+            selected_record = None
 
-        history_mask = pd.Series(True, index=products.index)
-        for key in group_keys:
-            value = selected_record.get(key)
-            if pd.isna(value):
-                history_mask &= products[key].isna()
-            else:
-                history_mask &= products[key].astype(str).eq(str(value))
-        history = products[history_mask].sort_values("_date", ascending=False).copy()
+        if selected_record is not None:
 
-        st.markdown(
-            f'<div class="subsection-title">발송 이력 · {selected_record.get("상품명", "")}</div>',
-            unsafe_allow_html=True,
-        )
+            history_mask = pd.Series(True, index=products.index)
+            for key in group_keys:
+                value = selected_record.get(key)
+                if pd.isna(value):
+                    history_mask &= products[key].isna()
+                else:
+                    history_mask &= products[key].astype(str).eq(str(value))
+            history = products[history_mask].sort_values("_date", ascending=False).copy()
 
-        history["발송일"] = history["_date"].dt.strftime("%Y-%m-%d")
-        history["타겟"] = history.apply(target_label, axis=1)
-        history["프로모션"] = history.apply(promotion_label, axis=1)
-
-        history_cols = [
-            c for c in [
-                "발송일", "타겟", "캠페인명", "소재", "정상가", "멤버십혜택가",
-                "할인율", "주문건수", "주문수량", "주문금액", "발송일 최저가", "프로모션",
-            ] if c in history.columns
-        ]
-        history_view = history[history_cols].copy()
-
-        for price_col in ["정상가", "멤버십혜택가", "주문금액", "발송일 최저가"]:
-            if price_col in history_view.columns:
-                history_view[price_col] = history_view[price_col].map(format_integer_price)
-        if "할인율" in history_view.columns:
-            history_view["할인율"] = history_view["할인율"].map(
-                lambda x: f"{float(x) * 100:.0f}%" if float(x) <= 1 else f"{float(x):.0f}%"
+            st.markdown(
+                f'<div class="subsection-title">발송 이력 · {selected_record.get("상품명", "")}</div>',
+                unsafe_allow_html=True,
             )
 
-        st.dataframe(
-            history_view,
-            use_container_width=True,
-            hide_index=True,
-            height=min(420, 42 + len(history_view) * 35),
-        )
+            history["발송일"] = history["_date"].dt.strftime("%Y-%m-%d")
+            history["타겟"] = history.apply(target_label, axis=1)
+            history["프로모션"] = history.apply(promotion_label, axis=1)
+
+            history_cols = [
+                c for c in [
+                    "발송일", "타겟", "캠페인명", "소재", "정상가", "멤버십혜택가",
+                    "할인율", "주문건수", "주문수량", "주문금액", "발송일 최저가", "프로모션",
+                ] if c in history.columns
+            ]
+            history_view = history[history_cols].copy()
+
+            for price_col in ["정상가", "멤버십혜택가", "주문금액", "발송일 최저가"]:
+                if price_col in history_view.columns:
+                    history_view[price_col] = history_view[price_col].map(format_integer_price)
+            if "할인율" in history_view.columns:
+                history_view["할인율"] = history_view["할인율"].map(
+                    lambda x: f"{float(x) * 100:.0f}%" if float(x) <= 1 else f"{float(x):.0f}%"
+                )
+
+            st.dataframe(
+                history_view,
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 42 + len(history_view) * 35),
+            )
 
 
 elif menu == "타겟분석":
@@ -8713,10 +8640,14 @@ elif menu == "타겟분석":
         seg_rows = list(getattr(getattr(gender_age_seg_event, "selection", None), "rows", []) or [])
         age_rows = list(getattr(getattr(gender_age_event, "selection", None), "rows", []) or [])
         if seg_rows:
-            selected_target = gender_age_seg_raw.iloc[int(seg_rows[0])]
-            selected_seg = clean_identifier_value(selected_target.get("SEG", ""))
+            selected_idx = int(seg_rows[0])
+            if 0 <= selected_idx < len(gender_age_seg_raw):
+                selected_target = gender_age_seg_raw.iloc[selected_idx]
+                selected_seg = clean_identifier_value(selected_target.get("SEG", ""))
         elif age_rows:
-            selected_target = gender_age_raw.iloc[int(age_rows[0])]
+            selected_idx = int(age_rows[0])
+            if 0 <= selected_idx < len(gender_age_raw):
+                selected_target = gender_age_raw.iloc[selected_idx]
 
         if selected_target is not None:
             selected_gender = str(selected_target.get("성별", "")).strip()
