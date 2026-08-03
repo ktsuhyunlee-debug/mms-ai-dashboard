@@ -7310,6 +7310,121 @@ def schedule_target_summary(hist: pd.DataFrame) -> pd.DataFrame:
     ]]
 
 
+
+def apply_home_analysis_date_filter(
+    df: pd.DataFrame,
+    mode: str,
+    base_start,
+    base_end,
+    include_ranges: list,
+    exclude_ranges: list,
+) -> pd.DataFrame:
+    """Home 메뉴 전용 분석 기간 필터. 원본 DataFrame은 변경하지 않는다."""
+    if df is None or df.empty or "_date" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    result = df.copy()
+    normalized_dates = pd.to_datetime(result["_date"], errors="coerce").dt.normalize()
+    base_start_ts = pd.to_datetime(base_start, errors="coerce")
+    base_end_ts = pd.to_datetime(base_end, errors="coerce")
+
+    if pd.isna(base_start_ts) or pd.isna(base_end_ts) or base_start_ts > base_end_ts:
+        return result.iloc[0:0].copy()
+
+    base_start_ts = base_start_ts.normalize()
+    base_end_ts = base_end_ts.normalize()
+    mask = normalized_dates.between(base_start_ts, base_end_ts, inclusive="both")
+    result = result.loc[mask].copy()
+
+    def _range_mask(date_series: pd.Series, ranges: list) -> pd.Series:
+        combined = pd.Series(False, index=date_series.index, dtype=bool)
+        for item in ranges or []:
+            start_value = item.get("start") if isinstance(item, dict) else None
+            end_value = item.get("end") if isinstance(item, dict) else None
+            start_ts = pd.to_datetime(start_value, errors="coerce")
+            end_ts = pd.to_datetime(end_value, errors="coerce")
+            if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+                continue
+            combined |= date_series.between(
+                start_ts.normalize(), end_ts.normalize(), inclusive="both"
+            )
+        return combined
+
+    result_dates = pd.to_datetime(result["_date"], errors="coerce").dt.normalize()
+    if mode in {"포함구간", "포함 + 제외"}:
+        result = result.loc[_range_mask(result_dates, include_ranges)].copy()
+        result_dates = pd.to_datetime(result["_date"], errors="coerce").dt.normalize()
+
+    if mode in {"제외구간", "포함 + 제외"} and not result.empty:
+        result = result.loc[~_range_mask(result_dates, exclude_ranges)].copy()
+
+    return result.sort_values("_date", kind="stable").copy()
+
+
+def _home_analysis_valid_range_count(ranges: list) -> tuple[int, int]:
+    valid_count = 0
+    invalid_count = 0
+    for item in ranges or []:
+        start_ts = pd.to_datetime(item.get("start"), errors="coerce")
+        end_ts = pd.to_datetime(item.get("end"), errors="coerce")
+        if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+            invalid_count += 1
+        else:
+            valid_count += 1
+    return valid_count, invalid_count
+
+
+def _home_analysis_range_summary(ranges: list, include_reason: bool = False) -> str:
+    """접힌 구간 제목에 표시할 간단 요약을 반환한다."""
+    valid_items = []
+    for item in ranges or []:
+        start_ts = pd.to_datetime(item.get("start"), errors="coerce")
+        end_ts = pd.to_datetime(item.get("end"), errors="coerce")
+        if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+            continue
+        valid_items.append((item, start_ts.normalize(), end_ts.normalize()))
+
+    if not valid_items:
+        return "유효 구간 없음"
+
+    first_item, first_start, first_end = valid_items[0]
+    summary = f"{first_start:%Y-%m-%d}~{first_end:%m-%d}"
+    if include_reason:
+        reason = str(first_item.get("reason", "") or "").strip()
+        if reason:
+            summary += f" · {reason}"
+    if len(valid_items) > 1:
+        summary += f" 외 {len(valid_items) - 1}건"
+    return summary
+
+
+def _home_analysis_default_state(home_data_min, home_data_max) -> tuple[dict, dict]:
+    """Home 분석 조건의 Draft/Applied 기본 상태를 생성한다."""
+    draft = {
+        "mode": "전체",
+        "base_start": home_data_min,
+        "base_end": home_data_max,
+        "include_ranges": [{"id": 1, "start": home_data_min, "end": home_data_max}],
+        "exclude_ranges": [{
+            "id": 1,
+            "start": home_data_min,
+            "end": home_data_min,
+            "reason_type": "사유 없음",
+            "reason_detail": "",
+            "reason": "",
+        }],
+        "next_include_id": 2,
+        "next_exclude_id": 2,
+    }
+    applied = {
+        "mode": "전체",
+        "base_start": home_data_min,
+        "base_end": home_data_max,
+        "include_ranges": [dict(x) for x in draft["include_ranges"]],
+        "exclude_ranges": [dict(x) for x in draft["exclude_ranges"]],
+    }
+    return draft, applied
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 연결
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7459,15 +7574,307 @@ if menu == "홈":
     st.markdown('<div class="section-title">홈 · 기간별 실적</div>', unsafe_allow_html=True)
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 홈 화면으로 바로 연결됩니다.")
 
-    monthly_all = aggregate_send(sends, "Monthly")
-    weekly_all = aggregate_send(sends, "Weekly")
+    home_date_series = sends["_date"] if "_date" in sends.columns else pd.Series(dtype="datetime64[ns]")
+    home_valid_dates = pd.to_datetime(home_date_series, errors="coerce").dropna()
+    if home_valid_dates.empty:
+        home_data_min = datetime.now().date()
+        home_data_max = home_data_min
+    else:
+        home_data_min = home_valid_dates.min().date()
+        home_data_max = home_valid_dates.max().date()
+
+    default_draft, default_applied = _home_analysis_default_state(home_data_min, home_data_max)
+    if "home_analysis_draft" not in st.session_state:
+        st.session_state.home_analysis_draft = default_draft
+    if "home_analysis_applied" not in st.session_state:
+        st.session_state.home_analysis_applied = default_applied
+
+    draft = st.session_state.home_analysis_draft
+    applied = st.session_state.home_analysis_applied
+
+    # 데이터 갱신으로 기존 저장 날짜가 현재 데이터 범위를 벗어난 경우 안전하게 보정
+    def _home_clamp_date(value, fallback):
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return fallback
+        parsed_date = parsed.date()
+        return min(max(parsed_date, home_data_min), home_data_max)
+
+    draft["base_start"] = _home_clamp_date(draft.get("base_start"), home_data_min)
+    draft["base_end"] = _home_clamp_date(draft.get("base_end"), home_data_max)
+    applied["base_start"] = _home_clamp_date(applied.get("base_start"), home_data_min)
+    applied["base_end"] = _home_clamp_date(applied.get("base_end"), home_data_max)
+    for state in (draft, applied):
+        state.setdefault("include_ranges", [{"id": 1, "start": home_data_min, "end": home_data_max}])
+        state.setdefault("exclude_ranges", [{
+            "id": 1, "start": home_data_min, "end": home_data_min,
+            "reason_type": "사유 없음", "reason_detail": "", "reason": "",
+        }])
+        for item in state["include_ranges"]:
+            item["start"] = _home_clamp_date(item.get("start"), home_data_min)
+            item["end"] = _home_clamp_date(item.get("end"), home_data_max)
+        for item in state["exclude_ranges"]:
+            item["start"] = _home_clamp_date(item.get("start"), home_data_min)
+            item["end"] = _home_clamp_date(item.get("end"), home_data_min)
+            existing_reason = str(item.get("reason", "") or "").strip()
+            existing_type = str(item.get("reason_type", "") or "").strip()
+            known_reasons = {"사유 없음", "보답프로그램", "기획전", "AI TEST", "시즌 제외", "데이터 이상", "기타"}
+            if existing_type not in known_reasons:
+                if existing_reason in known_reasons - {"사유 없음", "기타"}:
+                    existing_type = existing_reason
+                elif existing_reason:
+                    existing_type = "기타"
+                else:
+                    existing_type = "사유 없음"
+            item["reason_type"] = existing_type
+            item.setdefault("reason_detail", existing_reason if existing_type == "기타" else "")
+            item["reason"] = item.get("reason_detail", "").strip() if existing_type == "기타" else ("" if existing_type == "사유 없음" else existing_type)
+
+    st.markdown('<div class="section-title">📊 분석 조건 설정</div>', unsafe_allow_html=True)
+
+    notice = st.session_state.pop("home_analysis_notice", None)
+    if notice:
+        st.success(notice)
+
+    applied_is_custom = (
+        applied.get("mode", "전체") != "전체"
+        or applied.get("base_start") != home_data_min
+        or applied.get("base_end") != home_data_max
+    )
+    if applied_is_custom:
+        applied_parts = [str(applied.get("mode", "전체"))]
+        if applied.get("mode") in {"포함구간", "포함 + 제외"}:
+            applied_parts.append(f"포함 {len(applied.get('include_ranges', []))}개")
+        if applied.get("mode") in {"제외구간", "포함 + 제외"}:
+            applied_parts.append(f"제외 {len(applied.get('exclude_ranges', []))}개")
+        st.markdown(
+            "<div style='display:inline-block;padding:5px 10px;margin-bottom:8px;"
+            "border:1px solid #cfe0ff;border-radius:999px;background:#eef4ff;"
+            "font-size:0.86rem;color:#2f6fec;font-weight:700;'>"
+            f"📊 분석 조건 적용 중 · {' / '.join(applied_parts)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    analysis_modes = ["전체", "포함구간", "제외구간", "포함 + 제외"]
+    current_mode = draft.get("mode", "전체")
+    if current_mode not in analysis_modes:
+        current_mode = "전체"
+    draft["mode"] = st.radio(
+        "📌 분석 방식",
+        analysis_modes,
+        index=analysis_modes.index(current_mode),
+        horizontal=True,
+        key="home_analysis_mode",
+    )
+
+    st.markdown("**📅 기본 기간**")
+    base_col1, base_sep, base_col2 = st.columns([1, 0.08, 1])
+    with base_col1:
+        draft["base_start"] = st.date_input(
+            "기본 시작일",
+            value=draft.get("base_start", home_data_min),
+            min_value=home_data_min,
+            max_value=home_data_max,
+            format="YYYY-MM-DD",
+            key="home_analysis_base_start",
+            label_visibility="collapsed",
+        )
+    with base_sep:
+        st.markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
+    with base_col2:
+        draft["base_end"] = st.date_input(
+            "기본 종료일",
+            value=draft.get("base_end", home_data_max),
+            min_value=home_data_min,
+            max_value=home_data_max,
+            format="YYYY-MM-DD",
+            key="home_analysis_base_end",
+            label_visibility="collapsed",
+        )
+
+    base_invalid = draft["base_start"] > draft["base_end"]
+    if base_invalid:
+        st.warning("기본 기간의 시작일은 종료일보다 늦을 수 없습니다.")
+
+    include_ranges = draft["include_ranges"]
+    exclude_ranges = draft["exclude_ranges"]
+
+    if draft["mode"] in {"포함구간", "포함 + 제외"}:
+        include_summary = _home_analysis_range_summary(include_ranges)
+        with st.expander(f"📂 포함구간 ({len(include_ranges)}) · {include_summary}", expanded=False):
+            delete_include_id = None
+            for idx, item in enumerate(include_ranges, start=1):
+                row = st.columns([0.14, 1, 0.08, 1, 0.34])
+                row[0].markdown(f"**{idx}**")
+                item["start"] = row[1].date_input(
+                    f"포함 시작일 {idx}", value=item["start"],
+                    min_value=home_data_min, max_value=home_data_max,
+                    format="YYYY-MM-DD", key=f"home_inc_start_{item['id']}",
+                    label_visibility="collapsed",
+                )
+                row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
+                item["end"] = row[3].date_input(
+                    f"포함 종료일 {idx}", value=item["end"],
+                    min_value=home_data_min, max_value=home_data_max,
+                    format="YYYY-MM-DD", key=f"home_inc_end_{item['id']}",
+                    label_visibility="collapsed",
+                )
+                if row[4].button(
+                    "삭제", key=f"home_inc_del_{item['id']}",
+                    use_container_width=True, disabled=len(include_ranges) <= 1,
+                ):
+                    delete_include_id = item["id"]
+            if delete_include_id is not None:
+                draft["include_ranges"] = [x for x in include_ranges if x["id"] != delete_include_id]
+                st.rerun()
+            if st.button("＋ 포함구간 추가", key="home_inc_add", use_container_width=True):
+                new_id = draft["next_include_id"]
+                draft["next_include_id"] += 1
+                draft["include_ranges"].append({
+                    "id": new_id,
+                    "start": draft["base_start"],
+                    "end": draft["base_start"],
+                })
+                st.rerun()
+            valid_include_count, invalid_include_count = _home_analysis_valid_range_count(draft["include_ranges"])
+            if valid_include_count == 0:
+                st.warning("적용 가능한 포함구간이 없습니다.")
+            if invalid_include_count:
+                st.warning(f"시작일이 종료일보다 늦은 포함구간 {invalid_include_count}개는 적용에서 제외됩니다.")
+
+    if draft["mode"] in {"제외구간", "포함 + 제외"}:
+        exclude_summary = _home_analysis_range_summary(exclude_ranges, include_reason=True)
+        reason_options = ["사유 없음", "보답프로그램", "기획전", "AI TEST", "시즌 제외", "데이터 이상", "기타"]
+        with st.expander(f"📂 제외구간 ({len(exclude_ranges)}) · {exclude_summary}", expanded=False):
+            delete_exclude_id = None
+            for idx, item in enumerate(exclude_ranges, start=1):
+                row = st.columns([0.12, 0.84, 0.06, 0.84, 0.92, 0.92, 0.3])
+                row[0].markdown(f"**{idx}**")
+                item["start"] = row[1].date_input(
+                    f"제외 시작일 {idx}", value=item["start"],
+                    min_value=home_data_min, max_value=home_data_max,
+                    format="YYYY-MM-DD", key=f"home_exc_start_{item['id']}",
+                    label_visibility="collapsed",
+                )
+                row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
+                item["end"] = row[3].date_input(
+                    f"제외 종료일 {idx}", value=item["end"],
+                    min_value=home_data_min, max_value=home_data_max,
+                    format="YYYY-MM-DD", key=f"home_exc_end_{item['id']}",
+                    label_visibility="collapsed",
+                )
+                current_reason_type = item.get("reason_type", "사유 없음")
+                if current_reason_type not in reason_options:
+                    current_reason_type = "기타" if item.get("reason") else "사유 없음"
+                item["reason_type"] = row[4].selectbox(
+                    f"제외 사유 {idx}", reason_options,
+                    index=reason_options.index(current_reason_type),
+                    key=f"home_exc_reason_type_{item['id']}",
+                    label_visibility="collapsed",
+                )
+                if item["reason_type"] == "기타":
+                    item["reason_detail"] = row[5].text_input(
+                        f"기타 사유 {idx}", value=item.get("reason_detail", ""),
+                        placeholder="직접 입력", key=f"home_exc_reason_detail_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    item["reason"] = item["reason_detail"].strip()
+                else:
+                    row[5].markdown("<div style='height:38px;'></div>", unsafe_allow_html=True)
+                    item["reason_detail"] = item.get("reason_detail", "")
+                    item["reason"] = "" if item["reason_type"] == "사유 없음" else item["reason_type"]
+                if row[6].button(
+                    "삭제", key=f"home_exc_del_{item['id']}",
+                    use_container_width=True, disabled=len(exclude_ranges) <= 1,
+                ):
+                    delete_exclude_id = item["id"]
+            if delete_exclude_id is not None:
+                draft["exclude_ranges"] = [x for x in exclude_ranges if x["id"] != delete_exclude_id]
+                st.rerun()
+            if st.button("＋ 제외구간 추가", key="home_exc_add", use_container_width=True):
+                new_id = draft["next_exclude_id"]
+                draft["next_exclude_id"] += 1
+                draft["exclude_ranges"].append({
+                    "id": new_id,
+                    "start": draft["base_start"],
+                    "end": draft["base_start"],
+                    "reason_type": "사유 없음",
+                    "reason_detail": "",
+                    "reason": "",
+                })
+                st.rerun()
+            _, invalid_exclude_count = _home_analysis_valid_range_count(draft["exclude_ranges"])
+            if invalid_exclude_count:
+                st.warning(f"시작일이 종료일보다 늦은 제외구간 {invalid_exclude_count}개는 적용에서 제외됩니다.")
+
+    base_preview_df = apply_home_analysis_date_filter(
+        sends, "전체", draft["base_start"], draft["base_end"], [], [],
+    ) if not base_invalid else sends.iloc[0:0].copy()
+    preview_df = apply_home_analysis_date_filter(
+        sends, draft["mode"], draft["base_start"], draft["base_end"],
+        draft["include_ranges"], draft["exclude_ranges"],
+    ) if not base_invalid else sends.iloc[0:0].copy()
+
+    base_days = int(pd.to_datetime(base_preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not base_preview_df.empty else 0
+    preview_days = int(pd.to_datetime(preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not preview_df.empty else 0
+    preview_send_count = int(len(preview_df))
+
+    result_col, apply_col, reset_col = st.columns([3.2, 0.9, 0.9])
+    result_col.markdown(
+        f"**📋 분석 대상 : {preview_days:,}일 (발송 {preview_send_count:,}건) · 기본 {base_days:,}일 → 적용 {preview_days:,}일**"
+    )
+    apply_clicked = apply_col.button(
+        "✔ 적용", key="home_analysis_apply", use_container_width=True,
+        disabled=base_invalid or preview_days == 0,
+    )
+    reset_clicked = reset_col.button(
+        "↺ 초기화", key="home_analysis_reset", use_container_width=True,
+    )
+
+    if preview_days == 0 and not base_invalid:
+        st.warning("현재 조건에 해당하는 데이터가 없어 적용할 수 없습니다.")
+
+    if reset_clicked:
+        reset_draft, reset_applied = _home_analysis_default_state(home_data_min, home_data_max)
+        st.session_state.home_analysis_draft = reset_draft
+        st.session_state.home_analysis_applied = reset_applied
+        widget_keys = [
+            key for key in list(st.session_state.keys())
+            if key in {"home_analysis_mode", "home_analysis_base_start", "home_analysis_base_end"}
+            or key.startswith("home_inc_")
+            or key.startswith("home_exc_")
+        ]
+        for key in widget_keys:
+            del st.session_state[key]
+        st.session_state.home_analysis_notice = "Home 분석 조건을 초기화했습니다."
+        st.rerun()
+
+    if apply_clicked:
+        st.session_state.home_analysis_applied = {
+            "mode": draft["mode"],
+            "base_start": draft["base_start"],
+            "base_end": draft["base_end"],
+            "include_ranges": [dict(x) for x in draft["include_ranges"]],
+            "exclude_ranges": [dict(x) for x in draft["exclude_ranges"]],
+        }
+        st.session_state.home_analysis_notice = "Home 분석 조건을 적용했습니다."
+        st.rerun()
+
+    applied = st.session_state.home_analysis_applied
+    home_filtered_sends = apply_home_analysis_date_filter(
+        sends, applied["mode"], applied["base_start"], applied["base_end"],
+        applied["include_ranges"], applied["exclude_ranges"],
+    )
+
+    monthly_all = aggregate_send(home_filtered_sends, "Monthly")
+    weekly_all = aggregate_send(home_filtered_sends, "Weekly")
     daily_all = aggregate_send(sends, "Daily")
 
     # 월간 기간 필터
     c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
     with c1:
         month_option = st.selectbox("월간 조회 기간", ["전체", "최근 3개월", "최근 6개월", "최근 12개월", "직접 선택"])
-    month_labels = monthly_all["_label"].astype(str).tolist()
+    month_labels = monthly_all["_label"].astype(str).tolist() if not monthly_all.empty else []
     start_month = end_month = None
     if month_option == "직접 선택" and month_labels:
         with c2:
@@ -7476,7 +7883,6 @@ if menu == "홈":
             end_month = st.selectbox("종료월", month_labels, index=len(month_labels)-1)
 
     monthly = filter_monthly_period(monthly_all, month_option, start_month, end_month)
-
     weekly = weekly_all.copy()
 
     # KPI
@@ -7502,22 +7908,23 @@ if menu == "홈":
 
     # 월간 그래프와 표
     st.markdown('<div class="section-title">월별 SPM / 발송대비매출</div>', unsafe_allow_html=True)
-    st.plotly_chart(
-        trend_chart(monthly, "월별 SPM / 발송대비매출", "#fdbb00"),
-        use_container_width=True,
-        config={"displayModeBar": False},
-    )
-    st.dataframe(
-        clean_identifier_columns(format_home_table_with_summary(monthly, "Monthly")),
-        use_container_width=True,
-        hide_index=True,
-        height=400,
-    )
+    if monthly.empty:
+        st.info("적용된 분석 조건에 해당하는 월별 데이터가 없습니다.")
+    else:
+        st.plotly_chart(
+            trend_chart(monthly, "월별 SPM / 발송대비매출", "#fdbb00"),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+        st.dataframe(
+            clean_identifier_columns(format_home_table_with_summary(monthly, "Monthly")),
+            use_container_width=True, hide_index=True, height=400,
+        )
 
     # 주간 그래프와 표 - 독립 조회 기간
     st.markdown('<div class="section-title">주간 SPM / 발송대비매출</div>', unsafe_allow_html=True)
     st.caption("주간 조회 기간")
-    week_labels = weekly_all["_label"].astype(str).tolist()
+    week_labels = weekly_all["_label"].astype(str).tolist() if not weekly_all.empty else []
     if week_labels:
         week_start_col, week_end_col = st.columns(2)
         with week_start_col:
@@ -7532,37 +7939,28 @@ if menu == "홈":
     else:
         st.plotly_chart(
             trend_chart(weekly, "주간 SPM / 발송대비매출", "#70ad47"),
-            use_container_width=True,
-            config={"displayModeBar": False},
+            use_container_width=True, config={"displayModeBar": False},
         )
         st.dataframe(
             clean_identifier_columns(format_home_table_with_summary(weekly, "Weekly")),
-            use_container_width=True,
-            hide_index=True,
-            height=520,
+            use_container_width=True, hide_index=True, height=520,
         )
 
-    # 일간 표: 실제 날짜 필터
+    # 일간 표: 기존 Home 일간 조회 로직 유지(분석 조건 미적용)
     st.markdown('<div class="section-title">Daily</div>', unsafe_allow_html=True)
     st.caption("일간 조회 기간")
     daily_start_col, daily_end_col = st.columns(2)
     with daily_start_col:
         daily_start_date = st.date_input(
-            "시작일",
-            value=sends["_date"].min().date(),
-            min_value=sends["_date"].min().date(),
-            max_value=sends["_date"].max().date(),
-            format="YYYY/MM/DD",
-            key="home_daily_start",
+            "시작일", value=sends["_date"].min().date(),
+            min_value=sends["_date"].min().date(), max_value=sends["_date"].max().date(),
+            format="YYYY/MM/DD", key="home_daily_start",
         )
     with daily_end_col:
         daily_end_date = st.date_input(
-            "종료일",
-            value=sends["_date"].max().date(),
-            min_value=sends["_date"].min().date(),
-            max_value=sends["_date"].max().date(),
-            format="YYYY/MM/DD",
-            key="home_daily_end",
+            "종료일", value=sends["_date"].max().date(),
+            min_value=sends["_date"].min().date(), max_value=sends["_date"].max().date(),
+            format="YYYY/MM/DD", key="home_daily_end",
         )
     if daily_start_date > daily_end_date:
         daily_start_date, daily_end_date = daily_end_date, daily_start_date
@@ -7576,9 +7974,7 @@ if menu == "홈":
     else:
         st.dataframe(
             clean_identifier_columns(format_home_table_with_summary(daily, "Daily")),
-            use_container_width=True,
-            hide_index=True,
-            height=480,
+            use_container_width=True, hide_index=True, height=480,
         )
 
 
