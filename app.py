@@ -8763,13 +8763,47 @@ elif menu == "상품구분":
             key="product_group_name_search",
         )
 
-    group_keys = [c for c in ["쇼라코드", "알파코드", "상품명"] if c in filt.columns]
+    # 동일 상품번호는 상품명이 달라도 한 행으로 집계
+    # 상품번호 컬럼이 없는 예외 데이터에서만 기존처럼 상품명 기준으로 집계
+    product_code_keys = [c for c in ["쇼라코드", "알파코드"] if c in filt.columns]
+    group_keys = product_code_keys if product_code_keys else ["상품명"]
+
     grouped = filt.groupby(group_keys, dropna=False, as_index=False).agg(
         운영횟수=("상품명", "size"),
         최고실적=("주문금액", "max"),
         최저실적=("주문금액", "min"),
         평균실적=("주문금액", "mean"),
     )
+
+    if product_code_keys and "상품명" in filt.columns:
+        # 화면에는 동일 상품번호의 가장 최근 상품명을 대표 상품명으로 표시
+        name_source = filt[group_keys + ["상품명", "_date"]].copy()
+        name_source["상품명"] = name_source["상품명"].fillna("").astype(str).str.strip()
+        valid_name_source = name_source[name_source["상품명"].ne("")].copy()
+
+        if not valid_name_source.empty:
+            latest_names = (
+                valid_name_source
+                .sort_values("_date")
+                .drop_duplicates(group_keys, keep="last")
+                [group_keys + ["상품명"]]
+            )
+            name_history = (
+                valid_name_source
+                .groupby(group_keys, dropna=False)["상품명"]
+                .agg(lambda values: " | ".join(dict.fromkeys(values.tolist())))
+                .reset_index(name="상품명검색")
+            )
+            grouped = grouped.merge(latest_names, on=group_keys, how="left")
+            grouped = grouped.merge(name_history, on=group_keys, how="left")
+        else:
+            grouped["상품명"] = ""
+            grouped["상품명검색"] = ""
+    else:
+        grouped["상품명검색"] = grouped.get("상품명", "").astype(str)
+
+    grouped["상품명"] = grouped["상품명"].fillna("")
+    grouped["상품명검색"] = grouped["상품명검색"].fillna(grouped["상품명"]).astype(str)
     grouped["등급"] = grouped["평균실적"].apply(product_grade)
 
     kpi_cols = st.columns(6)
@@ -8821,7 +8855,9 @@ elif menu == "상품구분":
         result = result[number_mask]
 
     if product_name_search.strip():
-        result = result[result["상품명"].astype(str).str.contains(
+        # 대표 상품명뿐 아니라 동일 상품번호의 과거 상품명 전체를 대상으로 검색
+        product_name_search_col = "상품명검색" if "상품명검색" in result.columns else "상품명"
+        result = result[result[product_name_search_col].astype(str).str.contains(
             product_name_search.strip(), case=False, na=False, regex=False
         )]
 
