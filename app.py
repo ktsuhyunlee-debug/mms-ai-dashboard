@@ -733,6 +733,46 @@ def normalize_lowest(df: pd.DataFrame | None) -> pd.DataFrame:
 
 
 
+def normalize_schedule_exclusion_rules(df: pd.DataFrame | None) -> pd.DataFrame:
+    """'편성제외규칙' 탭을 자동 편성용 규칙으로 정규화합니다.
+
+    필수 컬럼: 구분 / 조건값 / 제외타겟 / 비고
+    - 구분: 키워드 또는 상품번호
+    - 조건값: 상품명 포함 키워드 또는 쇼라/알파 상품번호
+    - 제외타겟: 남성 / 여성 / 전체
+    """
+    cols = ["구분", "조건값", "제외타겟", "비고"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+
+    d = df.copy()
+    for col in cols:
+        if col not in d.columns:
+            d[col] = ""
+    d = d[cols].copy()
+    for col in cols:
+        d[col] = d[col].fillna("").astype(str).str.strip()
+
+    d["구분"] = d["구분"].replace({
+        "키워드규칙": "키워드",
+        "상품": "상품번호",
+        "상품코드": "상품번호",
+        "코드": "상품번호",
+    })
+    d["제외타겟"] = d["제외타겟"].map(
+        lambda value: "여성" if "여성" in str(value) else ("남성" if "남성" in str(value) else ("전체" if "전체" in str(value) else ""))
+    )
+
+    number_mask = d["구분"].eq("상품번호")
+    d.loc[number_mask, "조건값"] = d.loc[number_mask, "조건값"].map(clean_identifier_value)
+    return d[
+        d["구분"].isin(["키워드", "상품번호"])
+        & d["조건값"].ne("")
+        & d["제외타겟"].isin(["남성", "여성", "전체"])
+    ].drop_duplicates(["구분", "조건값", "제외타겟"], keep="last").reset_index(drop=True)
+
+
+
 def normalize_operation_issues(df: pd.DataFrame | None) -> pd.DataFrame:
     """구글시트/엑셀 '운영이슈' 탭을 일일실적 인사이트용으로 정규화합니다."""
     cols = ["이슈유형","발송일","기준알파코드","기준쇼라코드","기존알파코드","기존쇼라코드","이슈내용"]
@@ -859,6 +899,11 @@ def load_excel_bytes(file_bytes: bytes):
         if "운영이슈" in workbook.sheet_names
         else pd.DataFrame()
     )
+    schedule_exclusion_rules = (
+        pd.read_excel(workbook, sheet_name="편성제외규칙")
+        if "편성제외규칙" in workbook.sheet_names
+        else pd.DataFrame()
+    )
     normalized_promotions = normalize_promotion(promotions)
     normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
     return (
@@ -868,6 +913,7 @@ def load_excel_bytes(file_bytes: bytes):
         normalize_message(messages),
         normalized_promotions,
         normalize_operation_issues(operation_issues),
+        normalize_schedule_exclusion_rules(schedule_exclusion_rules),
     )
 
 
@@ -955,6 +1001,10 @@ def load_google_sheet(url: str):
             operation_issues_raw = read_google_csv(sheet_id, "운영이슈")
         except Exception:
             operation_issues_raw = pd.DataFrame()
+        try:
+            schedule_exclusion_rules_raw = read_google_csv(sheet_id, "편성제외규칙")
+        except Exception:
+            schedule_exclusion_rules_raw = pd.DataFrame()
         normalized_promotions = normalize_promotion(promotions_raw)
         normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
         return (
@@ -964,6 +1014,7 @@ def load_google_sheet(url: str):
             normalize_message(messages),
             normalized_promotions,
             normalize_operation_issues(operation_issues_raw),
+            normalize_schedule_exclusion_rules(schedule_exclusion_rules_raw),
         )
     except Exception as exc:
         errors.append(f"상품·소재 CSV 불러오기 실패: {exc}")
@@ -976,13 +1027,14 @@ def sync_google_sheet(url: str, force: bool = False):
     if force:
         load_google_sheet.clear()
 
-    products, sends, lowest, messages, promotions, operation_issues = load_google_sheet(url)
+    products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules = load_google_sheet(url)
     st.session_state.products = products
     st.session_state.sends = sends
     st.session_state.lowest = lowest
     st.session_state.messages = messages
     st.session_state.promotions = promotions
     st.session_state.operation_issues = operation_issues
+    st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
     st.session_state.source_name = "구글시트 자동연동"
     sync_time = datetime.now()
     st.session_state.synced_at = sync_time
@@ -7026,25 +7078,107 @@ def parse_target_text(target_text: str) -> dict:
     return {"성별": gender, "연령": age, "SEG": seg}
 
 
-def is_candidate_gender_compatible(candidate: pd.Series, target_text: str) -> bool:
-    """상품명 기준 성별 전용 상품을 타겟 후보에서 제외합니다."""
-    target = parse_target_text(target_text)
-    target_gender = target.get("성별", "")
-    name = str(candidate.get("상품명", "")).lower().replace(" ", "")
+def _normalize_schedule_rule_text(value) -> str:
+    """키워드 비교용 문자열: 소문자 + 모든 공백 제거."""
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
 
-    male_only_keywords = [
+
+def _explicit_product_gender(product_name: str) -> str:
+    """상품명에 성별이 명확히 적힌 경우 남성/여성을 우선 판정합니다.
+
+    예: '여성용 면도기'는 일반 '면도기→여성 제외' 규칙보다 여성 명시를 우선합니다.
+    남성·여성이 동시에 적힌 공용/혼합 상품은 명확한 단일 성별로 보지 않습니다.
+    """
+    name = _normalize_schedule_rule_text(product_name)
+    female_markers = ["여성용", "여자용", "여성전용", "여성", "여자"]
+    male_markers = ["남성용", "남자용", "남성전용", "남성", "남자"]
+    has_female = any(marker in name for marker in female_markers)
+    has_male = any(marker in name for marker in male_markers)
+    if has_female and not has_male:
+        return "여성"
+    if has_male and not has_female:
+        return "남성"
+    return ""
+
+
+def _default_schedule_exclusion_rules() -> pd.DataFrame:
+    """편성제외규칙 탭이 없을 때 기존 성별 제외 동작을 유지하기 위한 기본 규칙."""
+    rows = []
+    for keyword in [
         "면도기", "전기면도기", "남성그루밍", "그루밍풀세트", "코털제거기",
         "남성드로즈", "남성언더웨어", "남성용", "남자용", "남성팬티",
-    ]
-    female_only_keywords = [
+    ]:
+        rows.append({"구분": "키워드", "조건값": keyword, "제외타겟": "여성", "비고": "기존 기본 규칙"})
+    for keyword in [
         "여성언더웨어", "여성용", "여자용", "여성팬티", "여성브라", "브라팬티",
-    ]
+    ]:
+        rows.append({"구분": "키워드", "조건값": keyword, "제외타겟": "남성", "비고": "기존 기본 규칙"})
+    return pd.DataFrame(rows)
 
-    if target_gender == "여성" and any(keyword in name for keyword in male_only_keywords):
-        return False
-    if target_gender == "남성" and any(keyword in name for keyword in female_only_keywords):
-        return False
-    return True
+
+def is_candidate_gender_compatible(
+    candidate: pd.Series,
+    target_text: str,
+    exclusion_rules: pd.DataFrame | None = None,
+) -> bool:
+    """'편성제외규칙' 탭을 기준으로 상품의 타겟 편성 가능 여부를 판단합니다.
+
+    우선순위
+    1) 상품번호 직접 규칙(쇼라코드/알파코드)
+    2) 상품명에 명확히 적힌 성별(여성/남성)
+    3) 키워드 규칙: 여러 개가 걸리면 가장 구체적인(공백 제거 후 가장 긴) 조건 우선
+    """
+    target = parse_target_text(target_text)
+    target_gender = target.get("성별", "")
+    if target_gender not in ["남성", "여성"]:
+        return True
+
+    rules = exclusion_rules
+    if rules is None or not isinstance(rules, pd.DataFrame) or rules.empty:
+        rules = _default_schedule_exclusion_rules()
+    else:
+        rules = normalize_schedule_exclusion_rules(rules)
+
+    # 1) 상품번호 직접 지정이 있으면 가장 먼저 적용합니다. 조건값은 쇼라/알파코드 모두 비교합니다.
+    code_values = {
+        clean_identifier_value(candidate.get("쇼라코드", "")),
+        clean_identifier_value(candidate.get("알파코드", "")),
+    }
+    code_values.discard("")
+    if code_values and not rules.empty:
+        number_rules = rules[rules["구분"].eq("상품번호")].copy()
+        if not number_rules.empty:
+            direct = number_rules[number_rules["조건값"].map(clean_identifier_value).isin(code_values)]
+            if not direct.empty:
+                excluded = set(direct["제외타겟"].astype(str))
+                return not ("전체" in excluded or target_gender in excluded)
+
+    product_name = str(candidate.get("상품명", "")).strip()
+    normalized_name = _normalize_schedule_rule_text(product_name)
+
+    # 2) 상품명에 '여성/남성'이 명확히 있으면 일반 카테고리 키워드보다 우선합니다.
+    explicit_gender = _explicit_product_gender(product_name)
+    if explicit_gender:
+        return target_gender == explicit_gender
+
+    # 3) 일반 키워드 규칙. 공백 차이는 무시하고, 동시에 여러 규칙이 걸리면 더 긴 조건을 우선합니다.
+    keyword_rules = rules[rules["구분"].eq("키워드")].copy()
+    if keyword_rules.empty or not normalized_name:
+        return True
+
+    keyword_rules["_normalized_condition"] = keyword_rules["조건값"].map(_normalize_schedule_rule_text)
+    keyword_rules = keyword_rules[keyword_rules["_normalized_condition"].ne("")].copy()
+    matched = keyword_rules[
+        keyword_rules["_normalized_condition"].map(lambda condition: condition in normalized_name)
+    ].copy()
+    if matched.empty:
+        return True
+
+    matched["_specificity"] = matched["_normalized_condition"].str.len()
+    max_specificity = matched["_specificity"].max()
+    most_specific = matched[matched["_specificity"].eq(max_specificity)]
+    excluded = set(most_specific["제외타겟"].astype(str))
+    return not ("전체" in excluded or target_gender in excluded)
 
 
 def match_candidate_history(candidate: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
@@ -7163,14 +7297,13 @@ def build_schedule_recommendations(
     history: pd.DataFrame,
     cooldown_days: int,
     max_weekly_count: int,
+    exclusion_rules: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    """입력 후보 안에서 매출 우선으로 슬롯별 상품을 자동 배치합니다."""
+    """입력 후보 안에서 매출 우선으로 배치하며 재편성 제한일은 슬롯별 발송일 기준으로 판단합니다."""
     result_rows = []
     detail_map = {}
     weekly_counts = {}
     day_products = {}
-    planned_dates = pd.to_datetime(slots.get("발송일", pd.Series(dtype=object)), errors="coerce")
-    plan_reference = planned_dates.min() if planned_dates.notna().any() else history["_date"].max()
 
     for slot_idx, slot in slots.iterrows():
         target = str(slot.get("타겟", "")).strip()
@@ -7187,7 +7320,7 @@ def build_schedule_recommendations(
         ranked_by_product = {}
         for cand_idx, candidate in candidates.iterrows():
             # 성별 전용 상품은 타겟 부적합 시 점수 계산 전에 후보군에서 제외합니다.
-            if not is_candidate_gender_compatible(candidate, target):
+            if not is_candidate_gender_compatible(candidate, target, exclusion_rules):
                 continue
 
             product_key = (
@@ -7204,8 +7337,13 @@ def build_schedule_recommendations(
 
             metrics = candidate_slot_metrics(candidate, target, history)
             latest_date = metrics.get("최근발송일")
-            if latest_date is not None and pd.notna(latest_date) and pd.notna(plan_reference):
-                elapsed = (pd.Timestamp(plan_reference) - pd.Timestamp(latest_date)).days
+            # 재편성 제한일은 전체 편성안의 최초 날짜가 아니라
+            # 현재 처리 중인 슬롯의 실제 발송일을 기준으로 개별 판단합니다.
+            if latest_date is not None and pd.notna(latest_date) and pd.notna(slot_date):
+                elapsed = (
+                    pd.Timestamp(slot_date).normalize()
+                    - pd.Timestamp(latest_date).normalize()
+                ).days
                 if elapsed < cooldown_days:
                     continue
 
@@ -8073,6 +8211,7 @@ if "products" not in st.session_state:
     st.session_state.lowest = pd.DataFrame()
     st.session_state.messages = pd.DataFrame(columns=["캠페인명", "MMS문구"])
     st.session_state.promotions = pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"])
+    st.session_state.schedule_exclusion_rules = pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"])
     st.session_state.auto_sync_attempted = False
     st.session_state.data_version = None
     st.session_state.uploaded_file_signature = None
@@ -8081,6 +8220,8 @@ if "data_version" not in st.session_state:
     st.session_state.data_version = None
 if "uploaded_file_signature" not in st.session_state:
     st.session_state.uploaded_file_signature = None
+if "schedule_exclusion_rules" not in st.session_state:
+    st.session_state.schedule_exclusion_rules = pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"])
 
 st.sidebar.markdown(
     """
@@ -8149,13 +8290,14 @@ else:
                 and st.session_state.sends is not None
             )
             if not same_uploaded_source:
-                products, sends, lowest, messages, promotions, operation_issues = load_excel_bytes(uploaded_bytes)
+                products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules = load_excel_bytes(uploaded_bytes)
                 st.session_state.products = products
                 st.session_state.sends = sends
                 st.session_state.lowest = lowest
                 st.session_state.messages = messages
                 st.session_state.promotions = promotions
                 st.session_state.operation_issues = operation_issues
+                st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
                 st.session_state.source_name = uploaded.name
                 st.session_state.synced_at = datetime.now()
                 st.session_state.uploaded_file_signature = uploaded_signature
@@ -8176,6 +8318,10 @@ sends = st.session_state.sends
 lowest = st.session_state.get("lowest", pd.DataFrame())
 messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명", "MMS문구"]))
 promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"]))
+schedule_exclusion_rules = st.session_state.get(
+    "schedule_exclusion_rules",
+    pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"]),
+)
 
 _menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"]
 _menu_slug_to_name = {
@@ -9604,6 +9750,10 @@ elif menu == "편성 프로그램":
         "발송 슬롯과 소재를 각각 입력한 뒤, 주력 상품 안에서 과거 주문금액을 우선으로 자동 편성합니다. "
         "같은 날짜의 동일 상품 중복 편성은 자동으로 제외됩니다."
     )
+    if isinstance(schedule_exclusion_rules, pd.DataFrame) and not schedule_exclusion_rules.empty:
+        st.caption(f"편성제외규칙 {len(schedule_exclusion_rules):,}건 적용 중 · 시트에 행을 추가한 뒤 데이터 새로고침 시 자동 반영")
+    else:
+        st.caption("편성제외규칙 탭이 없거나 비어 있어 기존 기본 성별 제외 규칙을 적용 중입니다.")
 
     tab_input, tab_result, tab_history = st.tabs([
         "① 편성 조건 입력",
@@ -9764,6 +9914,7 @@ elif menu == "편성 프로그램":
                     products,
                     int(cooldown_days),
                     int(max_weekly_count),
+                    schedule_exclusion_rules,
                 )
                 st.session_state.schedule_result = result
                 st.session_state.schedule_detail_map = detail_map
