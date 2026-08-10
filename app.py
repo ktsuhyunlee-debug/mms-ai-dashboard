@@ -1035,6 +1035,9 @@ def sync_google_sheet(url: str, force: bool = False):
     st.session_state.promotions = promotions
     st.session_state.operation_issues = operation_issues
     st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
+    # 데이터/편성제외규칙이 갱신되면 이전 자동 편성 결과가 최신 규칙처럼 보이지 않도록 초기화합니다.
+    st.session_state.schedule_result = pd.DataFrame()
+    st.session_state.schedule_detail_map = {}
     st.session_state.source_name = "구글시트 자동연동"
     sync_time = datetime.now()
     st.session_state.synced_at = sync_time
@@ -2838,6 +2841,202 @@ def clean_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
         if c in out.columns:
             out[c] = out[c].map(clean_identifier_value)
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V1.9 데이터표 셀 드래그 합계/평균
+# - Streamlit 1.49+ multi-cell 선택 사용
+# - 숫자가 아닌 셀과 식별자 컬럼은 합산에서 제외
+# - 여러 열 선택 시 단위가 섞이지 않도록 열별로 요약
+# - 기존 행 선택 상세보기 표는 single-row + multi-cell 동시 지원
+# ─────────────────────────────────────────────────────────────────────────────
+_SELECTION_SUMMARY_EXCLUDED_COLUMNS = {
+    "알파코드", "쇼라코드", "URL", "연도", "월", "일", "일자", "SEG", "전시순서"
+}
+
+
+def _streamlit_supports_multi_cell_selection() -> bool:
+    """multi-cell 선택이 도입된 Streamlit 1.49 이상인지 확인한다."""
+    version_text = str(getattr(st, "__version__", "0.0.0"))
+    numbers = [int(x) for x in re.findall(r"\d+", version_text)[:3]]
+    numbers += [0] * (3 - len(numbers))
+    return tuple(numbers[:3]) >= (1, 49, 0)
+
+
+def _selection_table_signature(df: pd.DataFrame | None) -> str:
+    """선택 상태가 다른 표 데이터로 넘어가지 않도록 가벼운 표시 데이터 서명 생성."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return "empty"
+    try:
+        sample_idx = list(range(min(2, len(df))))
+        if len(df) > 2:
+            sample_idx += list(range(max(2, len(df) - 2), len(df)))
+        sample = df.iloc[sorted(set(sample_idx))].copy()
+        payload = "|".join(map(str, df.columns)) + f"|rows={len(df)}|" + sample.astype(str).to_csv(index=False)
+        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    except Exception:
+        return f"rows{len(df)}_cols{len(df.columns)}"
+
+
+def _parse_selection_numeric(value):
+    """표시 셀 값을 합산 가능한 숫자로 변환. 반환값은 (숫자, 단위)."""
+    if value is None or isinstance(value, bool) or pd.isna(value):
+        return None, ""
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+            return (number, "") if math.isfinite(number) else (None, "")
+        except Exception:
+            return None, ""
+
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"nan", "none", "null", "-", "—"}:
+        return None, ""
+    # 날짜·시간처럼 보이는 값은 숫자 합산에서 제외
+    if re.fullmatch(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}.*", raw) or re.fullmatch(r"\d{1,2}:\d{2}", raw):
+        return None, ""
+
+    unit = "%" if raw.endswith("%") else ""
+    multiplier = 1.0
+    compact_units = [
+        ("천만원", 10_000_000.0),
+        ("백만원", 1_000_000.0),
+        ("만원", 10_000.0),
+        ("천원", 1_000.0),
+    ]
+    for suffix, factor in compact_units:
+        if suffix in raw:
+            multiplier = factor
+            raw = raw.replace(suffix, "")
+            unit = "원"
+            break
+
+    cleaned = raw.replace(",", "").replace("₩", "").replace("원", "").replace("%", "").strip()
+    cleaned = re.sub(r"\s*(회|건|개|명)$", "", cleaned)
+    if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", cleaned):
+        return None, ""
+    try:
+        return float(cleaned) * multiplier, unit
+    except Exception:
+        return None, ""
+
+
+def _format_selection_summary_number(value: float, unit: str = "") -> str:
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    if unit == "%":
+        text = f"{number:,.2f}".rstrip("0").rstrip(".")
+        return f"{text}%"
+    if abs(number - round(number)) < 1e-9:
+        text = f"{int(round(number)):,}"
+    else:
+        text = f"{number:,.2f}".rstrip("0").rstrip(".")
+    return f"{text}{unit}"
+
+
+def _render_selected_cell_summary(event, summary_df: pd.DataFrame | None) -> None:
+    if event is None or summary_df is None or not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
+        return
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection", {})
+    cells = getattr(selection, "cells", None)
+    if cells is None and isinstance(selection, dict):
+        cells = selection.get("cells", [])
+    cells = list(cells or [])
+    if not cells:
+        return
+
+    by_column = {}
+    numeric_count = 0
+    for cell in cells:
+        try:
+            row_idx, col_name = cell[0], cell[1]
+            row_idx = int(row_idx)
+            col_name = str(col_name)
+        except Exception:
+            continue
+        if col_name in _SELECTION_SUMMARY_EXCLUDED_COLUMNS:
+            continue
+        if col_name not in summary_df.columns or not (0 <= row_idx < len(summary_df)):
+            continue
+        value = summary_df.iloc[row_idx][col_name]
+        # 중복 컬럼명 등 비정상 케이스는 합산 제외
+        if isinstance(value, pd.Series):
+            continue
+        number, unit = _parse_selection_numeric(value)
+        if number is None:
+            continue
+        bucket = by_column.setdefault(col_name, {"values": [], "units": []})
+        bucket["values"].append(float(number))
+        bucket["units"].append(unit)
+        numeric_count += 1
+
+    if numeric_count == 0:
+        st.caption(f"선택 영역 · {len(cells):,}셀 · 합산 가능한 숫자 없음")
+        return
+
+    summaries = []
+    for col_name in summary_df.columns:
+        if col_name not in by_column:
+            continue
+        values = by_column[col_name]["values"]
+        units = [u for u in by_column[col_name]["units"] if u]
+        unit = units[0] if units and all(u == units[0] for u in units) else ""
+        total = sum(values)
+        avg = total / len(values) if values else 0
+        summaries.append(
+            f"{col_name} {len(values):,}셀 · 합계 {_format_selection_summary_number(total, unit)} · 평균 {_format_selection_summary_number(avg, unit)}"
+        )
+
+    if len(summaries) == 1:
+        st.caption("선택 영역 · " + summaries[0])
+    else:
+        st.caption(f"선택 영역 · 숫자 {numeric_count:,}셀")
+        for line in summaries:
+            st.caption("• " + line)
+
+
+def selectable_dataframe(
+    data,
+    *,
+    key: str,
+    summary_df: pd.DataFrame | None = None,
+    allow_row_selection: bool = False,
+    **kwargs,
+):
+    """기존 st.dataframe 표시를 유지하면서 셀 드래그 합계/평균을 추가한다."""
+    if summary_df is None:
+        if isinstance(data, pd.DataFrame):
+            summary_df = data
+        else:
+            # pandas Styler 등은 원본 DataFrame을 사용
+            summary_df = getattr(data, "data", None)
+
+    if not _streamlit_supports_multi_cell_selection():
+        if allow_row_selection:
+            return st.dataframe(
+                data,
+                key=key,
+                on_select="rerun",
+                selection_mode="single-row",
+                **kwargs,
+            )
+        return st.dataframe(data, **kwargs)
+
+    widget_key = f"{key}_{_selection_table_signature(summary_df)}"
+    modes = ["single-row", "multi-cell"] if allow_row_selection else "multi-cell"
+    event = st.dataframe(
+        data,
+        key=widget_key,
+        on_select="rerun",
+        selection_mode=modes,
+        **kwargs,
+    )
+    _render_selected_cell_summary(event, summary_df)
+    return event
 
 
 def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
@@ -8298,6 +8497,9 @@ else:
                 st.session_state.promotions = promotions
                 st.session_state.operation_issues = operation_issues
                 st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
+                # 업로드 파일이 바뀌면 이전 자동 편성 결과를 초기화해 최신 규칙과 혼동되지 않게 합니다.
+                st.session_state.schedule_result = pd.DataFrame()
+                st.session_state.schedule_detail_map = {}
                 st.session_state.source_name = uploaded.name
                 st.session_state.synced_at = datetime.now()
                 st.session_state.uploaded_file_signature = uploaded_signature
@@ -8723,8 +8925,10 @@ if menu == "홈":
             use_container_width=True,
             config={"displayModeBar": False},
         )
-        st.dataframe(
-            clean_identifier_columns(format_home_table_with_summary(monthly, "Monthly")),
+        _home_monthly_view = clean_identifier_columns(format_home_table_with_summary(monthly, "Monthly"))
+        selectable_dataframe(
+            _home_monthly_view,
+            key="home_monthly_table",
             use_container_width=True, hide_index=True, height=400,
         )
 
@@ -8748,8 +8952,10 @@ if menu == "홈":
             trend_chart(weekly, "주간 SPM / 발송대비매출", "#70ad47"),
             use_container_width=True, config={"displayModeBar": False},
         )
-        st.dataframe(
-            clean_identifier_columns(format_home_table_with_summary(weekly, "Weekly")),
+        _home_weekly_view = clean_identifier_columns(format_home_table_with_summary(weekly, "Weekly"))
+        selectable_dataframe(
+            _home_weekly_view,
+            key="home_weekly_table",
             use_container_width=True, hide_index=True, height=520,
         )
 
@@ -8786,8 +8992,10 @@ if menu == "홈":
     if daily.empty:
         st.info("선택한 기간의 일간 데이터가 없습니다.")
     else:
-        st.dataframe(
-            clean_identifier_columns(format_home_table_with_summary(daily, "Daily")),
+        _home_daily_view = clean_identifier_columns(format_home_table_with_summary(daily, "Daily"))
+        selectable_dataframe(
+            _home_daily_view,
+            key="home_daily_table",
             use_container_width=True, hide_index=True, height=480,
         )
 
@@ -8941,8 +9149,10 @@ elif menu == "일일실적":
             "SPM": f"{(amount/send_count if send_count else 0):.1f}",
         }])
         st.markdown('<div class="subsection-title">발송 통계</div>', unsafe_allow_html=True)
-        st.dataframe(
-            clean_identifier_columns(send_view),
+        _daily_send_view = clean_identifier_columns(send_view)
+        selectable_dataframe(
+            _daily_send_view,
+            key=f"daily_send_stats_{selected_date}_{time_value}",
             use_container_width=True,
             hide_index=True,
         )
@@ -8980,8 +9190,10 @@ elif menu == "일일실적":
                 )
 
         st.markdown('<div class="subsection-title">상품 실적</div>', unsafe_allow_html=True)
-        st.dataframe(
-            clean_identifier_columns(product_view),
+        _daily_product_view = clean_identifier_columns(product_view)
+        selectable_dataframe(
+            _daily_product_view,
+            key=f"daily_product_stats_{selected_date}_{time_value}",
             use_container_width=True,
             hide_index=True,
             height=280,
@@ -8990,7 +9202,7 @@ elif menu == "일일실적":
         st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
         st.caption("상품별 영역은 기본 접힘 상태이며, 클릭하면 주요 인사이트와 최근 발송 이력을 확인할 수 있습니다.")
 
-        for report_item in cached_reports:
+        for _daily_report_idx, report_item in enumerate(cached_reports):
             product_row = pd.Series(report_item["row"])
             saved_issue = report_item["issue"]
             report = report_item["report"]
@@ -9019,8 +9231,10 @@ elif menu == "일일실적":
                 if report["발송이력"].empty:
                     st.caption("동일 상품의 발송 이력이 없습니다.")
                 else:
-                    st.dataframe(
-                        clean_identifier_columns(report["발송이력"]),
+                    _daily_history_view = clean_identifier_columns(report["발송이력"])
+                    selectable_dataframe(
+                        _daily_history_view,
+                        key=f"daily_product_history_{selected_date}_{time_value}_{_daily_report_idx}",
                         use_container_width=True,
                         hide_index=True,
                         height=min(210, 38 * (len(report["발송이력"]) + 1)),
@@ -9184,8 +9398,10 @@ elif menu == "주간실적":
         )
         _weekly_table_title("대카테고리 편성 및 주문 비중")
         _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
-        st.dataframe(
+        selectable_dataframe(
             _style_weekly_category_total(_big_table_display),
+            summary_df=_big_table_display,
+            key=f"weekly_big_category_{selected_year}_{week}",
             use_container_width=True,
             hide_index=True,
             height=430,
@@ -9200,8 +9416,10 @@ elif menu == "주간실적":
         )
         _weekly_table_title("중카테고리 편성 및 주문 비중")
         _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
-        st.dataframe(
+        selectable_dataframe(
             _style_weekly_category_total(_mid_table_display),
+            summary_df=_mid_table_display,
+            key=f"weekly_mid_category_{selected_year}_{week}",
             use_container_width=True,
             hide_index=True,
             height=560,
@@ -9244,7 +9462,7 @@ elif menu == "주간실적":
                 ]
                 _season_table_shown = False
 
-                for _season_title, _season_keywords in _season_groups:
+                for _season_idx, (_season_title, _season_keywords) in enumerate(_season_groups):
                     _mask = _season_src_df["시즌/상품군"].astype(str).apply(
                         lambda x: any(k in x for k in _season_keywords)
                     )
@@ -9261,8 +9479,9 @@ elif menu == "주간실적":
                         _season_table_shown = True
 
                     st.markdown(f"**• {_season_title}**")
-                    st.dataframe(
+                    selectable_dataframe(
                         _season_table,
+                        key=f"weekly_season_{selected_year}_{week}_{_season_idx}",
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -9296,13 +9515,21 @@ elif menu == "주간실적":
                 if _md_rec_df.empty:
                     st.caption("근거 기준을 충족한 재편성 추천 상품이 없습니다.")
                 else:
-                    st.dataframe(_md_rec_df, use_container_width=True, hide_index=True)
+                    selectable_dataframe(
+                        _md_rec_df,
+                        key=f"weekly_md_rec_{selected_year}_{week}",
+                        use_container_width=True, hide_index=True,
+                    )
 
             with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
                 if _md_src_df.empty:
                     st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
                 else:
-                    st.dataframe(_md_src_df, use_container_width=True, hide_index=True)
+                    selectable_dataframe(
+                        _md_src_df,
+                        key=f"weekly_md_src_{selected_year}_{week}",
+                        use_container_width=True, hide_index=True,
+                    )
         except Exception as _md_exc:
             st.caption(f"MD 상세 분석을 불러오지 못했습니다: {type(_md_exc).__name__}")
         detail_sections = [
@@ -9393,8 +9620,10 @@ elif menu == "주간실적":
             lambda _: style_weekly_product_rows(formatted_view, raw_amounts),
             axis=None,
         )
-        st.dataframe(
+        selectable_dataframe(
             styled_view,
+            summary_df=formatted_view,
+            key=f"weekly_product_performance_{selected_year}_{week}",
             use_container_width=True,
             hide_index=True,
             height=680,
@@ -9421,8 +9650,10 @@ elif menu == "주간실적":
             "주문수량": sw["주문수량"],
             "주문금액": sw["주문금액"],
         }).fillna(0)
-        st.dataframe(
-            clean_identifier_columns(weekly_display_format(material)),
+        _weekly_material_view = clean_identifier_columns(weekly_display_format(material))
+        selectable_dataframe(
+            _weekly_material_view,
+            key=f"weekly_material_{selected_year}_{week}",
             use_container_width=True, hide_index=True, height=570
         )
 
@@ -9431,8 +9662,10 @@ elif menu == "주간실적":
         seg.insert(0, "주차", week)
         seg.insert(0, "연도", selected_year)
         cols = ["연도", "주차", "성별", "연령", "발송횟수", "CTR(uniq)", "CVR(클릭>구매)", "객단가", "SPM", "주문금액", "발송당매출(발송횟수)"]
-        st.dataframe(
-            clean_identifier_columns(weekly_display_format(seg[cols])),
+        _weekly_seg_view = clean_identifier_columns(weekly_display_format(seg[cols]))
+        selectable_dataframe(
+            _weekly_seg_view,
+            key=f"weekly_seg_{selected_year}_{week}",
             use_container_width=True, hide_index=True
         )
 
@@ -9441,8 +9674,10 @@ elif menu == "주간실적":
         weekday.insert(0, "주차", week)
         weekday.insert(0, "연도", selected_year)
         cols = ["연도", "주차", "요일", "발송횟수", "CTR(uniq)", "CVR(클릭>구매)", "객단가", "SPM", "주문금액", "발송당매출(발송횟수)"]
-        st.dataframe(
-            clean_identifier_columns(weekly_display_format(weekday[cols])),
+        _weekly_weekday_view = clean_identifier_columns(weekly_display_format(weekday[cols]))
+        selectable_dataframe(
+            _weekly_weekday_view,
+            key=f"weekly_weekday_{selected_year}_{week}",
             use_container_width=True, hide_index=True
         )
 
@@ -9451,8 +9686,10 @@ elif menu == "주간실적":
         time_df.insert(0, "주차", week)
         time_df.insert(0, "연도", selected_year)
         cols = ["연도", "주차", "시간대", "발송횟수", "CTR(uniq)", "CVR(클릭>구매)", "객단가", "SPM", "주문금액", "발송당매출(발송횟수)"]
-        st.dataframe(
-            clean_identifier_columns(weekly_display_format(time_df[cols])),
+        _weekly_time_view = clean_identifier_columns(weekly_display_format(time_df[cols]))
+        selectable_dataframe(
+            _weekly_time_view,
+            key=f"weekly_time_{selected_year}_{week}",
             use_container_width=True, hide_index=True
         )
 
@@ -9460,8 +9697,10 @@ elif menu == "주간실적":
         rank = weekly_heavy["rank_table"].copy()
         rank.insert(0, "주차", week)
         rank.insert(0, "연도", selected_year)
-        st.dataframe(
-            clean_identifier_columns(weekly_display_format(rank)),
+        _weekly_rank_view = clean_identifier_columns(weekly_display_format(rank))
+        selectable_dataframe(
+            _weekly_rank_view,
+            key=f"weekly_rank_{selected_year}_{week}",
             use_container_width=True, hide_index=True, height=680
         )
 
@@ -9604,14 +9843,13 @@ elif menu == "상품구분":
         for idx, char in enumerate(selection_signature_text)
     ) % 10_000_000_000
 
-    selection_event = st.dataframe(
+    selection_event = selectable_dataframe(
         display_df,
+        key=f"product_group_summary_table_{selection_signature}",
+        allow_row_selection=True,
         use_container_width=True,
         hide_index=True,
         height=500,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=f"product_group_summary_table_{selection_signature}",
     )
 
     selected_rows = getattr(getattr(selection_event, "selection", None), "rows", [])
@@ -9640,8 +9878,9 @@ elif menu == "상품구분":
                 unsafe_allow_html=True,
             )
 
-            st.dataframe(
+            selectable_dataframe(
                 history_view,
+                key=f"product_group_history_{selection_signature}_{selected_pos}",
                 use_container_width=True,
                 hide_index=True,
                 height=min(420, 42 + len(history_view) * 35),
@@ -9683,25 +9922,23 @@ elif menu == "타겟분석":
         st.plotly_chart(target_bundle["chart"], use_container_width=True, key="target_spm_chart")
 
         st.markdown('<div class="subsection-title">성별·연령별 실적</div>', unsafe_allow_html=True)
-        gender_age_event = st.dataframe(
+        gender_age_event = selectable_dataframe(
             target_bundle["gender_age_view"],
+            key=f"target_gender_age_table_{target_start}_{target_end}",
+            allow_row_selection=True,
             use_container_width=True,
             hide_index=True,
             height=min(520, 42 + len(gender_age_raw) * 35),
-            on_select="rerun",
-            selection_mode="single-row",
-            key="target_gender_age_table",
         )
 
         st.markdown('<div class="subsection-title">성별·연령·SEG별 실적</div>', unsafe_allow_html=True)
-        gender_age_seg_event = st.dataframe(
+        gender_age_seg_event = selectable_dataframe(
             target_bundle["gender_age_seg_view"],
+            key=f"target_gender_age_seg_table_{target_start}_{target_end}",
+            allow_row_selection=True,
             use_container_width=True,
             hide_index=True,
             height=min(620, 42 + len(gender_age_seg_raw) * 35),
-            on_select="rerun",
-            selection_mode="single-row",
-            key="target_gender_age_seg_table",
         )
 
         selected_target = None
@@ -9736,8 +9973,9 @@ elif menu == "타겟분석":
                 st.info("선택한 타겟의 상품 발송 이력이 없습니다.")
             else:
                 st.markdown(f'<div class="subsection-title">{target_name} 발송 이력</div>', unsafe_allow_html=True)
-                st.dataframe(
+                selectable_dataframe(
                     history_view,
+                    key=f"target_history_{target_start}_{target_end}_{selected_gender}_{selected_age}_{selected_seg or 'ALL'}",
                     use_container_width=True,
                     hide_index=True,
                     height=min(620, 42 + len(history_view) * 35),
@@ -9936,7 +10174,11 @@ elif menu == "편성 프로그램":
                 max_entries=6,
             )
             copy_view = result_assets["copy_view"].copy()
-            st.dataframe(copy_view, use_container_width=True, hide_index=True)
+            selectable_dataframe(
+                copy_view,
+                key=f"schedule_result_all_{result_signature}",
+                use_container_width=True, hide_index=True,
+            )
 
             csv_bytes = result_assets["csv_bytes"]
             d1, d2 = st.columns(2)
@@ -9954,11 +10196,15 @@ elif menu == "편성 프로그램":
                 )
 
             st.markdown('<div class="subsection-title">슬롯별 추천 결과 및 근거</div>', unsafe_allow_html=True)
-            for group_info in result_assets["groups"]:
+            for _schedule_group_idx, group_info in enumerate(result_assets["groups"]):
                 st.markdown(f"### {group_info['label']}")
-                st.dataframe(group_info["main_view"], use_container_width=True, hide_index=True)
+                selectable_dataframe(
+                    group_info["main_view"],
+                    key=f"schedule_group_{result_signature}_{_schedule_group_idx}",
+                    use_container_width=True, hide_index=True,
+                )
 
-                for item in group_info["items"]:
+                for _schedule_item_idx, item in enumerate(group_info["items"]):
                     row = pd.Series(item["row"])
                     metrics = item["metrics"]
                     with st.expander(f"{row['상품명']} · 추천 근거 및 발송 이력"):
@@ -9984,11 +10230,19 @@ elif menu == "편성 프로그램":
                         st.markdown("**타겟별 성과**")
                         target_display = item["target_display"]
                         if not target_display.empty:
-                            st.dataframe(target_display, use_container_width=True, hide_index=True)
+                            selectable_dataframe(
+                                target_display,
+                                key=f"schedule_target_perf_{result_signature}_{_schedule_group_idx}_{_schedule_item_idx}",
+                                use_container_width=True, hide_index=True,
+                            )
                         st.markdown("**발송 이력**")
                         history_view = item["history_view"]
                         if not history_view.empty:
-                            st.dataframe(history_view, use_container_width=True, hide_index=True)
+                            selectable_dataframe(
+                                history_view,
+                                key=f"schedule_item_history_{result_signature}_{_schedule_group_idx}_{_schedule_item_idx}",
+                                use_container_width=True, hide_index=True,
+                            )
                 st.divider()
 
     with tab_history:
@@ -10023,7 +10277,11 @@ elif menu == "편성 프로그램":
                     else:
                         for c in ["정상가", "행사가", "평균주문금액"]:
                             view[c] = view[c].map(format_integer_price)
-                        st.dataframe(view, use_container_width=True, hide_index=True)
+                        selectable_dataframe(
+                            view,
+                            key=f"schedule_history_status_{candidate_signature}_{status}",
+                            use_container_width=True, hide_index=True,
+                        )
 
 
 # Daily insight ruleset marker for regression/audit.
