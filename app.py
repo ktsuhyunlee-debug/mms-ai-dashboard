@@ -7795,7 +7795,7 @@ def _build_product_group_summary_cached(
     if filt.empty:
         empty_cols = group_keys + [
             "상품명", "상품명검색", "운영횟수", "최고실적",
-            "최저실적", "평균실적", "등급", "사례",
+            "최저실적", "평균실적", "최근실적", "평균 대비", "등급",
         ]
         return pd.DataFrame(columns=list(dict.fromkeys(empty_cols)))
 
@@ -7804,6 +7804,29 @@ def _build_product_group_summary_cached(
         최고실적=("주문금액", "max"),
         최저실적=("주문금액", "min"),
         평균실적=("주문금액", "mean"),
+    )
+
+    # 조회 기간 내 가장 최근 발송 1건의 주문금액을 최근실적으로 사용
+    # 동일 날짜가 여러 건이면 원본 데이터에서 더 뒤에 있는 행을 최근 건으로 간주
+    latest_perf_source = filt[group_keys + ["_date", "주문금액"]].copy()
+    latest_perf_source["__row_order"] = range(len(latest_perf_source))
+    latest_perf_source["_date"] = pd.to_datetime(latest_perf_source["_date"], errors="coerce")
+    latest_perf = (
+        latest_perf_source
+        .sort_values(["_date", "__row_order"], kind="stable", na_position="first")
+        .drop_duplicates(group_keys, keep="last")
+        [group_keys + ["주문금액"]]
+        .rename(columns={"주문금액": "최근실적"})
+    )
+    grouped = grouped.merge(latest_perf, on=group_keys, how="left")
+    grouped["평균 대비"] = np.where(
+        pd.to_numeric(grouped["평균실적"], errors="coerce").ne(0),
+        (
+            pd.to_numeric(grouped["최근실적"], errors="coerce")
+            / pd.to_numeric(grouped["평균실적"], errors="coerce")
+            - 1
+        ) * 100,
+        np.nan,
     )
 
     if product_code_keys and "상품명" in filt.columns:
@@ -7836,41 +7859,6 @@ def _build_product_group_summary_cached(
     grouped["상품명"] = grouped["상품명"].fillna("")
     grouped["상품명검색"] = grouped["상품명검색"].fillna(grouped["상품명"]).astype(str)
     grouped["등급"] = grouped["평균실적"].apply(product_grade)
-
-    # classify_cases()가 동일 상품명 이력만 사용하므로 상품명별 이력을 한 번만 분리한다.
-    empty_history = work.iloc[0:0]
-    history_by_name = {}
-    if "상품명" in work.columns:
-        string_name_rows = work[work["상품명"].map(lambda value: isinstance(value, str))]
-        history_by_name = {
-            name: history
-            for name, history in string_name_rows.groupby("상품명", sort=False)
-        }
-
-    # 기존 마스크 로직(astype(str))과 동일한 키로 한 번만 그룹화해 사례를 계산한다.
-    case_source = filt.copy()
-    case_key_cols = []
-    for idx, key in enumerate(group_keys):
-        case_key_col = f"__product_group_case_key_{idx}"
-        case_source[case_key_col] = case_source[key].astype(str)
-        case_key_cols.append(case_key_col)
-
-    case_map = {}
-    case_group_arg = case_key_cols[0] if len(case_key_cols) == 1 else case_key_cols
-    for raw_key, hist in case_source.groupby(case_group_arg, dropna=False, sort=False):
-        key_tuple = raw_key if isinstance(raw_key, tuple) else (raw_key,)
-        cases = []
-        for _, hist_row in hist.sort_values("_date").iterrows():
-            raw_name = hist_row.get("상품명")
-            same_name_history = history_by_name.get(raw_name, empty_history)
-            cases.extend(classify_cases(hist_row, same_name_history))
-        case_map[key_tuple] = ", ".join(dict.fromkeys(cases))
-
-    def _case_for_group(row: pd.Series) -> str:
-        lookup_key = tuple(str(row.get(key)) for key in group_keys)
-        return case_map.get(lookup_key, "")
-
-    grouped["사례"] = grouped.apply(_case_for_group, axis=1)
     return grouped
 
 
@@ -8079,12 +8067,29 @@ def _build_weekly_heavy_bundle(
         "seg_table": grouped_send_table(sw, ["성별", "연령"]),
         "weekday_table": grouped_send_table(sw, ["요일"]),
         "time_table": grouped_send_table(sw, ["시간대"]),
-        "rank_table": pw.groupby(["쇼라코드", "상품명"], as_index=False).agg(
-            발송횟수=("상품명", "size"),
-            주문건수=("주문건수", "sum"),
-            주문수량=("주문수량", "sum"),
-            주문금액=("주문금액", "sum"),
-        ).sort_values("주문금액", ascending=False),
+        "rank_table": (lambda _rank_src: (
+            _rank_src.groupby(
+                [c for c in ["알파코드", "쇼라코드", "상품명"] if c in _rank_src.columns],
+                as_index=False,
+                dropna=False,
+            ).agg(
+                **({
+                    "재편성": (
+                        "재편성",
+                        lambda values: " / ".join(
+                            dict.fromkeys(
+                                str(v).strip() for v in values
+                                if pd.notna(v) and str(v).strip() not in ["", "nan", "None"]
+                            )
+                        ),
+                    )
+                } if "재편성" in _rank_src.columns else {}),
+                발송횟수=("상품명", "size"),
+                주문건수=("주문건수", "sum"),
+                주문수량=("주문수량", "sum"),
+                주문금액=("주문금액", "sum"),
+            ).sort_values("주문금액", ascending=False)
+        ))(pw),
     }
 
 
@@ -9302,6 +9307,16 @@ elif menu == "주간실적":
     pw = year_products[year_products["주차"].astype(str) == week].copy()
     sw = year_sends[year_sends["주차"].astype(str) == week].copy()
 
+    # 주간실적 표 공통 운영구분 표시: 원본에 '재편성' 컬럼이 없더라도
+    # 상품구분/신규구분/운영구분/편성구분 등 기존 운영구분 컬럼에서 안전하게 보완합니다.
+    if "재편성" not in pw.columns:
+        _weekly_operation_labels = _weekly_normalize_operation_labels(pw)
+        pw["재편성"] = (
+            _weekly_operation_labels
+            if _weekly_operation_labels is not None
+            else pd.Series("", index=pw.index, dtype="object")
+        )
+
     if pw.empty or sw.empty:
         st.info("선택한 연도·주차의 상품 또는 소재 데이터가 없습니다.")
         st.stop()
@@ -9599,8 +9614,9 @@ elif menu == "주간실적":
         product_sorted = pw.sort_values(sort_cols) if sort_cols else pw
         cols = [
             "일자", "요일", "시간대", "성별", "연령", "소재",
-            "전시순서", "추가노출", "상품명", "멤버십혜택가",
-            "주문건수", "주문수량", "주문금액", "주문비중"
+            "전시순서", "상품명", "멤버십혜택가",
+            "주문건수", "주문수량", "주문금액",
+            "추가노출", "재편성", "주문비중"
         ]
         view = product_sorted[[c for c in cols if c in product_sorted.columns]].copy()
         total = {c: "" for c in view.columns}
@@ -9697,6 +9713,11 @@ elif menu == "주간실적":
         rank = weekly_heavy["rank_table"].copy()
         rank.insert(0, "주차", week)
         rank.insert(0, "연도", selected_year)
+        rank_cols = [
+            "연도", "주차", "알파코드", "쇼라코드", "상품명",
+            "재편성", "발송횟수", "주문건수", "주문수량", "주문금액"
+        ]
+        rank = rank[[c for c in rank_cols if c in rank.columns]].copy()
         _weekly_rank_view = clean_identifier_columns(weekly_display_format(rank))
         selectable_dataframe(
             _weekly_rank_view,
@@ -9762,7 +9783,7 @@ elif menu == "상품구분":
             key="product_group_name_search",
         )
 
-    # 동일 상품번호 통합·등급·사례 계산은 조회 기간별로 캐시해
+    # 동일 상품번호 통합·등급·최근실적 계산은 조회 기간별로 캐시해
     # 행 선택 등 단순 상호작용에서 전체 재계산하지 않는다.
     product_code_keys = [c for c in ["쇼라코드", "알파코드"] if c in products.columns]
     group_keys = product_code_keys if product_code_keys else ["상품명"]
@@ -9819,14 +9840,19 @@ elif menu == "상품구분":
     display_cols = [
         c for c in [
             "쇼라코드", "알파코드", "상품명", "운영횟수",
-            "최고실적", "최저실적", "평균실적", "등급", "사례",
+            "최고실적", "최저실적", "평균실적", "최근실적", "평균 대비", "등급",
         ] if c in result.columns
     ]
     display_df = result[display_cols].copy().reset_index(drop=True)
 
-    for money_col in ["최고실적", "최저실적", "평균실적"]:
+    for money_col in ["최고실적", "최저실적", "평균실적", "최근실적"]:
         if money_col in display_df.columns:
             display_df[money_col] = display_df[money_col].map(format_integer_price)
+
+    if "평균 대비" in display_df.columns:
+        display_df["평균 대비"] = display_df["평균 대비"].map(
+            lambda value: "-" if pd.isna(value) else f"{float(value):+.1f}%"
+        )
 
     st.caption(f"조회 상품 {len(display_df):,}개 · 행을 선택하면 아래에 발송 이력이 표시됩니다.")
 
