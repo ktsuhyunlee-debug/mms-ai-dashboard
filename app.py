@@ -7600,7 +7600,7 @@ def _build_product_group_summary_cached(
     if filt.empty:
         empty_cols = group_keys + [
             "상품명", "상품명검색", "운영횟수", "최고실적",
-            "최저실적", "평균실적", "등급", "사례",
+            "최저실적", "평균실적", "등급",
         ]
         return pd.DataFrame(columns=list(dict.fromkeys(empty_cols)))
 
@@ -7642,40 +7642,7 @@ def _build_product_group_summary_cached(
     grouped["상품명검색"] = grouped["상품명검색"].fillna(grouped["상품명"]).astype(str)
     grouped["등급"] = grouped["평균실적"].apply(product_grade)
 
-    # classify_cases()가 동일 상품명 이력만 사용하므로 상품명별 이력을 한 번만 분리한다.
-    empty_history = work.iloc[0:0]
-    history_by_name = {}
-    if "상품명" in work.columns:
-        string_name_rows = work[work["상품명"].map(lambda value: isinstance(value, str))]
-        history_by_name = {
-            name: history
-            for name, history in string_name_rows.groupby("상품명", sort=False)
-        }
-
-    # 기존 마스크 로직(astype(str))과 동일한 키로 한 번만 그룹화해 사례를 계산한다.
-    case_source = filt.copy()
-    case_key_cols = []
-    for idx, key in enumerate(group_keys):
-        case_key_col = f"__product_group_case_key_{idx}"
-        case_source[case_key_col] = case_source[key].astype(str)
-        case_key_cols.append(case_key_col)
-
-    case_map = {}
-    case_group_arg = case_key_cols[0] if len(case_key_cols) == 1 else case_key_cols
-    for raw_key, hist in case_source.groupby(case_group_arg, dropna=False, sort=False):
-        key_tuple = raw_key if isinstance(raw_key, tuple) else (raw_key,)
-        cases = []
-        for _, hist_row in hist.sort_values("_date").iterrows():
-            raw_name = hist_row.get("상품명")
-            same_name_history = history_by_name.get(raw_name, empty_history)
-            cases.extend(classify_cases(hist_row, same_name_history))
-        case_map[key_tuple] = ", ".join(dict.fromkeys(cases))
-
-    def _case_for_group(row: pd.Series) -> str:
-        lookup_key = tuple(str(row.get(key)) for key in group_keys)
-        return case_map.get(lookup_key, "")
-
-    grouped["사례"] = grouped.apply(_case_for_group, axis=1)
+    # 상품구분에서는 사례 분류를 사용하지 않음
     return grouped
 
 
@@ -9530,7 +9497,7 @@ elif menu == "상품구분":
             key="product_group_name_search",
         )
 
-    # 동일 상품번호 통합·등급·사례 계산은 조회 기간별로 캐시해
+    # 동일 상품번호 통합·등급 계산은 조회 기간별로 캐시해
     # 행 선택 등 단순 상호작용에서 전체 재계산하지 않는다.
     product_code_keys = [c for c in ["쇼라코드", "알파코드"] if c in products.columns]
     group_keys = product_code_keys if product_code_keys else ["상품명"]
@@ -9587,7 +9554,7 @@ elif menu == "상품구분":
     display_cols = [
         c for c in [
             "쇼라코드", "알파코드", "상품명", "운영횟수",
-            "최고실적", "최저실적", "평균실적", "등급", "사례",
+            "최고실적", "최저실적", "평균실적", "등급",
         ] if c in result.columns
     ]
     display_df = result[display_cols].copy().reset_index(drop=True)
