@@ -1,4 +1,11 @@
 # =============================================================================
+# V4.6 FINAL WEEKLY REPORT FORMAT
+# - Weekly KPI summary 3 lines fixed
+# - One interpretive summary line (metric change + cause only)
+# - Product insights max 3 / operation insights max 3 / next-week actions 4
+# - Semantic product-name shortening and target-only expansion recommendation
+# =============================================================================
+# =============================================================================
 # V4.4.72 LOW-PERFORMANCE AMOUNT HISTORY
 # - Weekly low-performance replacement lines now include every historical order amount
 # - Existing repeated-underperformance criteria and all other logic preserved.
@@ -5631,6 +5638,404 @@ def build_v6_action_plan(features: pd.DataFrame) -> list[str]:
         )
     return actions
 
+
+def _weekly_report_semantic_name(name: str) -> str:
+    """주간 보고서 전용 의미 기반 상품명 축약. 집계키/원본 상품명은 변경하지 않음."""
+    raw = str(name or "").strip()
+    low = raw.lower()
+
+    # 보고서에서 반복 노출되는 상품은 사람이 읽는 핵심명으로 축약
+    rules = [
+        (("밤켈" in raw and "쿨트백" in raw), "밤켈 쿨트백 3종" if "3종" in raw else "밤켈 쿨트백"),
+        (("영주" in raw and "한우" in raw), "농협 영주한우 모듬한판"),
+        (("필립스" in raw and ("s5000" in low or "s5466" in low)), "필립스 S5000"),
+        (("보랄" in raw and "날개없는" in raw and "선풍기" in raw), "보랄 날개없는 선풍기"),
+        (("옥주부" in raw and "돈까스" in raw), "옥주부 돈까스"),
+        (("케라시스" in raw), "케라시스"),
+        (("미니브" in raw and "민트라온" in raw), "미니브 여행 패키지"),
+        (("양갈비" in raw), "양갈비"),
+        (("불스원" in raw), "불스원"),
+        (("깨끗한나라" in raw and ("롤" in raw or "화장지" in raw)), "깨끗한나라 화장지"),
+        (("햇반" in raw and "윤기가득" in raw), "CJ 햇반 윤기가득쌀밥 36개" if "36" in raw else "CJ 햇반 윤기가득쌀밥"),
+        (("브리츠" in raw and ("노이즈" in raw or "bz-ev7" in low)), "브리츠 노이즈캔슬링 이어폰"),
+        (("나이키" in raw and "드라이핏" in raw), "나이키 드라이핏 세트"),
+        (("비에날씬" in raw), "비에날씬 BNR17" if "bnr17" in low else "비에날씬"),
+        (("오쏘몰" in raw), "오쏘몰 이뮨"),
+    ]
+    for matched, label in rules:
+        if matched:
+            return label
+
+    s = _weekly_short_display_name(raw, max_len=80)
+    # 광고/구성 문구와 모델코드 등 보고서 판단에 불필요한 정보 제거
+    s = re.sub(r"^(?:\[M\]\s*)+", "", s, flags=re.I)
+    s = re.sub(r"^(?:\(세트상품\)|세트상품)\s*", "", s, flags=re.I)
+    s = re.sub(r"\b(?:최신상|공식굿즈|단품|쇼라\s*단독\s*특가)\b", "", s)
+    s = re.sub(r"\s*/\s*총\s*[^,·]+", "", s)
+    s = re.sub(r"\s*\([^)]{8,}\)", "", s)
+    s = re.sub(r"\b(?:Shave\s*)?S?\d{4,}/\d{2}\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" ,/_-")
+
+    # 기계적인 '…' 절단 대신 단어 단위로 짧게 유지
+    if len(s) > 34:
+        tokens = s.split()
+        kept = []
+        for token in tokens:
+            candidate = " ".join(kept + [token])
+            if kept and len(candidate) > 32:
+                break
+            kept.append(token)
+        if kept:
+            s = " ".join(kept)
+    return s or raw
+
+
+def _weekly_high_price_mix_names(pw: pd.DataFrame, prev_pw: pd.DataFrame) -> list[str]:
+    """객단가 상승 해석용: 전주 대비 고가상품 매출 비중 확대가 실제 확인될 때 대표 상품명 반환."""
+    if pw is None or pw.empty or prev_pw is None or prev_pw.empty:
+        return []
+    price_col = first_col(pw, ["멤버십혜택가", "멤버십 혜택가", "행사가", "혜택가", "판매가"])
+    prev_price_col = first_col(prev_pw, ["멤버십혜택가", "멤버십 혜택가", "행사가", "혜택가", "판매가"])
+    if not price_col or not prev_price_col or "주문금액" not in pw.columns or "주문금액" not in prev_pw.columns:
+        return []
+
+    cur_price = pd.to_numeric(pw[price_col], errors="coerce")
+    pre_price = pd.to_numeric(prev_pw[prev_price_col], errors="coerce")
+    combined = pd.concat([cur_price, pre_price], ignore_index=True).dropna()
+    combined = combined[combined > 0]
+    if combined.empty:
+        return []
+    threshold = float(combined.quantile(0.60))
+    if threshold <= 0:
+        return []
+
+    cur_amt = pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0)
+    pre_amt = pd.to_numeric(prev_pw["주문금액"], errors="coerce").fillna(0)
+    cur_total = float(cur_amt.sum())
+    pre_total = float(pre_amt.sum())
+    if cur_total <= 0 or pre_total <= 0:
+        return []
+
+    cur_share = float(cur_amt[cur_price.fillna(0) >= threshold].sum()) / cur_total
+    pre_share = float(pre_amt[pre_price.fillna(0) >= threshold].sum()) / pre_total
+    if cur_share < pre_share + 0.05:
+        return []
+
+    pcol = _weekly_product_col(pw)
+    if not pcol:
+        return []
+    temp = pw.copy()
+    temp["_price_rpt"] = cur_price.fillna(0)
+    temp["_amt_rpt"] = cur_amt
+    temp = temp[temp["_price_rpt"] >= threshold]
+    if temp.empty:
+        return []
+    top = temp.groupby(pcol, as_index=False)["_amt_rpt"].sum().sort_values("_amt_rpt", ascending=False)
+    return [_weekly_report_semantic_name(x) for x in top[pcol].astype(str).head(3)]
+
+
+def _weekly_build_summary_interpretation(
+    *, pw: pd.DataFrame, prev_pw: pd.DataFrame,
+    send_runs: int, prev_send_runs: int,
+    send_count: float, prev_send_count: float,
+    order_count: float, prev_order_count: float,
+    qty: float, prev_qty: float,
+    amount: float, prev_amount: float,
+    ctr: float, prev_ctr: float,
+    cvr: float, prev_cvr: float,
+    aov: float, prev_aov: float,
+    spm: float, prev_spm: float,
+) -> str:
+    """주간 실적 요약 3줄 아래에 붙는 '수치 변화 + 원인 해석' 한 줄. 액션 문구는 넣지 않음."""
+    def delta(cur, prev):
+        return (cur - prev) / abs(prev) if prev else 0.0
+
+    send_d = delta(send_count, prev_send_count)
+    order_d = delta(order_count, prev_order_count)
+    qty_d = delta(qty, prev_qty)
+    amount_d = delta(amount, prev_amount)
+    ctr_d = ctr - prev_ctr
+    cvr_d = cvr - prev_cvr
+    aov_d = delta(aov, prev_aov)
+    spm_d = delta(spm, prev_spm)
+    run_d = delta(send_runs, prev_send_runs)
+
+    scale_down = run_d < -0.02 or send_d < -0.02
+    all_eff_up = order_d > 0.02 and amount_d > 0.02 and ctr_d > 0 and cvr_d > 0 and spm_d > 0.02
+    if scale_down and all_eff_up:
+        return ": 발송횟수·발송건수 감소에도 주문건수·주문금액 및 CTR·CVR·SPM이 모두 개선되며 전주 대비 높은 발송 효율 기록"
+
+    # 주문/매출 감소 + 객단가 상승은 고가상품 믹스 확대 여부를 실제 데이터로 한 번 더 확인
+    if order_d < -0.03 and amount_d < -0.03 and aov_d > 0.05:
+        names = _weekly_high_price_mix_names(pw, prev_pw)
+        if names:
+            return f": 주문건수와 주문금액은 감소했으나 {'·'.join(names)} 등 고가 상품 판매 비중 확대 영향으로 객단가 상승"
+        return ": 주문건수와 주문금액은 감소했으나 고단가 상품 중심의 매출 구성 영향으로 객단가 상승"
+
+    if abs(order_d) <= 0.05 and abs(qty_d) <= 0.05 and aov_d < -0.03 and amount_d < -0.03 and spm_d < -0.03:
+        return ": 주문건수·주문수량은 전주 수준을 유지했으나 객단가 하락으로 주문금액과 SPM 동반 감소"
+
+    if order_d > 0.02 and amount_d > 0.02 and ctr_d >= 0 and cvr_d >= 0 and spm_d > 0.02:
+        return ": 주문건수·주문금액 및 CTR·CVR·SPM이 함께 개선되며 전주 대비 매출과 발송 효율 상승"
+
+    if amount_d < -0.03 and spm_d < -0.03:
+        if order_d < -0.03:
+            return ": 주문건수 감소 영향으로 주문금액과 SPM이 동반 하락하며 전주 대비 매출 및 발송 효율 둔화"
+        if aov_d < -0.03:
+            return ": 객단가 하락 영향으로 주문금액과 SPM이 동반 감소하며 전주 대비 매출 효율 둔화"
+        return ": 주문금액과 SPM이 함께 감소하며 전주 대비 매출 및 발송 효율 둔화"
+
+    if amount_d > 0.03 and spm_d < -0.03:
+        return ": 주문금액은 증가했으나 발송량 증가폭이 더 크게 나타나며 SPM은 전주 대비 하락"
+
+    if amount_d < -0.03 and spm_d > 0.03:
+        return ": 주문금액은 감소했으나 발송 규모 축소폭이 더 크게 나타나며 SPM은 전주 대비 개선"
+
+    if aov_d > 0.05 and order_d < 0:
+        return ": 주문건수는 감소했으나 고단가 상품 중심 매출 구성으로 객단가가 상승하며 주문금액 감소폭 일부 방어"
+
+    return ": 주요 지표의 증감이 혼재한 가운데 상품·타겟별 매출 기여도 차이가 확대된 흐름"
+
+
+def _weekly_best_target_spm(sw: pd.DataFrame):
+    if sw is None or sw.empty or not {"성별", "연령"}.issubset(sw.columns):
+        return None
+    try:
+        g = grouped_send_table(sw, ["성별", "연령"])
+        if g is None or g.empty or "SPM" not in g.columns:
+            return None
+        r = g.loc[pd.to_numeric(g["SPM"], errors="coerce").idxmax()]
+        label = f"{clean_identifier_value(r.get('성별',''))}{clean_identifier_value(r.get('연령',''))}"
+        return {"label": label, "spm": float(r.get("SPM", 0) or 0)} if label else None
+    except Exception:
+        return None
+
+
+def _weekly_target_expansion_line(pw: pd.DataFrame, products_all: pd.DataFrame, week_end, best_target=None) -> str:
+    """차주 ②에는 실제 타겟 차이가 확인된 상품만 우선 사용."""
+    if pw is not None and not pw.empty and "상품명" in pw.columns:
+        wk = pw.groupby("상품명", as_index=False)["주문금액"].sum().sort_values("주문금액", ascending=False)
+        for _, row in wk.iterrows():
+            pname = str(row["상품명"])
+            try:
+                analysis = _product_target_strength_analysis(pname, products_all, week_end)
+            except Exception:
+                analysis = None
+            if not analysis or analysis.get("type") != "ok":
+                continue
+            age = analysis.get("age_strength")
+            if age:
+                a, b, _ = age
+                at = f"{clean_identifier_value(a.get('성별',''))}{clean_identifier_value(a.get('연령',''))}"
+                bt = f"{clean_identifier_value(b.get('성별',''))}{clean_identifier_value(b.get('연령',''))}"
+                if at and bt:
+                    return (
+                        f"• {_weekly_report_semantic_name(pname)} {at} 평균 {compact_money(a['평균매출'])} / "
+                        f"{bt} 평균 {compact_money(b['평균매출'])} → {at} 우선 편성 및 미발송 SEG 순차 TEST"
+                    )
+            gender = analysis.get("gender_strength")
+            if gender:
+                a, b, _ = gender
+                ag = clean_identifier_value(a.get("성별", ""))
+                bg = clean_identifier_value(b.get("성별", ""))
+                if ag and bg:
+                    return (
+                        f"• {_weekly_report_semantic_name(pname)} {ag} 평균 {compact_money(a['평균매출'])} / "
+                        f"{bg} 평균 {compact_money(b['평균매출'])} → {ag} 중심 편성 및 고성과·미발송 SEG 순차 TEST"
+                    )
+    if best_target:
+        return (
+            f"• {best_target['label']} SPM {best_target['spm']:.1f}로 금주 타겟 중 최고 → "
+            "해당 타겟 내 고성과 상품 중심 재편성 및 미발송 SEG 순차 TEST"
+        )
+    return "• 타겟별 반복 성과가 확인된 상품 중심으로 고성과·미발송 SEG 순차 TEST"
+
+
+def _weekly_build_final_compact_sections(week, year, pw, sw, products_all, sends_all, week_end):
+    """최종 주간보고 표시 전용: 상품 3개 / 편성 3개 / 차주 4개로 강제 제한."""
+    amount_total = float(pd.to_numeric(pw.get("주문금액", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    pcol = _weekly_product_col(pw) or "상품명"
+
+    # ---------- 상품 운영 시사점 ----------
+    product_lines = []
+    core = _weekly_current_core_rows(pw)
+    if not core.empty:
+        core_amt = float(pd.to_numeric(core["주문금액"], errors="coerce").fillna(0).sum())
+        core_share = core_amt / amount_total * 100 if amount_total else 0
+        core_names_df = (
+            core.groupby(pcol, as_index=False)["주문금액"].sum()
+            .sort_values("주문금액", ascending=False)
+            .head(4)
+        )
+        core_names = [_weekly_report_semantic_name(x) for x in core_names_df[pcol].astype(str)]
+        product_lines.append(
+            f"• 핵심상품 매출 집중 : 500만원 이상 {len(core)}건이 전체 주문금액의 {core_share:.1f}% 차지 → "
+            f"{'·'.join(core_names)} 중심 재편성 검토"
+        )
+
+    labels = _weekly_normalize_operation_labels(pw)
+    new_core_names = []
+    if labels is not None:
+        new_mask, _ = _weekly_operation_masks(labels)
+        new_df = pw[new_mask].copy()
+        if not new_df.empty:
+            new_g = new_df.groupby(pcol, as_index=False)["주문금액"].sum().sort_values("주문금액", ascending=False)
+            high_new = new_g[new_g["주문금액"] >= 5_000_000].head(3)
+            if high_new.empty:
+                high_new = new_g[new_g["주문금액"] >= 3_000_000].head(2)
+            if not high_new.empty:
+                new_core_names = [
+                    f"{_weekly_report_semantic_name(r[pcol])} {compact_money(r['주문금액'])}"
+                    for _, r in high_new.iterrows()
+                ]
+                product_lines.append(
+                    f"• 신규 고성과 확인 : {' / '.join(new_core_names)} → 동일 타겟 추가 검증 후 운영 확대 판단"
+                )
+
+    cat_col = _weekly_category_col(pw)
+    category_top_text = ""
+    if cat_col:
+        cat = pw.copy()
+        cat["_amt_rpt"] = pd.to_numeric(cat["주문금액"], errors="coerce").fillna(0)
+        cg = cat.groupby(cat_col, as_index=False)["_amt_rpt"].sum().sort_values("_amt_rpt", ascending=False)
+        if not cg.empty and amount_total:
+            top_cat = str(cg.iloc[0][cat_col])
+            top_share = float(cg.iloc[0]["_amt_rpt"]) / amount_total * 100
+            top_sub = cat[cat[cat_col].astype(str).eq(top_cat)]
+            has_low = bool((top_sub["_amt_rpt"] < 1_000_000).any())
+            if has_low:
+                product_lines.append(
+                    f"• 상품별 성과 편차 : {top_cat} 매출 비중 {top_share:.1f}%이나 100만원 미만 상품 혼재 → "
+                    "카테고리보다 검증 상품 중심 편성 필요"
+                )
+            else:
+                product_lines.append(
+                    f"• 상품별 성과 편차 : {top_cat} 매출 비중 {top_share:.1f}% → "
+                    "카테고리 비중보다 반복 고성과 상품 중심 편성 필요"
+                )
+            category_top_text = " / ".join(
+                f"{str(r[cat_col])} {float(r['_amt_rpt'])/amount_total*100:.1f}%" for _, r in cg.head(3).iterrows()
+            )
+
+    # 데이터 근거가 부족하면 기존 엔진의 짧은 핵심문장만 보완용으로 사용
+    product_lines = product_lines[:3]
+
+    # ---------- 편성 운영 시사점 ----------
+    op_lines = []
+    if labels is not None:
+        new_mask, rerun_mask = _weekly_operation_masks(labels)
+        new_df, re_df = pw[new_mask], pw[rerun_mask]
+        if not new_df.empty and not re_df.empty:
+            n_avg = float(pd.to_numeric(new_df["주문금액"], errors="coerce").fillna(0).mean())
+            r_avg = float(pd.to_numeric(re_df["주문금액"], errors="coerce").fillna(0).mean())
+            if r_avg >= n_avg:
+                title = "재편성 성과 우위"
+                action = "검증 상품 중심 재편성 유지 / 신규·유사신규 선별 TEST"
+            else:
+                title = "신규·유사신규 성과 우위"
+                action = "신규·유사신규 고성과 후보 확대 / 재편성 상품 선별 운영"
+            op_lines.append(
+                f"• {title} : 신규·유사신규 평균 {compact_money(n_avg)} / 재편성 평균 {compact_money(r_avg)} → {action}"
+            )
+
+    best_target = _weekly_best_target_spm(sw)
+    time_pattern = _recent_4week_time_pattern(str(week), int(year), sends_all)
+    time_text = ""
+    if time_pattern and time_pattern.get("time"):
+        tw, tc, tn = time_pattern["time"]
+        if tc >= 3:
+            time_text = f"최근 {tn}주 중 {tc}주 {str(tw)[:5]} SPM 최고"
+    if best_target or time_text:
+        facts = []
+        if best_target:
+            facts.append(f"{best_target['label']} SPM {best_target['spm']:.1f}")
+        if time_text:
+            facts.append(time_text)
+        op_lines.append(
+            f"• 고성과 조합 확인 : {' / '.join(facts)} → 상품·타겟·시간대 반복 조합 축적 필요"
+        )
+
+    if category_top_text:
+        op_lines.append(
+            f"• 검증 상품 중심 편성 : {category_top_text} → 카테고리 매출 비중보다 "
+            "300만원·500만원 이상 반복 달성 상품 중심 우선순위 설정"
+        )
+    else:
+        ge3 = int((pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0) >= 3_000_000).sum()) if "주문금액" in pw.columns else 0
+        ge5 = int((pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0) >= 5_000_000).sum()) if "주문금액" in pw.columns else 0
+        op_lines.append(
+            f"• 검증 상품 중심 편성 : 300만원 이상 {ge3}건 / 500만원 이상 {ge5}건 → 반복 달성 상품 중심 우선순위 설정"
+        )
+    op_lines = op_lines[:3]
+
+    # ---------- 차주 운영 제안 ----------
+    next_lines = []
+    # ① 핵심상품 재편성
+    if not core.empty:
+        core_week = pw[pw[pcol].isin(core[pcol])].groupby(pcol, as_index=False)["주문금액"].sum().sort_values("주문금액", ascending=False)
+        core_names = [_weekly_report_semantic_name(x) for x in core_week[pcol].astype(str).head(4)]
+    else:
+        top_week = pw.groupby(pcol, as_index=False)["주문금액"].sum().sort_values("주문금액", ascending=False).head(4)
+        core_names = [_weekly_report_semantic_name(x) for x in top_week[pcol].astype(str)]
+    next_lines += [
+        "① 핵심상품 재편성",
+        f"• {'·'.join(core_names)} 우선 검토 → 고성과 타겟 중심 재현 여부 확인" if core_names else "• 고성과 상품 우선 재편성 검토 → 최근 고성과 타겟 중심 재현 여부 확인",
+        "",
+    ]
+
+    # ② 고성과 타겟 확대
+    next_lines += [
+        "② 고성과 타겟 확대",
+        _weekly_target_expansion_line(pw, products_all, week_end, best_target),
+        "",
+    ]
+
+    # ③ 저성과 상품 교체
+    current_names = set(pw[pcol].dropna().astype(str))
+    repeated_bad = []
+    try:
+        bad_names = _v4468_repeated_underperformer_names(products_all, week_end)
+        for name in bad_names:
+            if str(name) in current_names:
+                repeated_bad.append(_weekly_report_semantic_name(name))
+    except Exception:
+        repeated_bad = []
+    repeated_bad = list(dict.fromkeys(repeated_bad))[:3]
+    if not repeated_bad:
+        poor = pw.groupby(pcol, as_index=False)["주문금액"].sum().sort_values("주문금액")
+        poor = poor[poor["주문금액"] < 1_000_000]
+        repeated_bad = [_weekly_report_semantic_name(x) for x in poor[pcol].astype(str).head(3)]
+    next_lines += [
+        "③ 저성과 상품 교체",
+        f"• {'·'.join(repeated_bad)} 등 반복 저성과 상품 우선순위 하향 → 동일 카테고리 내 검증 상품으로 교체 검토" if repeated_bad else "• 반복 저성과 상품 우선순위 하향 → 동일 카테고리 내 검증 상품으로 교체 검토",
+        "",
+    ]
+
+    # ④ 신규·유사신규 발굴
+    new_core_short = []
+    if labels is not None:
+        new_mask, _ = _weekly_operation_masks(labels)
+        new_df = pw[new_mask].copy()
+        if not new_df.empty:
+            ng = new_df.groupby(pcol, as_index=False)["주문금액"].sum().sort_values("주문금액", ascending=False)
+            ng = ng[ng["주문금액"] >= 5_000_000].head(2)
+            new_core_short = [f"{_weekly_report_semantic_name(r[pcol])} {compact_money(r['주문금액'])}" for _, r in ng.iterrows()]
+    month = _weekly_selected_month(pw, week_end)
+    if month in [6, 7, 8]:
+        discovery = "간편식·냉방가전 신규·유사신규 후보 추가 TEST"
+    elif category_top_text:
+        discovery = "고성과 카테고리 인접 신규·유사신규 후보 추가 TEST"
+    else:
+        discovery = "검증 상품과 유사한 가격·구성의 신규·유사신규 후보 추가 TEST"
+    if new_core_short:
+        next_body = f"• {' / '.join(new_core_short)} → 우선 재편성 / {discovery}"
+    else:
+        next_body = f"• 금주 신규·유사신규 성과를 기준으로 {discovery}"
+    next_lines += ["④ 신규·유사신규 발굴", next_body]
+
+    return product_lines, op_lines, next_lines
+
+
 def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     """선택 주차 기준 통합 주간 인사이트 엔진.
     2025년 최초 데이터부터 향후 누적되는 모든 주차에 동일 규칙을 적용하며,
@@ -7055,309 +7460,39 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
                 lines.append("")
         return lines
 
-    numbered_next = _build_numbered_next_week_section(dyn_next, pw, weekly_context_products, _week_end)
-
-    # -------------------------------------------------
-    # V1.13 주간 보고서 간결화
-    # - 주간 실적 요약: KPI 2줄 + 핵심 해석 1줄
-    # - 상품 운영 시사점: 최대 3개
-    # - 편성 운영 시사점: 최대 3개
-    # - 차주 운영 제안: 4개 실행축, 각 1개 bullet
-    # - 긴 상품명은 보고서에서만 축약 (원본/집계키 영향 없음)
-    # -------------------------------------------------
-    def _v113_report_product_name(name, max_len=30):
-        label = _weekly_short_display_name(name, max_len=max_len)
-        return label if len(label) <= max_len else label[:max_len].rstrip(" ,/_-") + "…"
-
-    def _v113_join_names(rows, name_col="상품명", amount_col=None, topn=3):
-        if rows is None or rows.empty or name_col not in rows.columns:
-            return ""
-        work = rows.copy()
-        if amount_col and amount_col in work.columns:
-            work["_v113_amt"] = pd.to_numeric(work[amount_col], errors="coerce").fillna(0)
-            work = work.sort_values("_v113_amt", ascending=False)
-        names = []
-        for _, r in work.iterrows():
-            name = _v113_report_product_name(r.get(name_col, ""))
-            if not name or name in names:
-                continue
-            names.append(name)
-            if len(names) >= topn:
-                break
-        return "·".join(names)
-
-    def _v113_parse_bullet(line):
-        body = re.sub(r"^•\s*", "", str(line or "").strip())
-        title, fact, action = "", body, ""
-        if " : " in body:
-            title, rest = body.split(" : ", 1)
+    # V4.6 FINAL WEEKLY FORMAT
+    # - 주간 실적 요약 KPI 3줄은 기존 상세형을 그대로 유지
+    # - KPI 아래에는 수치 변화 + 원인 해석형 종합 1줄만 노출
+    # - 상품/편성 시사점 각 최대 3개, 차주 운영 제안 4개 축으로 고정
+    try:
+        if not prev_sw.empty:
+            _summary_interpretation = _weekly_build_summary_interpretation(
+                pw=pw, prev_pw=prev_pw,
+                send_runs=len(sw), prev_send_runs=len(prev_sw),
+                send_count=send_count, prev_send_count=psend,
+                order_count=order_count, prev_order_count=porders,
+                qty=qty, prev_qty=pqty,
+                amount=amount, prev_amount=pamount,
+                ctr=ctr, prev_ctr=pctr,
+                cvr=cvr, prev_cvr=pcvr,
+                aov=aov, prev_aov=paov,
+                spm=spm, prev_spm=pspm,
+            )
+            summary = summary[:3] + [_summary_interpretation]
         else:
-            rest = body
-        parts = re.split(r"\s*(?:→|>)\s*", rest, maxsplit=1)
-        fact = parts[0].strip()
-        action = parts[1].strip() if len(parts) > 1 else ""
-        return title.strip(), fact, action
+            summary = summary[:3] + [": 전주 비교 데이터가 없어 금주 실적 기준으로 상품·타겟별 매출 기여도 확인"]
 
-    def _v113_compact_text(text, max_chars=105):
-        s = re.sub(r"\s+", " ", str(text or "")).strip(" ,.>")
-        if len(s) <= max_chars:
-            return s
-        # 의미 단위(/, 쉼표) 경계 우선 축약
-        cut = s[:max_chars]
-        for token in [" / ", ", ", "·", " "]:
-            pos = cut.rfind(token)
-            if pos >= max_chars * 0.62:
-                cut = cut[:pos]
-                break
-        return cut.rstrip(" ,/·") + "…"
-
-    def _v113_make_line(title, fact, action=""):
-        title = _v113_compact_text(title, 42)
-        fact = _v113_compact_text(fact, 112)
-        action = _v113_compact_text(action, 92)
-        return f"• {title} : {fact}" + (f" → {action}" if action else "")
-
-    # 1) 주간 실적 요약: 3줄 고정
-    if not prev_sw.empty:
-        _v113_low_share = 0.0
+        dyn_product, dyn_op, numbered_next = _weekly_build_final_compact_sections(
+            week, year, pw, sw, weekly_context_products, sends_all, _week_end
+        )
+    except Exception as _compact_exc:
+        # 최종 표시 전용 로직이 실패해도 기존 주간 엔진 결과는 유지
         try:
-            _v113_week_amts = pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0)
-            _v113_low_share = float((_v113_week_amts < 1_000_000).mean()) if len(_v113_week_amts) else 0.0
+            print("[WEEKLY_FINAL_COMPACT_FALLBACK]", year, week, type(_compact_exc).__name__, str(_compact_exc))
         except Exception:
             pass
-
-        _v113_summary_action = "상품·타겟·편성 조건별 변동 요인 확인 필요"
-        if amount < pamount and spm < pspm:
-            if _v113_low_share >= 0.25:
-                _v113_summary_action = f"주문금액·SPM 동반 감소 및 100만원 미만 편성 비중 {_v113_low_share*100:.1f}% → 저성과 상품 비중 축소 필요"
-            else:
-                _v113_summary_action = "주문금액·SPM 동반 감소 → 저성과 상품 및 타겟 구성 점검 필요"
-        elif amount > pamount and spm > pspm:
-            _v113_summary_action = "주문금액·SPM 동반 개선 → 고성과 상품·타겟 조합 재현 확대"
-        elif amount > pamount:
-            _v113_summary_action = "주문금액 증가 → 매출 기여 상품과 타겟 중심 재현 조건 확인 필요"
-        elif amount < pamount:
-            _v113_summary_action = "주문금액 감소 → 상품·타겟별 하락 기여도 점검 필요"
-
-        summary = [
-            f"• 발송 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 편성 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)})",
-            f"• CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)})",
-            f"• {_v113_summary_action}",
-        ]
-    else:
-        summary = [
-            f"• 발송 {len(sw):,}회 / 편성 {len(pw):,}건 / 주문금액 {compact_money(amount)} / SPM {spm:.1f}",
-            f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원",
-            "• 전주 비교 데이터 없음 → 금주 상품·타겟·편성 효율을 기준으로 운영 조건 축적 필요",
-        ]
-
-    # 2) 상품 운영 시사점: 핵심 집중 / 최고 상품 / 타겟 적합도(또는 보완 1건)
-    _v113_product = []
-    try:
-        if not core_rows.empty and amount > 0:
-            _core_amt = pd.to_numeric(core_rows["주문금액"], errors="coerce").fillna(0)
-            _core_share = float(_core_amt.sum()) / float(amount) * 100 if amount else 0
-            _core_names_df = core_rows.assign(_v113_amount=_core_amt)
-            _core_names = _v113_join_names(_core_names_df, amount_col="_v113_amount", topn=3)
-            _v113_product.append(_v113_make_line(
-                "핵심상품 매출 집중",
-                f"500만원 이상 {len(core_rows)}건이 전체 주문금액의 {_core_share:.1f}% 차지" + (f" / {_core_names}" if _core_names else ""),
-                "검증 상품 재편성과 신규·유사신규 후보 발굴 병행",
-            ))
-    except Exception:
-        pass
-
-    try:
-        if not rank.empty:
-            _top = rank.iloc[0]
-            _top_name = _v113_report_product_name(_top.get("상품명", ""))
-            _top_amt = float(pd.to_numeric(pd.Series([_top.get("주문금액", 0)]), errors="coerce").fillna(0).iloc[0])
-            _hist = _weekly_product_history_stats(str(_top.get("상품명", "")), weekly_context_products, week_end)
-            _top_action = "동일 타겟 1회 추가 검증 후 운영 확대 판단" if not _hist or int(_hist.get("count", 0)) <= 2 else "반복 고성과 타겟 중심 재편성 유지"
-            _v113_product.append(_v113_make_line(
-                _top_name,
-                f"금주 {compact_money(_top_amt)}로 주간 상품 중 최고 매출",
-                _top_action,
-            ))
-    except Exception:
-        pass
-
-    _target_candidate = None
-    for _line in dyn_product:
-        if "타겟 적합도" in str(_line) or "타겟 내 반복 성과" in str(_line):
-            _target_candidate = _line
-            break
-    if _target_candidate:
-        _t, _f, _a = _v113_parse_bullet(_target_candidate)
-        _v113_product.append(_v113_make_line(_t or "타겟 적합도", _f, _a or "고성과 타겟 우선 편성 및 미발송 SEG 순차 TEST"))
-
-    if len(_v113_product) < 3:
-        for _line in dyn_product:
-            if len(_v113_product) >= 3:
-                break
-            _t, _f, _a = _v113_parse_bullet(_line)
-            if not _f or any((_t and _t in x) for x in _v113_product):
-                continue
-            if "핵심 상품 매출 집중" in _t or "핵심상품 매출 집중" in _t:
-                continue
-            _v113_product.append(_v113_make_line(_t or "상품 성과", _f, _a))
-    dyn_product = _v113_product[:3]
-
-    # 3) 편성 운영 시사점: 신규/재편성 비교 + 고성과 조합 + 카테고리 3줄 고정
-    _v113_op = []
-    try:
-        _labels = _weekly_normalize_operation_labels(pw)
-        if _labels is not None and "주문금액" in pw.columns:
-            _nm, _rm = _weekly_operation_masks(_labels)
-            _ndf, _rdf = pw[_nm].copy(), pw[_rm].copy()
-            if not _ndf.empty and not _rdf.empty:
-                _na = pd.to_numeric(_ndf["주문금액"], errors="coerce").fillna(0)
-                _ra = pd.to_numeric(_rdf["주문금액"], errors="coerce").fillna(0)
-                _navg, _ravg = float(_na.mean()), float(_ra.mean())
-                _nhit, _rhit = float((_na >= 3_000_000).mean())*100, float((_ra >= 3_000_000).mean())*100
-                if _ravg > _navg:
-                    _act = "검증 상품 중심 재편성 유지 / 신규·유사신규 선별 TEST"
-                else:
-                    _act = "신규·유사신규 고성과 후보 확대 / 검증 상품 재편성 병행"
-                _v113_op.append(_v113_make_line(
-                    "신규·유사신규 성과 비교",
-                    f"신규·유사신규 {len(_ndf)}건 평균 {compact_money(_navg)}·300만원 이상 {_nhit:.1f}% / 재편성 {len(_rdf)}건 평균 {compact_money(_ravg)}·300만원 이상 {_rhit:.1f}%",
-                    _act,
-                ))
-    except Exception:
-        pass
-
-    try:
-        _combo_facts = []
-        if not seg.empty:
-            _best_seg = seg.loc[seg["SPM"].idxmax()]
-            _sg = str(_best_seg.get("성별", "")).strip()
-            _sa = clean_identifier_value(_best_seg.get("연령", ""))
-            _combo_facts.append(f"{_sg}{_sa} SPM {float(_best_seg.get('SPM', 0)):.1f}")
-        if pattern4 and pattern4.get("time"):
-            _tn, _tc, _tt = pattern4["time"]
-            if _tc >= 3:
-                _combo_facts.append(f"최근 {_tt}주 중 {_tc}주 {_tn} SPM 최고")
-        if _combo_facts:
-            _v113_op.append(_v113_make_line(
-                "고성과 조합 강화",
-                " / ".join(_combo_facts),
-                "상품·타겟·시간대 반복 조합 축적 후 미발송 SEG 확대 TEST",
-            ))
-    except Exception:
-        pass
-
-    try:
-        _cat_col2 = _weekly_category_col(pw)
-        if _cat_col2 and "주문금액" in pw.columns:
-            _cats2 = (pw.groupby(_cat_col2, dropna=False)["주문금액"].sum().sort_values(ascending=False))
-            _ctotal = float(_cats2.sum())
-            _ctext = []
-            if _ctotal > 0:
-                for _k, _v in _cats2.head(3).items():
-                    if str(_k).strip() and str(_k).lower() != "nan":
-                        _ctext.append(f"{_k} {float(_v)/_ctotal*100:.1f}%")
-            if _ctext:
-                _v113_op.append(_v113_make_line(
-                    "검증 상품 중심 편성",
-                    " / ".join(_ctext),
-                    "카테고리 비중보다 300만원·500만원 이상 반복 달성 상품 중심 우선순위 설정",
-                ))
-    except Exception:
-        pass
-
-    if len(_v113_op) < 3:
-        for _line in dyn_op:
-            if len(_v113_op) >= 3:
-                break
-            _t, _f, _a = _v113_parse_bullet(_line)
-            if not _f or any((_t and _t in x) for x in _v113_op):
-                continue
-            _v113_op.append(_v113_make_line(_t or "편성 운영", _f, _a))
-    dyn_op = _v113_op[:3]
-
-    # 4) 차주 운영 제안: 4개 실행축, 각 1개 bullet
-    _v113_next = []
-
-    # ① 핵심상품 재편성
-    try:
-        _core_group = pd.DataFrame()
-        if not core_rows.empty:
-            _core_group = (core_rows.assign(_amt=pd.to_numeric(core_rows["주문금액"], errors="coerce").fillna(0))
-                           .groupby("상품명", as_index=False)["_amt"].sum()
-                           .sort_values("_amt", ascending=False))
-        if not _core_group.empty:
-            _names = _v113_join_names(_core_group, amount_col="_amt", topn=4)
-            _v113_next.extend(["① 핵심상품 재편성", f"• {_names} 우선 재편성 검토 → 동일·고성과 타겟 1회 재현 후 확대 판단"])
-        elif not rank.empty:
-            _names = _v113_join_names(rank, amount_col="주문금액", topn=3)
-            _v113_next.extend(["① 핵심상품 재편성", f"• {_names} 중심 재편성 우선순위 검토"])
-    except Exception:
-        pass
-
-    # ② 고성과 타겟 확대
-    try:
-        if _target_candidate:
-            _tt, _tf, _ta = _v113_parse_bullet(_target_candidate)
-            _v113_next.extend(["", "② 고성과 타겟 확대", f"• {_v113_compact_text(_tt or '고성과 상품', 38)} : {_v113_compact_text(_tf, 92)} → {_v113_compact_text(_ta or '고성과 타겟 우선 편성 및 미발송 SEG 순차 TEST', 82)}"])
-        elif not seg.empty:
-            _best_seg = seg.loc[seg["SPM"].idxmax()]
-            _sg = str(_best_seg.get("성별", "")).strip(); _sa = clean_identifier_value(_best_seg.get("연령", ""))
-            _v113_next.extend(["", "② 고성과 타겟 확대", f"• {_sg}{_sa} SPM {float(_best_seg.get('SPM', 0)):.1f} → 고성과 상품 우선 편성 후 미발송 SEG 순차 TEST"])
-    except Exception:
-        pass
-
-    # ③ 저성과 상품 교체
-    try:
-        _poor_now = (pw.groupby("상품명", as_index=False)["주문금액"].sum()
-                     .sort_values("주문금액", ascending=True))
-        _poor_now = _poor_now[_poor_now["주문금액"] < 1_000_000]
-        if not _poor_now.empty:
-            _poor_parts = []
-            for _, _r in _poor_now.head(3).iterrows():
-                _poor_parts.append(f"{_v113_report_product_name(_r['상품명'])}({compact_money(_r['주문금액'])})")
-            _v113_next.extend(["", "③ 저성과 상품 교체", f"• {'·'.join(_poor_parts)} → 과거 이력까지 확인해 반복 저성과 상품은 검증 상품으로 교체"])
-        else:
-            _v113_next.extend(["", "③ 저성과 상품 교체", "• 100만원 미만 상품의 과거 이력·가격·타겟 조건 확인 → 반복 저성과 확인 시 편성 우선순위 하향"])
-    except Exception:
-        pass
-
-    # ④ 신규·유사신규 발굴
-    try:
-        _new_parts = []
-        _labels2 = _weekly_normalize_operation_labels(pw)
-        if _labels2 is not None:
-            _nmask2, _ = _weekly_operation_masks(_labels2)
-            _new_core2 = pw[_nmask2 & (pd.to_numeric(pw["주문금액"], errors="coerce").fillna(0) >= 5_000_000)].copy()
-            if not _new_core2.empty:
-                _new_core2 = (_new_core2.assign(_amt=pd.to_numeric(_new_core2["주문금액"], errors="coerce").fillna(0))
-                              .groupby("상품명", as_index=False)["_amt"].sum().sort_values("_amt", ascending=False))
-                for _, _r in _new_core2.head(2).iterrows():
-                    _new_parts.append(f"{_v113_report_product_name(_r['상품명'])}({compact_money(_r['_amt'])})")
-
-        _season_hint = ""
-        for _line in dyn_next:
-            if any(k in str(_line) for k in ["신규·유사신규 발굴", "동시점", "동시즌", "냉방", "우양산", "시즌"]):
-                _st, _sf, _sa = _v113_parse_bullet(_line)
-                _season_hint = _v113_compact_text(_sa or _sf, 78)
-                break
-
-        if _new_parts:
-            _fact = f"신규 핵심상품 {'·'.join(_new_parts)}"
-            _action = "우선 재편성 후 추가 타겟·SEG 검증"
-            if _season_hint:
-                _action += f" / {_season_hint}"
-        elif _season_hint:
-            _fact = "전년도 동시즌 고성과 조건 기반 후보 발굴"
-            _action = _season_hint
-        else:
-            _fact = "신규·유사신규 후보 선별"
-            _action = "고성과 가격대·핵심 기능·타겟 조건 기반 TEST"
-        _v113_next.extend(["", "④ 신규·유사신규 발굴", f"• {_fact} → {_action}"])
-    except Exception:
-        pass
-
-    numbered_next = _v113_next
+        numbered_next = _build_numbered_next_week_section(dyn_next, pw, weekly_context_products, _week_end)
+        summary = summary[:4]
 
     summary = [_v451_arrow_report_style(x) if str(x).lstrip().startswith(":") else re.sub(r"[.]$", "", str(x).strip()) for x in summary]
     numbered_next = [_v451_arrow_report_style(x) for x in numbered_next]
