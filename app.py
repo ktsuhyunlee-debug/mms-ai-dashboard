@@ -7819,15 +7819,10 @@ def _build_product_group_summary_cached(
         .rename(columns={"주문금액": "최근실적"})
     )
     grouped = grouped.merge(latest_perf, on=group_keys, how="left")
-    grouped["평균 대비"] = np.where(
-        pd.to_numeric(grouped["평균실적"], errors="coerce").ne(0),
-        (
-            pd.to_numeric(grouped["최근실적"], errors="coerce")
-            / pd.to_numeric(grouped["평균실적"], errors="coerce")
-            - 1
-        ) * 100,
-        np.nan,
-    )
+    avg_perf = pd.to_numeric(grouped["평균실적"], errors="coerce")
+    recent_perf = pd.to_numeric(grouped["최근실적"], errors="coerce")
+    grouped["평균 대비"] = ((recent_perf / avg_perf) - 1) * 100
+    grouped.loc[avg_perf.eq(0) | avg_perf.isna(), "평균 대비"] = pd.NA
 
     if product_code_keys and "상품명" in filt.columns:
         # 화면에는 동일 상품번호의 가장 최근 상품명을 대표 상품명으로 표시
