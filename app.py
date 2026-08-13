@@ -192,6 +192,114 @@ html, body, [class*="css"] {
     color: var(--muted);
 }
 
+/* 주간실적 KPI 하단 구성비 카드 */
+.weekly-breakdown-card {
+    min-height: 164px;
+    margin-top: 14px;
+    padding: 18px 20px;
+}
+
+.weekly-breakdown-card .metric-label {
+    font-size: 13px;
+    margin-bottom: 12px;
+}
+
+.weekly-breakdown-main {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.weekly-breakdown-value {
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: -0.6px;
+    line-height: 1.1;
+}
+
+.weekly-breakdown-sub {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 6px;
+    line-height: 1.55;
+}
+
+.weekly-breakdown-delta {
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    padding-bottom: 2px;
+}
+
+.weekly-mix-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 8px;
+}
+
+.weekly-mix-item {
+    padding: 2px 16px;
+    min-width: 0;
+}
+
+.weekly-mix-item:first-child {
+    padding-left: 0;
+}
+
+.weekly-mix-item:last-child {
+    padding-right: 0;
+}
+
+.weekly-mix-item + .weekly-mix-item {
+    border-left: 1px solid var(--border);
+}
+
+.weekly-mix-name {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.weekly-mix-value {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    line-height: 1.2;
+}
+
+.weekly-mix-meta {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 6px;
+    line-height: 1.45;
+}
+
+@media (max-width: 900px) {
+    .weekly-breakdown-card {
+        min-height: 0;
+    }
+    .weekly-breakdown-main {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .weekly-mix-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+    .weekly-mix-item,
+    .weekly-mix-item:first-child,
+    .weekly-mix-item:last-child {
+        padding: 8px 0;
+    }
+    .weekly-mix-item + .weekly-mix-item {
+        border-left: 0;
+        border-top: 1px solid var(--border);
+    }
+}
+
 .insight-box {
     background: linear-gradient(180deg, #f8fbff 0%, #f3f7fd 100%);
     border: 1px solid #dfe8f5;
@@ -5257,6 +5365,195 @@ def _weekly_operation_masks(labels: pd.Series):
     return new, rerun
 
 
+def _weekly_operation_mix(df: pd.DataFrame) -> dict:
+    """주간 전체 편성건수 기준 재편성/유사신규/신규 구성비."""
+    total = int(len(df)) if df is not None else 0
+    result = {
+        "total": total,
+        "재편성": {"count": 0, "share": 0.0},
+        "유사신규": {"count": 0, "share": 0.0},
+        "신규": {"count": 0, "share": 0.0},
+        "미분류": 0,
+    }
+    if df is None or df.empty:
+        return result
+
+    labels = _weekly_normalize_operation_labels(df)
+    if labels is None:
+        result["미분류"] = total
+        return result
+
+    labels = labels.reindex(df.index).fillna("").astype(str).str.strip()
+    rerun_mask = labels.str.contains("재편성", na=False)
+    similar_mask = labels.str.contains("유사신규", na=False) & ~rerun_mask
+    new_mask = (
+        labels.str.contains("신규", na=False)
+        & ~labels.str.contains("유사신규", na=False)
+        & ~rerun_mask
+    )
+
+    masks = {
+        "재편성": rerun_mask,
+        "유사신규": similar_mask,
+        "신규": new_mask,
+    }
+    classified = pd.Series(False, index=df.index)
+    for name, mask in masks.items():
+        count = int(mask.sum())
+        result[name] = {
+            "count": count,
+            "share": (count / total) if total else 0.0,
+        }
+        classified = classified | mask
+    result["미분류"] = int((~classified).sum())
+    return result
+
+
+def _weekly_mms_mask(df: pd.DataFrame) -> pd.Series:
+    """발송 데이터에서 MMS 행을 판별합니다.
+
+    발송유형/채널 컬럼을 우선 사용하고, 구분 컬럼이 없으면 RCS·캐러셀 등
+    명시적인 비-MMS 표기가 있는 행만 제외합니다. 아무 구분 근거가 없으면
+    현재 MMS 대시보드의 기존 데이터 구조를 따라 전체 행을 MMS로 간주합니다.
+    """
+    if df is None or df.empty:
+        return pd.Series(False, index=getattr(df, "index", pd.Index([])), dtype=bool)
+
+    def _mask_from_values(values: pd.Series):
+        txt = values.fillna("").astype(str).str.strip()
+        explicit_mms = txt.str.contains(r"MMS|멀티미디어", case=False, regex=True, na=False)
+        explicit_other = txt.str.contains(
+            r"RCS|캐러셀|CAROUSEL|LMS|SMS|카카오|알림톡|친구톡",
+            case=False,
+            regex=True,
+            na=False,
+        )
+        if explicit_mms.any():
+            return explicit_mms
+        if explicit_other.any():
+            return ~explicit_other
+        return None
+
+    channel_cols = [
+        "발송유형", "발송 유형", "발송구분", "발송 구분",
+        "메시지유형", "메시지 유형", "메시지구분", "메시지 구분",
+        "발송채널", "발송 채널", "메시지채널", "메시지 채널", "채널",
+    ]
+    for col in channel_cols:
+        if col in df.columns:
+            mask = _mask_from_values(df[col])
+            if mask is not None:
+                return mask.reindex(df.index, fill_value=False)
+
+    # 별도 채널 컬럼이 없을 때는 소재/캠페인명에서 명시적인 비-MMS 표기만 탐지
+    for col in ["소재유형", "소재 유형", "캠페인명", "소재"]:
+        if col in df.columns:
+            txt = df[col].fillna("").astype(str)
+            non_mms = txt.str.contains(r"RCS|캐러셀|CAROUSEL", case=False, regex=True, na=False)
+            if non_mms.any():
+                return ~non_mms
+
+    return pd.Series(True, index=df.index, dtype=bool)
+
+
+def _weekly_mms_share_stats(df: pd.DataFrame) -> dict:
+    """전체 실적 대비 MMS 주문금액·주문건수 비중 계산.
+
+    1) 원본에 '전체 주문금액/건수'와 'MMS 주문금액/건수'가 있으면 해당 값을 최우선 사용
+    2) 전체 실적 컬럼만 있으면 기본 주문금액/건수를 MMS 실적으로 사용
+    3) 별도 전체실적 컬럼이 없으면 발송유형/채널/소재에서 MMS 행을 판별해 전체 발송 실적 대비 비중 계산
+    """
+    result = {
+        "amount": 0.0, "orders": 0.0, "total_amount": 0.0, "total_orders": 0.0,
+        "amount_share": 0.0, "order_share": 0.0,
+    }
+    if df is None or df.empty:
+        return result
+
+    def _sum_col(candidates) -> tuple[float, str | None]:
+        col = first_col(df, candidates)
+        if col is None:
+            return 0.0, None
+        s = df[col]
+        if s.dtype == object:
+            s = (
+                s.astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("%", "", regex=False)
+                .replace({"-": "0", "nan": "0", "None": "0", "": "0"})
+            )
+        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum()), col
+
+    explicit_total_amount, total_amount_col = _sum_col([
+        "전체 주문금액", "전체주문금액", "전체 실적 주문금액", "전체실적 주문금액",
+        "전체매출", "전체 매출", "총 주문금액", "총주문금액",
+    ])
+    explicit_total_orders, total_orders_col = _sum_col([
+        "전체 주문건수", "전체주문건수", "전체 실적 주문건수", "전체실적 주문건수",
+        "총 주문건수", "총주문건수",
+    ])
+    explicit_mms_amount, mms_amount_col = _sum_col([
+        "MMS 주문금액", "MMS주문금액", "MMS 실적 주문금액", "MMS실적 주문금액",
+        "MMS 매출", "MMS매출",
+    ])
+    explicit_mms_orders, mms_orders_col = _sum_col([
+        "MMS 주문건수", "MMS주문건수", "MMS 실적 주문건수", "MMS실적 주문건수",
+    ])
+
+    base_amount, base_amount_col = _sum_col(["주문금액"])
+    base_orders, base_orders_col = _sum_col(["주문건수"])
+
+    # 가장 명확한 원본 컬럼 조합 우선
+    if total_amount_col is not None:
+        total_amount = explicit_total_amount
+        mms_amount = explicit_mms_amount if mms_amount_col is not None else base_amount
+    elif mms_amount_col is not None:
+        # MMS 금액이 별도이고 기본 주문금액이 있으면 기본값을 전체로 해석
+        total_amount = base_amount if base_amount_col is not None else explicit_mms_amount
+        mms_amount = explicit_mms_amount
+    else:
+        total_amount = base_amount
+        amount_series = (
+            pd.to_numeric(
+                df["주문금액"].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
+            if "주문금액" in df.columns
+            else pd.Series(0.0, index=df.index)
+        )
+        mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
+        mms_amount = float(amount_series.loc[mask].sum())
+
+    if total_orders_col is not None:
+        total_orders = explicit_total_orders
+        mms_orders = explicit_mms_orders if mms_orders_col is not None else base_orders
+    elif mms_orders_col is not None:
+        total_orders = base_orders if base_orders_col is not None else explicit_mms_orders
+        mms_orders = explicit_mms_orders
+    else:
+        total_orders = base_orders
+        order_series = (
+            pd.to_numeric(
+                df["주문건수"].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
+            if "주문건수" in df.columns
+            else pd.Series(0.0, index=df.index)
+        )
+        mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
+        mms_orders = float(order_series.loc[mask].sum())
+
+    result.update({
+        "amount": mms_amount,
+        "orders": mms_orders,
+        "total_amount": total_amount,
+        "total_orders": total_orders,
+        "amount_share": (mms_amount / total_amount) if total_amount else 0.0,
+        "order_share": (mms_orders / total_orders) if total_orders else 0.0,
+    })
+    return result
+
+
 def _weekly_category_col(df: pd.DataFrame):
     if df is None or not hasattr(df, "columns"):
         return None
@@ -9818,6 +10115,84 @@ elif menu == "주간실적":
             )
         if i == 4:
             card_cols = st.columns(4)
+
+    # 주간 KPI 보조 카드: 전체 실적 대비 MMS 실적 비중 / 상품 편성 구성
+    _mms_stats = _weekly_mms_share_stats(sw)
+    _prev_mms_stats = _weekly_mms_share_stats(prev_sw) if not prev_sw.empty else None
+    _mms_delta = (
+        weekly_delta(_mms_stats["amount_share"], _prev_mms_stats["amount_share"], pp=True)
+        if _prev_mms_stats is not None and _prev_mms_stats["total_amount"] > 0
+        else "-"
+    )
+
+    _mix = _weekly_operation_mix(pw)
+    _prev_mix = _weekly_operation_mix(prev_pw) if not prev_pw.empty else None
+
+    def _mix_delta(name: str) -> str:
+        if _prev_mix is None or _prev_mix.get("total", 0) <= 0:
+            return "-"
+        return weekly_delta(
+            _mix[name]["share"],
+            _prev_mix[name]["share"],
+            pp=True,
+        )
+
+    _mix_unclassified = int(_mix.get("미분류", 0))
+    _mix_note = (
+        f'<div class="weekly-breakdown-sub">총 편성건수 {_mix["total"]:,}건 / 미분류 {_mix_unclassified:,}건</div>'
+        if _mix_unclassified > 0
+        else f'<div class="weekly-breakdown-sub">총 편성건수 {_mix["total"]:,}건 기준</div>'
+    )
+
+    breakdown_left, breakdown_right = st.columns(2)
+    with breakdown_left:
+        st.markdown(
+            f'''
+            <div class="metric-card weekly-breakdown-card">
+                <div class="metric-label">전체 실적 대비 MMS 실적 비중</div>
+                <div class="weekly-breakdown-main">
+                    <div>
+                        <div class="weekly-breakdown-value">{_mms_stats["amount_share"]*100:.1f}%</div>
+                        <div class="weekly-breakdown-sub">MMS 주문금액 비중</div>
+                    </div>
+                    <div class="weekly-breakdown-delta">전주 대비 {_mms_delta}</div>
+                </div>
+                <div class="weekly-breakdown-sub" style="margin-top:12px;">
+                    MMS 주문금액 {int(_mms_stats["amount"]):,}원 / 주문건수 {int(_mms_stats["orders"]):,}건
+                    &nbsp;&nbsp;·&nbsp;&nbsp; 주문건수 비중 {_mms_stats["order_share"]*100:.1f}%
+                </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+
+    with breakdown_right:
+        st.markdown(
+            f'''
+            <div class="metric-card weekly-breakdown-card">
+                <div class="metric-label">상품 편성 구성 <span style="font-weight:500; color:var(--muted);">(편성건수 기준)</span></div>
+                <div class="weekly-mix-grid">
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">재편성</div>
+                        <div class="weekly-mix-value">{_mix["재편성"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{_mix["재편성"]["count"]:,}건 / 전주 대비 {_mix_delta("재편성")}</div>
+                    </div>
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">유사신규</div>
+                        <div class="weekly-mix-value">{_mix["유사신규"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{_mix["유사신규"]["count"]:,}건 / 전주 대비 {_mix_delta("유사신규")}</div>
+                    </div>
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">신규</div>
+                        <div class="weekly-mix-value">{_mix["신규"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{_mix["신규"]["count"]:,}건 / 전주 대비 {_mix_delta("신규")}</div>
+                    </div>
+                </div>
+                {_mix_note}
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
 
     chart_left, chart_right = st.columns(2)
     with chart_left:
