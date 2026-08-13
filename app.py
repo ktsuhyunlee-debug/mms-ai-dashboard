@@ -205,7 +205,7 @@ html, body, [class*="css"] {
 
 /* 주간실적 KPI 하단 구성비 카드 */
 .weekly-breakdown-card {
-    min-height: 164px;
+    min-height: 230px;
     margin-top: 14px;
     padding: 18px 20px;
 }
@@ -214,13 +214,83 @@ html, body, [class*="css"] {
     display: flex;
     flex-direction: column;
 }
-.weekly-mms-share-card .metric-value {
-    font-size: 30px;
-    margin-top: 6px;
+
+.weekly-mms-share-layout {
+    display: grid;
+    grid-template-columns: 180px minmax(0, 1fr);
+    gap: 24px;
+    align-items: center;
+    flex: 1;
 }
-.weekly-mms-share-card .metric-delta {
-    margin-top: auto;
-    padding-top: 18px;
+
+.weekly-mms-donut-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.weekly-mms-donut {
+    position: relative;
+    width: 160px;
+    height: 160px;
+}
+
+.weekly-mms-donut svg {
+    width: 160px;
+    height: 160px;
+    transform: rotate(-90deg);
+    overflow: visible;
+}
+
+.weekly-mms-donut-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+.weekly-mms-donut-value {
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--primary);
+    letter-spacing: -0.5px;
+    line-height: 1.1;
+}
+
+.weekly-mms-donut-label {
+    margin-top: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #334155;
+}
+
+.weekly-mms-info {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 14px;
+}
+
+.weekly-mms-amount-label {
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 700;
+    margin-bottom: 3px;
+}
+
+.weekly-mms-amount-value {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.3px;
+    line-height: 1.2;
+}
+
+.weekly-mms-info .metric-delta {
+    margin-top: 2px;
 }
 
 .weekly-breakdown-card .metric-label {
@@ -308,6 +378,13 @@ html, body, [class*="css"] {
         align-items: flex-start;
         flex-direction: column;
         gap: 6px;
+    }
+    .weekly-mms-share-layout {
+        grid-template-columns: 1fr;
+        gap: 14px;
+    }
+    .weekly-mms-donut-wrap {
+        justify-content: flex-start;
     }
     .weekly-mix-grid {
         grid-template-columns: 1fr;
@@ -10199,6 +10276,21 @@ elif menu == "주간실적":
         if _mms_stats.get("available")
         else "-"
     )
+    _mms_share_pct = (
+        float(_mms_stats["amount_share"]) * 100
+        if _mms_stats.get("available")
+        else 0.0
+    )
+    _mms_donut_radius = 52
+    _mms_donut_circumference = 2 * math.pi * _mms_donut_radius
+    _mms_donut_progress = min(max(_mms_share_pct, 0.0), 100.0)
+    _mms_donut_offset = _mms_donut_circumference * (1 - _mms_donut_progress / 100.0)
+    _mms_amount_display = f'{int(float(_mms_stats.get("amount", 0))):,}원'
+    _overall_amount_display = (
+        f'{int(float(_mms_stats.get("total_amount", 0))):,}원'
+        if _mms_stats.get("available")
+        else "-"
+    )
 
     _mix = _weekly_operation_mix(pw)
     _prev_mix = _weekly_operation_mix(prev_pw) if not prev_pw.empty else None
@@ -10225,8 +10317,33 @@ elif menu == "주간실적":
             f'''
             <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
                 <div class="metric-label">MMS 실적 비중</div>
-                <div class="metric-value">{_mms_share_display}</div>
-                <div class="metric-delta {weekly_delta_class(_mms_delta)}">전주 대비 {_mms_delta}</div>
+                <div class="weekly-mms-share-layout">
+                    <div class="weekly-mms-donut-wrap">
+                        <div class="weekly-mms-donut">
+                            <svg viewBox="0 0 140 140" aria-hidden="true">
+                                <circle cx="70" cy="70" r="{_mms_donut_radius}" fill="none" stroke="#e5e7eb" stroke-width="14"></circle>
+                                <circle cx="70" cy="70" r="{_mms_donut_radius}" fill="none" stroke="#2f6fec" stroke-width="14" stroke-linecap="round"
+                                    stroke-dasharray="{_mms_donut_circumference:.2f}"
+                                    stroke-dashoffset="{_mms_donut_offset:.2f}"></circle>
+                            </svg>
+                            <div class="weekly-mms-donut-center">
+                                <div class="weekly-mms-donut-value">{_mms_share_display}</div>
+                                <div class="weekly-mms-donut-label">MMS 실적 비중</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="weekly-mms-info">
+                        <div>
+                            <div class="weekly-mms-amount-label">MMS 주문금액</div>
+                            <div class="weekly-mms-amount-value">{_mms_amount_display}</div>
+                        </div>
+                        <div>
+                            <div class="weekly-mms-amount-label">전체 주문금액</div>
+                            <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
+                        </div>
+                        <div class="metric-delta {weekly_delta_class(_mms_delta)}">전주 대비 {_mms_delta}</div>
+                    </div>
+                </div>
             </div>
             ''',
             unsafe_allow_html=True,
