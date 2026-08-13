@@ -1,4 +1,10 @@
 # =============================================================================
+# V4.6.1 WEEKLY KPI SHARE CARDS
+# - MMS 실적 비중 uses Google/Excel 전체실적 tab (일자 / 주문금액)
+# - Weekly card delta colors: 상승 빨강 / 하락 파랑 / 동일 검정
+# - MMS share card simplified to title / share / previous-week delta only
+# =============================================================================
+# =============================================================================
 # V4.6 FINAL WEEKLY REPORT FORMAT
 # - Weekly KPI summary 3 lines fixed
 # - One interpretive summary line (metric change + cause only)
@@ -192,11 +198,29 @@ html, body, [class*="css"] {
     color: var(--muted);
 }
 
+/* 주간실적 카드 전주대비 색상: 상승=빨강 / 하락=파랑 / 동일=검정 */
+.weekly-delta-up { color: #d64545 !important; }
+.weekly-delta-down { color: #2f6fec !important; }
+.weekly-delta-flat { color: #111827 !important; }
+
 /* 주간실적 KPI 하단 구성비 카드 */
 .weekly-breakdown-card {
     min-height: 164px;
     margin-top: 14px;
     padding: 18px 20px;
+}
+
+.weekly-mms-share-card {
+    display: flex;
+    flex-direction: column;
+}
+.weekly-mms-share-card .metric-value {
+    font-size: 30px;
+    margin-top: 6px;
+}
+.weekly-mms-share-card .metric-delta {
+    margin-top: auto;
+    padding-top: 18px;
 }
 
 .weekly-breakdown-card .metric-label {
@@ -749,6 +773,37 @@ def normalize_product(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def normalize_overall_performance(df: pd.DataFrame | None) -> pd.DataFrame:
+    """구글시트/엑셀 '전체실적' 탭을 정규화합니다.
+
+    필수 컬럼: 일자 / 주문금액
+    - 일자: 20260813 같은 YYYYMMDD 숫자·문자 또는 일반 날짜
+    - 주문금액: 일자별 전체 주문금액
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["일자", "주문금액", "_date"])
+
+    d = df.copy()
+    date_col = first_col(d, ["일자", "날짜", "발생일", "주문일", "주문일자"])
+    amount_col = first_col(d, ["주문금액", "전체 주문금액", "전체주문금액", "매출", "매출액"])
+    if date_col is None or amount_col is None:
+        return pd.DataFrame(columns=["일자", "주문금액", "_date"])
+
+    out = pd.DataFrame()
+    out["일자"] = d[date_col]
+    out["_date"] = parse_yyyymmdd_date(d[date_col]).dt.normalize()
+    amount = d[amount_col]
+    if amount.dtype == object:
+        amount = (
+            amount.astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace("원", "", regex=False)
+            .replace({"-": "0", "nan": "0", "None": "0", "": "0"})
+        )
+    out["주문금액"] = pd.to_numeric(amount, errors="coerce").fillna(0)
+    return out[out["_date"].notna()].reset_index(drop=True)
+
+
 def normalize_send(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     date_col = first_col(d, ["발송일시2", "발송일", "날짜", "일자"])
@@ -1019,6 +1074,8 @@ def load_excel_bytes(file_bytes: bytes):
         if "편성제외규칙" in workbook.sheet_names
         else pd.DataFrame()
     )
+    overall_sheet = "전체실적" if "전체실적" in workbook.sheet_names else ("전체 실적" if "전체 실적" in workbook.sheet_names else None)
+    overall_performance = pd.read_excel(workbook, sheet_name=overall_sheet) if overall_sheet else pd.DataFrame()
     normalized_promotions = normalize_promotion(promotions)
     normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
     return (
@@ -1029,6 +1086,7 @@ def load_excel_bytes(file_bytes: bytes):
         normalized_promotions,
         normalize_operation_issues(operation_issues),
         normalize_schedule_exclusion_rules(schedule_exclusion_rules),
+        normalize_overall_performance(overall_performance),
     )
 
 
@@ -1120,6 +1178,13 @@ def load_google_sheet(url: str):
             schedule_exclusion_rules_raw = read_google_csv(sheet_id, "편성제외규칙")
         except Exception:
             schedule_exclusion_rules_raw = pd.DataFrame()
+        try:
+            overall_performance_raw = read_google_csv(sheet_id, "전체실적")
+        except Exception:
+            try:
+                overall_performance_raw = read_google_csv(sheet_id, "전체 실적")
+            except Exception:
+                overall_performance_raw = pd.DataFrame()
         normalized_promotions = normalize_promotion(promotions_raw)
         normalized_products = apply_promotion_periods(normalize_product(product), normalized_promotions)
         return (
@@ -1130,6 +1195,7 @@ def load_google_sheet(url: str):
             normalized_promotions,
             normalize_operation_issues(operation_issues_raw),
             normalize_schedule_exclusion_rules(schedule_exclusion_rules_raw),
+            normalize_overall_performance(overall_performance_raw),
         )
     except Exception as exc:
         errors.append(f"상품·소재 CSV 불러오기 실패: {exc}")
@@ -1142,7 +1208,7 @@ def sync_google_sheet(url: str, force: bool = False):
     if force:
         load_google_sheet.clear()
 
-    products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules = load_google_sheet(url)
+    products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules, overall_performance = load_google_sheet(url)
     st.session_state.products = products
     st.session_state.sends = sends
     st.session_state.lowest = lowest
@@ -1150,6 +1216,7 @@ def sync_google_sheet(url: str, force: bool = False):
     st.session_state.promotions = promotions
     st.session_state.operation_issues = operation_issues
     st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
+    st.session_state.overall_performance = overall_performance
     # 데이터/편성제외규칙이 갱신되면 이전 자동 편성 결과가 최신 규칙처럼 보이지 않도록 초기화합니다.
     st.session_state.schedule_result = pd.DataFrame()
     st.session_state.schedule_detail_map = {}
@@ -3189,6 +3256,16 @@ def weekly_delta(cur: float, prev: float, pp: bool = False) -> str:
     if prev == 0:
         return "-"
     return change_label((cur - prev) / abs(prev))
+
+
+def weekly_delta_class(delta: str) -> str:
+    """주간실적 카드 증감 색상: 상승 빨강 / 하락 파랑 / 동일·비교불가 검정."""
+    text = str(delta or "").strip()
+    if text.startswith("▲"):
+        return "weekly-delta-up"
+    if text.startswith("▼"):
+        return "weekly-delta-down"
+    return "weekly-delta-flat"
 
 
 def build_weekly_detail_analysis(
@@ -5456,101 +5533,72 @@ def _weekly_mms_mask(df: pd.DataFrame) -> pd.Series:
     return pd.Series(True, index=df.index, dtype=bool)
 
 
-def _weekly_mms_share_stats(df: pd.DataFrame) -> dict:
-    """전체 실적 대비 MMS 주문금액·주문건수 비중 계산.
+def _weekly_period_bounds(year: int | None, week: str | None, df: pd.DataFrame):
+    """주차 라벨(예: 0810주차)을 우선 사용해 7일 범위를 반환합니다."""
+    if year is not None and week is not None:
+        m = re.search(r"(\d{4})", str(week))
+        if m:
+            mmdd = m.group(1)
+            start = pd.to_datetime(f"{int(year):04d}{mmdd}", format="%Y%m%d", errors="coerce")
+            if pd.notna(start):
+                return start.normalize(), (start + pd.Timedelta(days=6)).normalize()
 
-    1) 원본에 '전체 주문금액/건수'와 'MMS 주문금액/건수'가 있으면 해당 값을 최우선 사용
-    2) 전체 실적 컬럼만 있으면 기본 주문금액/건수를 MMS 실적으로 사용
-    3) 별도 전체실적 컬럼이 없으면 발송유형/채널/소재에서 MMS 행을 판별해 전체 발송 실적 대비 비중 계산
+    if df is not None and not df.empty and "_date" in df.columns:
+        dates = pd.to_datetime(df["_date"], errors="coerce").dropna()
+        if not dates.empty:
+            return dates.min().normalize(), dates.max().normalize()
+    return pd.NaT, pd.NaT
+
+
+def _weekly_mms_share_stats(
+    df: pd.DataFrame,
+    overall_performance: pd.DataFrame | None = None,
+    year: int | None = None,
+    week: str | None = None,
+) -> dict:
+    """'전체실적' 탭을 분모로 선택 주차 MMS 주문금액 비중을 계산합니다.
+
+    전체실적 탭이 없거나 해당 주차 데이터가 없으면 임의로 100% 처리하지 않습니다.
     """
     result = {
-        "amount": 0.0, "orders": 0.0, "total_amount": 0.0, "total_orders": 0.0,
-        "amount_share": 0.0, "order_share": 0.0,
+        "amount": 0.0,
+        "total_amount": 0.0,
+        "amount_share": None,
+        "available": False,
     }
     if df is None or df.empty:
         return result
 
-    def _sum_col(candidates) -> tuple[float, str | None]:
-        col = first_col(df, candidates)
-        if col is None:
-            return 0.0, None
-        s = df[col]
-        if s.dtype == object:
-            s = (
-                s.astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace("%", "", regex=False)
-                .replace({"-": "0", "nan": "0", "None": "0", "": "0"})
-            )
-        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum()), col
+    amount_series = (
+        pd.to_numeric(
+            df["주문금액"].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        ).fillna(0)
+        if "주문금액" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    mms_mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
+    mms_amount = float(amount_series.loc[mms_mask].sum())
+    result["amount"] = mms_amount
 
-    explicit_total_amount, total_amount_col = _sum_col([
-        "전체 주문금액", "전체주문금액", "전체 실적 주문금액", "전체실적 주문금액",
-        "전체매출", "전체 매출", "총 주문금액", "총주문금액",
-    ])
-    explicit_total_orders, total_orders_col = _sum_col([
-        "전체 주문건수", "전체주문건수", "전체 실적 주문건수", "전체실적 주문건수",
-        "총 주문건수", "총주문건수",
-    ])
-    explicit_mms_amount, mms_amount_col = _sum_col([
-        "MMS 주문금액", "MMS주문금액", "MMS 실적 주문금액", "MMS실적 주문금액",
-        "MMS 매출", "MMS매출",
-    ])
-    explicit_mms_orders, mms_orders_col = _sum_col([
-        "MMS 주문건수", "MMS주문건수", "MMS 실적 주문건수", "MMS실적 주문건수",
-    ])
+    if overall_performance is None or overall_performance.empty or "_date" not in overall_performance.columns:
+        return result
 
-    base_amount, base_amount_col = _sum_col(["주문금액"])
-    base_orders, base_orders_col = _sum_col(["주문건수"])
+    start_date, end_date = _weekly_period_bounds(year, week, df)
+    if pd.isna(start_date) or pd.isna(end_date):
+        return result
 
-    # 가장 명확한 원본 컬럼 조합 우선
-    if total_amount_col is not None:
-        total_amount = explicit_total_amount
-        mms_amount = explicit_mms_amount if mms_amount_col is not None else base_amount
-    elif mms_amount_col is not None:
-        # MMS 금액이 별도이고 기본 주문금액이 있으면 기본값을 전체로 해석
-        total_amount = base_amount if base_amount_col is not None else explicit_mms_amount
-        mms_amount = explicit_mms_amount
-    else:
-        total_amount = base_amount
-        amount_series = (
-            pd.to_numeric(
-                df["주문금액"].astype(str).str.replace(",", "", regex=False),
-                errors="coerce",
-            ).fillna(0)
-            if "주문금액" in df.columns
-            else pd.Series(0.0, index=df.index)
-        )
-        mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
-        mms_amount = float(amount_series.loc[mask].sum())
+    overall = overall_performance.copy()
+    overall_dates = pd.to_datetime(overall["_date"], errors="coerce").dt.normalize()
+    mask = overall_dates.between(start_date, end_date, inclusive="both")
+    if not mask.any():
+        return result
 
-    if total_orders_col is not None:
-        total_orders = explicit_total_orders
-        mms_orders = explicit_mms_orders if mms_orders_col is not None else base_orders
-    elif mms_orders_col is not None:
-        total_orders = base_orders if base_orders_col is not None else explicit_mms_orders
-        mms_orders = explicit_mms_orders
-    else:
-        total_orders = base_orders
-        order_series = (
-            pd.to_numeric(
-                df["주문건수"].astype(str).str.replace(",", "", regex=False),
-                errors="coerce",
-            ).fillna(0)
-            if "주문건수" in df.columns
-            else pd.Series(0.0, index=df.index)
-        )
-        mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
-        mms_orders = float(order_series.loc[mask].sum())
-
-    result.update({
-        "amount": mms_amount,
-        "orders": mms_orders,
-        "total_amount": total_amount,
-        "total_orders": total_orders,
-        "amount_share": (mms_amount / total_amount) if total_amount else 0.0,
-        "order_share": (mms_orders / total_orders) if total_orders else 0.0,
-    })
+    total_amount = float(pd.to_numeric(overall.loc[mask, "주문금액"], errors="coerce").fillna(0).sum())
+    result["total_amount"] = total_amount
+    if total_amount > 0:
+        result["amount_share"] = mms_amount / total_amount
+        result["available"] = True
     return result
 
 
@@ -9145,6 +9193,7 @@ if "products" not in st.session_state:
     st.session_state.messages = pd.DataFrame(columns=["캠페인명", "MMS문구"])
     st.session_state.promotions = pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"])
     st.session_state.schedule_exclusion_rules = pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"])
+    st.session_state.overall_performance = pd.DataFrame(columns=["일자", "주문금액", "_date"])
     st.session_state.auto_sync_attempted = False
     st.session_state.data_version = None
     st.session_state.uploaded_file_signature = None
@@ -9155,6 +9204,8 @@ if "uploaded_file_signature" not in st.session_state:
     st.session_state.uploaded_file_signature = None
 if "schedule_exclusion_rules" not in st.session_state:
     st.session_state.schedule_exclusion_rules = pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"])
+if "overall_performance" not in st.session_state:
+    st.session_state.overall_performance = pd.DataFrame(columns=["일자", "주문금액", "_date"])
 
 st.sidebar.markdown(
     """
@@ -9223,7 +9274,7 @@ else:
                 and st.session_state.sends is not None
             )
             if not same_uploaded_source:
-                products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules = load_excel_bytes(uploaded_bytes)
+                products, sends, lowest, messages, promotions, operation_issues, schedule_exclusion_rules, overall_performance = load_excel_bytes(uploaded_bytes)
                 st.session_state.products = products
                 st.session_state.sends = sends
                 st.session_state.lowest = lowest
@@ -9231,6 +9282,7 @@ else:
                 st.session_state.promotions = promotions
                 st.session_state.operation_issues = operation_issues
                 st.session_state.schedule_exclusion_rules = schedule_exclusion_rules
+                st.session_state.overall_performance = overall_performance
                 # 업로드 파일이 바뀌면 이전 자동 편성 결과를 초기화해 최신 규칙과 혼동되지 않게 합니다.
                 st.session_state.schedule_result = pd.DataFrame()
                 st.session_state.schedule_detail_map = {}
@@ -9257,6 +9309,10 @@ promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모
 schedule_exclusion_rules = st.session_state.get(
     "schedule_exclusion_rules",
     pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"]),
+)
+overall_performance = st.session_state.get(
+    "overall_performance",
+    pd.DataFrame(columns=["일자", "주문금액", "_date"]),
 )
 
 _menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"]
@@ -10110,18 +10166,37 @@ elif menu == "주간실적":
             st.markdown(
                 f'<div class="metric-card"><div class="metric-label">{label}</div>'
                 f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta">전주 대비 {delta}</div></div>',
+                f'<div class="metric-delta {weekly_delta_class(delta)}">전주 대비 {delta}</div></div>',
                 unsafe_allow_html=True,
             )
         if i == 4:
             card_cols = st.columns(4)
 
-    # 주간 KPI 보조 카드: 전체 실적 대비 MMS 실적 비중 / 상품 편성 구성
-    _mms_stats = _weekly_mms_share_stats(sw)
-    _prev_mms_stats = _weekly_mms_share_stats(prev_sw) if not prev_sw.empty else None
+    # 주간 KPI 보조 카드: MMS 실적 비중 / 상품 편성 구성
+    _mms_stats = _weekly_mms_share_stats(
+        sw, overall_performance, int(selected_year), str(week)
+    )
+    _prev_mms_stats = (
+        _weekly_mms_share_stats(
+            prev_sw, overall_performance, int(selected_year), str(prev_week)
+        )
+        if not prev_sw.empty
+        else None
+    )
     _mms_delta = (
-        weekly_delta(_mms_stats["amount_share"], _prev_mms_stats["amount_share"], pp=True)
-        if _prev_mms_stats is not None and _prev_mms_stats["total_amount"] > 0
+        weekly_delta(
+            float(_mms_stats["amount_share"]),
+            float(_prev_mms_stats["amount_share"]),
+            pp=True,
+        )
+        if _mms_stats.get("available")
+        and _prev_mms_stats is not None
+        and _prev_mms_stats.get("available")
+        else "-"
+    )
+    _mms_share_display = (
+        f'{float(_mms_stats["amount_share"])*100:.1f}%'
+        if _mms_stats.get("available")
         else "-"
     )
 
@@ -10148,25 +10223,19 @@ elif menu == "주간실적":
     with breakdown_left:
         st.markdown(
             f'''
-            <div class="metric-card weekly-breakdown-card">
-                <div class="metric-label">전체 실적 대비 MMS 실적 비중</div>
-                <div class="weekly-breakdown-main">
-                    <div>
-                        <div class="weekly-breakdown-value">{_mms_stats["amount_share"]*100:.1f}%</div>
-                        <div class="weekly-breakdown-sub">MMS 주문금액 비중</div>
-                    </div>
-                    <div class="weekly-breakdown-delta">전주 대비 {_mms_delta}</div>
-                </div>
-                <div class="weekly-breakdown-sub" style="margin-top:12px;">
-                    MMS 주문금액 {int(_mms_stats["amount"]):,}원 / 주문건수 {int(_mms_stats["orders"]):,}건
-                    &nbsp;&nbsp;·&nbsp;&nbsp; 주문건수 비중 {_mms_stats["order_share"]*100:.1f}%
-                </div>
+            <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
+                <div class="metric-label">MMS 실적 비중</div>
+                <div class="metric-value">{_mms_share_display}</div>
+                <div class="metric-delta {weekly_delta_class(_mms_delta)}">전주 대비 {_mms_delta}</div>
             </div>
             ''',
             unsafe_allow_html=True,
         )
 
     with breakdown_right:
+        _rerun_delta = _mix_delta("재편성")
+        _similar_delta = _mix_delta("유사신규")
+        _new_delta = _mix_delta("신규")
         st.markdown(
             f'''
             <div class="metric-card weekly-breakdown-card">
@@ -10175,17 +10244,20 @@ elif menu == "주간실적":
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">재편성</div>
                         <div class="weekly-mix-value">{_mix["재편성"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{_mix["재편성"]["count"]:,}건 / 전주 대비 {_mix_delta("재편성")}</div>
+                        <div class="weekly-mix-meta">{_mix["재편성"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_rerun_delta)}">전주 대비 {_rerun_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">유사신규</div>
                         <div class="weekly-mix-value">{_mix["유사신규"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{_mix["유사신규"]["count"]:,}건 / 전주 대비 {_mix_delta("유사신규")}</div>
+                        <div class="weekly-mix-meta">{_mix["유사신규"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_similar_delta)}">전주 대비 {_similar_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">신규</div>
                         <div class="weekly-mix-value">{_mix["신규"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{_mix["신규"]["count"]:,}건 / 전주 대비 {_mix_delta("신규")}</div>
+                        <div class="weekly-mix-meta">{_mix["신규"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_new_delta)}">전주 대비 {_new_delta}</div>
                     </div>
                 </div>
                 {_mix_note}
