@@ -5793,8 +5793,9 @@ def _weekly_mms_share_stats(
         if "주문금액" in df.columns
         else pd.Series(0.0, index=df.index)
     )
-    mms_mask = _weekly_mms_mask(df).reindex(df.index, fill_value=False)
-    mms_amount = float(amount_series.loc[mms_mask].sum())
+    # 주간실적의 다른 KPI/그래프와 동일하게 선택 주차에 포함된 모든 발송행을 사용합니다.
+    # 과거에는 여기서 RCS/캐러셀 표기를 다시 제외해 상단 주문금액 카드와 금액이 달라질 수 있었습니다.
+    mms_amount = float(amount_series.sum())
     result["amount"] = mms_amount
 
     if overall_performance is None or overall_performance.empty or "_date" not in overall_performance.columns:
@@ -9197,7 +9198,11 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go
     fig = go.Figure()
     if age_stats is None or age_stats.empty:
         return fig
-    plot = age_stats.copy()
+    # 막대그래프는 실제 반응이 발생한 성·연령 구간만 표시합니다.
+    # 표/전체 평균 계산은 기존 전체 데이터 기준을 유지합니다.
+    plot = age_stats[pd.to_numeric(age_stats["CTR(Uniq)"], errors="coerce").fillna(0) > 0].copy()
+    if plot.empty:
+        return fig
     plot["x_label"] = plot["성별"].astype(str) + "<br>" + plot["연령표시"].astype(str)
     x_order = plot["x_label"].tolist()
     gender_specs = [("남성", "#2f6fec"), ("여성", "#ef4770")]
@@ -9347,14 +9352,16 @@ def _target_region_map(region_stats: pd.DataFrame, overall_uctr: float) -> go.Fi
 
 
 def _target_rank_table(df: pd.DataFrame, top: bool = True, n: int = 5) -> pd.DataFrame:
+    columns = ["순위", "지역", "성공건수", "클릭수(Uniq)", "CTR(Uniq)", "전체 대비", "구간"]
     if df is None or df.empty:
-        return pd.DataFrame(columns=["순위", "지역", "성공건수", "CTR(Uniq)", "전체 대비", "구간"])
+        return pd.DataFrame(columns=columns)
     view = df.sort_values("CTR(Uniq)", ascending=not top).head(n).copy()
     view.insert(0, "순위", range(1, len(view) + 1))
     view["성공건수"] = view["성공건수"].map(lambda x: f"{int(x):,}")
+    view["클릭수(Uniq)"] = view["클릭수_Uniq"].map(lambda x: f"{int(x):,}")
     view["CTR(Uniq)"] = view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
     view["전체 대비"] = view["전체 대비"].map(lambda x: f"{'▲' if x > 0 else ('▼' if x < 0 else '-')} {abs(float(x))*100:.1f}%p")
-    return view[["순위", "지역", "성공건수", "CTR(Uniq)", "전체 대비", "구간"]]
+    return view[columns]
 
 
 def _target_age_table(age_stats: pd.DataFrame) -> pd.DataFrame:
