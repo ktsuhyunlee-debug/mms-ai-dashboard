@@ -9267,29 +9267,44 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float, compa
     plot = age_stats[pd.to_numeric(age_stats["CTR(Uniq)"], errors="coerce").fillna(0) > 0].copy()
     if plot.empty:
         return fig
+    # 성별 정규화 후 반드시 남성 전체 연령 → 여성 전체 연령 순서로 고정합니다.
+    plot["_gender_norm"] = plot["성별"].astype(str).str.strip().replace({"남자": "남성", "여자": "여성"})
+    gender_rank = {"남성": 0, "여성": 1}
+    plot["_gender_rank"] = plot["_gender_norm"].map(gender_rank).fillna(9)
+    plot["_age_order"] = plot["연령"].map(_target_age_sort_key)
+    plot = plot.sort_values(["_gender_rank", "_age_order", "성별"]).reset_index(drop=True)
+
     if compact_x:
-        # 주간 3분할 화면에서는 성별 텍스트를 반복하지 않고 색/범례로만 구분합니다.
+        # 주간 그래프: 화면에는 연령만 표시하되 내부 카테고리는 성별까지 포함해
+        # 남성 연령 전체가 끝난 뒤 여성 연령 전체가 이어지도록 분리합니다.
         plot["x_label"] = plot["연령"].map(_target_age_axis_label)
-        x_order = list(dict.fromkeys(plot["x_label"].tolist()))
+        plot["_x_key"] = plot["_gender_norm"] + "|" + plot["연령"].astype(str)
+        x_order = plot["_x_key"].tolist()
+        x_ticktext = plot["x_label"].tolist()
     else:
         plot["x_label"] = plot["성별"].astype(str) + "<br>" + plot["연령표시"].astype(str)
-        x_order = plot["x_label"].tolist()
+        plot["_x_key"] = plot["x_label"]
+        x_order = plot["_x_key"].tolist()
+        x_ticktext = None
+
     gender_specs = [("남성", "#2f6fec"), ("여성", "#ef4770")]
-    plot["_gender_norm"] = plot["성별"].astype(str).str.strip().replace({"남자": "남성", "여자": "여성"})
     for gender, color in gender_specs:
         sub = plot[plot["_gender_norm"].eq(gender)]
         if sub.empty:
             continue
+        customdata = list(zip(
+            sub["성공건수"], sub["클릭수_Uniq"], sub["_gender_norm"], sub["연령표시"]
+        ))
         fig.add_trace(go.Bar(
-            x=sub["x_label"],
+            x=sub["_x_key"],
             y=sub["CTR(Uniq)"] * 100,
             name=gender,
             marker_color=color,
             text=[f"{v*100:.1f}%" for v in sub["CTR(Uniq)"]],
             textposition="outside",
             cliponaxis=False,
-            customdata=list(zip(sub["성공건수"], sub["클릭수_Uniq"], sub["성별"])),
-            hovertemplate="%{customdata[2]} %{x}<br>CTR(Uniq) %{y:.1f}%<br>성공건수 %{customdata[0]:,.0f}<br>클릭수(Uniq) %{customdata[1]:,.0f}<extra></extra>",
+            customdata=customdata,
+            hovertemplate="%{customdata[2]} %{customdata[3]}<br>CTR(Uniq) %{y:.1f}%<br>성공건수 %{customdata[0]:,.0f}<br>클릭수(Uniq) %{customdata[1]:,.0f}<extra></extra>",
         ))
     avg_pct = float(overall_uctr or 0) * 100
     fig.add_hline(
@@ -9309,6 +9324,9 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float, compa
         legend=dict(orientation="h", x=0, y=1.12),
         xaxis=dict(
             categoryorder="array", categoryarray=x_order,
+            tickmode="array" if compact_x else "auto",
+            tickvals=x_order if compact_x else None,
+            ticktext=x_ticktext if compact_x else None,
             tickangle=-28 if compact_x else 0,
             tickfont=dict(size=10, color="#000000" if compact_x else None),
             automargin=True,
