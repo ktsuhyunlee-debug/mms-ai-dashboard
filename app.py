@@ -9468,54 +9468,74 @@ def render_daily_material_response_analysis(
     age_stats = bundle["age_stats"]
     region_stats = bundle["region_stats"]
 
-    st.markdown('<div class="subsection-title">성별·연령별 반응 분포</div>', unsafe_allow_html=True)
-    if age_stats.empty:
-        st.info("선택한 소재의 소재연령로우 데이터가 없습니다.")
-    else:
-        age_chart_col, age_table_col = st.columns([1.2, 1.0], gap="medium")
-        with age_chart_col:
+    # 성·연령 반응과 지역 반응을 PC에서 한 줄 4영역으로 비교합니다.
+    # 순서: 성·연령 막대그래프 → 성·연령 표 → 지역 지도 → 지역 TOP5/LOW5 표
+    response_cols = st.columns([1.35, 1.05, 1.35, 0.95], gap="small")
+
+    with response_cols[0]:
+        st.markdown('<div class="subsection-title">성별·연령별 반응 분포</div>', unsafe_allow_html=True)
+        if age_stats.empty:
+            st.info("선택한 소재의 소재연령로우 데이터가 없습니다.")
+        else:
             age_fig = _target_gender_age_chart(age_stats, summary["uctr"])
-            age_fig.update_layout(height=370, margin=dict(l=30, r=15, t=38, b=58))
+            age_fig.update_layout(
+                height=350,
+                margin=dict(l=24, r=8, t=34, b=52),
+                legend=dict(orientation="h", x=0, y=1.10, font=dict(size=10)),
+            )
+            age_fig.update_xaxes(tickfont=dict(size=9))
+            age_fig.update_yaxes(tickfont=dict(size=9), title_font=dict(size=10))
             st.plotly_chart(
                 age_fig, use_container_width=True, config={"displayModeBar": False},
                 key=f"{key_prefix}_age_chart",
             )
-            st.caption("남성=파랑 / 여성=빨강 · 점선=해당 소재 전체 CTR(Uniq) 평균")
-        with age_table_col:
+            st.caption("남성=파랑 / 여성=빨강 · 점선=전체 CTR(Uniq) 평균")
+
+    with response_cols[1]:
+        st.markdown('<div class="subsection-title">성·연령 표</div>', unsafe_allow_html=True)
+        if age_stats.empty:
+            st.info("표시할 성·연령 데이터가 없습니다.")
+        else:
             age_table = _target_age_table(age_stats)
             selectable_dataframe(
                 age_table, key=f"{key_prefix}_age_table", use_container_width=True,
-                hide_index=True, height=370,
+                hide_index=True, height=350,
             )
 
-    st.markdown('<div class="subsection-title">지역별 반응 분포</div>', unsafe_allow_html=True)
-    if region_selected.empty:
-        st.info("선택한 소재의 소재지역로우 데이터가 없습니다.")
-    elif region_stats.empty:
-        st.info("분석 가능한 지역 데이터가 없습니다.")
-    else:
-        map_col, rank_col = st.columns([1.3, 1.0], gap="medium")
-        with map_col:
+    with response_cols[2]:
+        st.markdown('<div class="subsection-title">지역별 반응 분포</div>', unsafe_allow_html=True)
+        if region_selected.empty:
+            st.info("선택한 소재의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
             region_fig = _target_region_map(region_stats, summary["uctr"])
-            region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
+            region_fig.update_layout(height=350, margin=dict(l=0, r=0, t=4, b=0))
             st.plotly_chart(
                 region_fig, use_container_width=True, config={"displayModeBar": False},
                 key=f"{key_prefix}_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명 표시 · 전체 대비 ±0.5%p 기준")
-        with rank_col:
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명 표시")
+
+    with response_cols[3]:
+        st.markdown('<div class="subsection-title">지역 반응 표</div>', unsafe_allow_html=True)
+        if region_selected.empty or region_stats.empty:
+            st.info("표시할 지역 데이터가 없습니다.")
+        else:
             st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
             top5 = _target_rank_table(region_stats, top=True, n=5)
             selectable_dataframe(
                 top5, key=f"{key_prefix}_region_top5", use_container_width=True,
-                hide_index=True, height=185,
+                hide_index=True, height=145,
             )
             st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
             low5 = _target_rank_table(region_stats, top=False, n=5)
             selectable_dataframe(
                 low5, key=f"{key_prefix}_region_low5", use_container_width=True,
-                hide_index=True, height=185,
+                hide_index=True, height=145,
             )
+
+    if not region_stats.empty:
         st.caption("지역 순위·지도는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
