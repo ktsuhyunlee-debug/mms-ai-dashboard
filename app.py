@@ -438,6 +438,36 @@ html, body, [class*="css"] {
     margin-top: 6px;
 }
 
+/* V4.7.1 일일실적 캠페인 KPI 한 줄 */
+.daily-campaign-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(118px, 1fr));
+    gap: 8px;
+    width: 100%;
+    overflow-x: auto;
+    padding: 2px 0 6px;
+    margin: 2px 0 14px;
+}
+.daily-campaign-kpi-grid .metric-card {
+    min-height: 82px;
+    padding: 12px 13px;
+    box-shadow: 0 2px 8px rgba(25, 42, 70, 0.035);
+}
+.daily-campaign-kpi-grid .metric-label {
+    font-size: 11px;
+    margin-bottom: 6px;
+    white-space: nowrap;
+}
+.daily-campaign-kpi-grid .metric-value {
+    font-size: 19px;
+    white-space: nowrap;
+}
+@media (max-width: 1200px) {
+    .daily-campaign-kpi-grid {
+        grid-template-columns: repeat(8, 118px);
+    }
+}
+
 .asset-card {
     border: 1px solid var(--border);
     border-radius: 14px;
@@ -9386,6 +9416,36 @@ def _daily_response_select_rows(raw_df: pd.DataFrame, selected_date, campaign_na
     return pd.DataFrame()
 
 
+def _daily_material_response_bundle(
+    selected_date,
+    time_value: str,
+    campaign_name: str,
+    material_age_raw: pd.DataFrame,
+    material_region_raw: pd.DataFrame,
+) -> dict:
+    """현재 캠페인의 소재 반응 원본을 한 번 묶어 KPI/차트/표에서 공통 사용합니다."""
+    age_selected = _daily_response_select_rows(material_age_raw, selected_date, campaign_name, time_value)
+    region_selected = _daily_response_select_rows(material_region_raw, selected_date, campaign_name, time_value)
+    if age_selected.empty and region_selected.empty:
+        return {
+            "available": False,
+            "summary": {"sent": 0.0, "success": 0.0, "uniq": 0.0, "success_rate": 0.0, "uctr": 0.0},
+            "age_selected": age_selected,
+            "region_selected": region_selected,
+            "age_stats": pd.DataFrame(),
+            "region_stats": pd.DataFrame(),
+        }
+    summary = _target_response_summary(age_selected, region_selected)
+    return {
+        "available": True,
+        "summary": summary,
+        "age_selected": age_selected,
+        "region_selected": region_selected,
+        "age_stats": _target_gender_age_aggregate(age_selected, summary["uctr"]),
+        "region_stats": _target_region_aggregate(region_selected, summary["uctr"], min_success=500),
+    }
+
+
 def render_daily_material_response_analysis(
     selected_date,
     time_value: str,
@@ -9393,56 +9453,40 @@ def render_daily_material_response_analysis(
     material_age_raw: pd.DataFrame,
     material_region_raw: pd.DataFrame,
     key_prefix: str,
+    response_bundle: dict | None = None,
 ) -> None:
-    """현재 일일 소재와 연결되는 성·연령/지역 반응 분석을 기존 일일실적 하단에 표시."""
-    age_selected = _daily_response_select_rows(material_age_raw, selected_date, campaign_name, time_value)
-    region_selected = _daily_response_select_rows(material_region_raw, selected_date, campaign_name, time_value)
-    if age_selected.empty and region_selected.empty:
+    """일일실적에서 성·연령과 지역 반응을 압축 배치합니다. 전체 KPI는 상단 캠페인 카드에서 표시합니다."""
+    bundle = response_bundle or _daily_material_response_bundle(
+        selected_date, time_value, campaign_name, material_age_raw, material_region_raw
+    )
+    if not bundle.get("available"):
         return
 
-    summary = _target_response_summary(age_selected, region_selected)
-    age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
-    region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
+    summary = bundle["summary"]
+    age_selected = bundle["age_selected"]
+    region_selected = bundle["region_selected"]
+    age_stats = bundle["age_stats"]
+    region_stats = bundle["region_stats"]
 
-    st.markdown('<div class="section-title">🎯 소재 반응 분석</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subsection-title">전체 반응 요약</div>', unsafe_allow_html=True)
-    response_cards = [
-        ("발송성공건수", f'{int(summary["success"]):,}건'),
-        ("클릭수(Uniq)", f'{int(summary["uniq"]):,}건'),
-        ("성공률", f'{summary["success_rate"]*100:.1f}%'),
-        ("CTR(Uniq)", f'{summary["uctr"]*100:.1f}%'),
-    ]
-    rcols = st.columns(4)
-    for col, (label, value) in zip(rcols, response_cards):
-        with col:
-            st.markdown(
-                f'<div class="metric-card daily-response-kpi-card"><div class="metric-label">{label}</div>'
-                f'<div class="metric-value">{value}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-    st.markdown('<div class="subsection-title">성별·연령별 반응 분포 · CTR(Uniq)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subsection-title">성별·연령별 반응 분포</div>', unsafe_allow_html=True)
     if age_stats.empty:
         st.info("선택한 소재의 소재연령로우 데이터가 없습니다.")
     else:
-        st.plotly_chart(
-            _target_gender_age_chart(age_stats, summary["uctr"]),
-            use_container_width=True,
-            config={"displayModeBar": False},
-            key=f"{key_prefix}_age_chart",
-        )
-        age_table = _target_age_table(age_stats)
-        selectable_dataframe(
-            age_table,
-            key=f"{key_prefix}_age_table",
-            use_container_width=True,
-            hide_index=True,
-            height=min(460, 42 + len(age_table) * 35),
-        )
-        st.caption(
-            "소재연령로우의 성·연령 구간 전체 표시 · 남성=파랑 / 여성=빨강 · "
-            "점선=해당 소재 전체 CTR(Uniq) 평균"
-        )
+        age_chart_col, age_table_col = st.columns([1.2, 1.0], gap="medium")
+        with age_chart_col:
+            age_fig = _target_gender_age_chart(age_stats, summary["uctr"])
+            age_fig.update_layout(height=370, margin=dict(l=30, r=15, t=38, b=58))
+            st.plotly_chart(
+                age_fig, use_container_width=True, config={"displayModeBar": False},
+                key=f"{key_prefix}_age_chart",
+            )
+            st.caption("남성=파랑 / 여성=빨강 · 점선=해당 소재 전체 CTR(Uniq) 평균")
+        with age_table_col:
+            age_table = _target_age_table(age_stats)
+            selectable_dataframe(
+                age_table, key=f"{key_prefix}_age_table", use_container_width=True,
+                hide_index=True, height=370,
+            )
 
     st.markdown('<div class="subsection-title">지역별 반응 분포</div>', unsafe_allow_html=True)
     if region_selected.empty:
@@ -9450,41 +9494,30 @@ def render_daily_material_response_analysis(
     elif region_stats.empty:
         st.info("분석 가능한 지역 데이터가 없습니다.")
     else:
-        map_col, rank_col = st.columns([1.35, 1.0])
+        map_col, rank_col = st.columns([1.3, 1.0], gap="medium")
         with map_col:
+            region_fig = _target_region_map(region_stats, summary["uctr"])
+            region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
             st.plotly_chart(
-                _target_region_map(region_stats, summary["uctr"]),
-                use_container_width=True,
-                config={"displayModeBar": False},
+                region_fig, use_container_width=True, config={"displayModeBar": False},
                 key=f"{key_prefix}_region_map",
             )
-            st.caption(
-                "높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명 함께 표시 · "
-                "구간은 전체 CTR(Uniq) 대비 ±0.5%p 기준"
-            )
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명 표시 · 전체 대비 ±0.5%p 기준")
         with rank_col:
             st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
             top5 = _target_rank_table(region_stats, top=True, n=5)
             selectable_dataframe(
-                top5,
-                key=f"{key_prefix}_region_top5",
-                use_container_width=True,
-                hide_index=True,
-                height=230,
+                top5, key=f"{key_prefix}_region_top5", use_container_width=True,
+                hide_index=True, height=185,
             )
             st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
             low5 = _target_rank_table(region_stats, top=False, n=5)
             selectable_dataframe(
-                low5,
-                key=f"{key_prefix}_region_low5",
-                use_container_width=True,
-                hide_index=True,
-                height=230,
+                low5, key=f"{key_prefix}_region_low5", use_container_width=True,
+                hide_index=True, height=185,
             )
-        st.caption(
-            "지역 순위·지도는 성공건수 500건 이상 지역을 기본 분석 대상으로 사용하며, "
-            "해당 지역이 없으면 성공건수 1건 이상으로 자동 확장"
-        )
+        st.caption("지역 순위·지도는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
+
 
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
@@ -10458,30 +10491,6 @@ elif menu == "일일실적":
         st.info("선택한 날짜의 데이터가 없습니다.")
         st.stop()
 
-    total_amount = pday["주문금액"].sum()
-    total_orders = pday["주문건수"].sum()
-    total_qty = pday["주문수량"].sum()
-    send_col = first_col(sday, ["발송 성공 건수", "총 발송 건수"])
-    click_col = first_col(sday, ["클릭 수(uniq)", "클릭 수"])
-    send_success = sday[send_col].sum() if send_col else 0
-    clicks = sday[click_col].sum() if click_col else 0
-
-    cards = [
-        ("주문건수", f"{int(total_orders):,}건"),
-        ("주문수량", f"{int(total_qty):,}개"),
-        ("주문금액", f"{int(total_amount):,}원"),
-        ("CTR", f"{(clicks/send_success*100 if send_success else 0):.1f}%"),
-        ("CVR", f"{(total_orders/clicks*100 if clicks else 0):.1f}%"),
-        ("SPM", f"{(total_amount/send_success if send_success else 0):.1f}"),
-    ]
-    metric_cols = st.columns(len(cards))
-    for c, (label, value) in zip(metric_cols, cards):
-        c.markdown(
-            f'<div class="metric-card"><div class="metric-label">{label}</div>'
-            f'<div class="metric-value">{value}</div></div>',
-            unsafe_allow_html=True,
-        )
-
     # 오전/오후 또는 소재 단위 분석은 선택일 기준 캐시된 결과를 사용
     for section in daily_bundle["sections"]:
         send_row = pd.Series(section["send_row"])
@@ -10490,19 +10499,55 @@ elif menu == "일일실적":
         matched = section["matched"].copy()
         cached_reports = section["reports"]
 
-        if matched.empty:
-            display_time = time_value or "-"
-            part_title = f"{display_time} · {material}" if material else display_time
-            st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
-            st.info("해당 발송 건과 연결된 상품 실적이 없습니다.")
-            continue
-
         display_time = time_value or "-"
         part_title = f"{display_time} · {material}" if material else display_time
         st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
 
         asset_key = daily_asset_key(selected_date, time_value)
         campaign_name = str(send_row.get("캠페인명", "")).strip()
+
+        response_bundle = _daily_material_response_bundle(
+            selected_date, time_value, campaign_name, material_age_raw, material_region_raw
+        )
+        response_summary = response_bundle.get("summary", {})
+        response_available = bool(response_bundle.get("available"))
+
+        raw_send_col = first_col(pd.DataFrame([send_row]), ["발송 성공 건수", "총 발송 건수"])
+        raw_click_col = first_col(pd.DataFrame([send_row]), ["클릭 수(uniq)", "클릭 수"])
+        raw_send_success = float(send_row.get(raw_send_col, 0) or 0) if raw_send_col else 0.0
+        raw_click_uniq = float(send_row.get(raw_click_col, 0) or 0) if raw_click_col else 0.0
+        campaign_send_success = float(response_summary.get("success", 0) or 0) if response_available else raw_send_success
+        campaign_click_uniq = float(response_summary.get("uniq", 0) or 0) if response_available else raw_click_uniq
+        campaign_uctr = float(response_summary.get("uctr", 0) or 0) if response_available else (campaign_click_uniq / campaign_send_success if campaign_send_success else 0.0)
+
+        if matched.empty:
+            campaign_orders = float(send_row.get("주문건수", 0) or 0)
+            campaign_qty = float(send_row.get("주문수량", 0) or 0)
+            campaign_amount = float(send_row.get("주문금액", 0) or 0)
+        else:
+            campaign_orders = float(pd.to_numeric(matched["주문건수"], errors="coerce").fillna(0).sum()) if "주문건수" in matched.columns else 0.0
+            campaign_qty = float(pd.to_numeric(matched["주문수량"], errors="coerce").fillna(0).sum()) if "주문수량" in matched.columns else 0.0
+            campaign_amount = float(pd.to_numeric(matched["주문금액"], errors="coerce").fillna(0).sum()) if "주문금액" in matched.columns else 0.0
+
+        campaign_cvr = campaign_orders / campaign_click_uniq if campaign_click_uniq else 0.0
+        campaign_spm = campaign_amount / campaign_send_success if campaign_send_success else 0.0
+        campaign_cards = [
+            ("주문건수", f"{int(campaign_orders):,}건"),
+            ("주문수량", f"{int(campaign_qty):,}개"),
+            ("주문금액", f"{int(campaign_amount):,}원"),
+            ("발송성공건수", f"{int(campaign_send_success):,}건"),
+            ("클릭수(Uniq)", f"{int(campaign_click_uniq):,}건"),
+            ("CTR(Uniq)", f"{campaign_uctr*100:.1f}%"),
+            ("CVR", f"{campaign_cvr*100:.1f}%"),
+            ("SPM", f"{campaign_spm:.1f}"),
+        ]
+        campaign_cards_html = "".join(
+            f'<div class="metric-card"><div class="metric-label">{label}</div>'
+            f'<div class="metric-value">{value}</div></div>'
+            for label, value in campaign_cards
+        )
+        st.markdown(f'<div class="daily-campaign-kpi-grid">{campaign_cards_html}</div>', unsafe_allow_html=True)
+
         image_path = find_daily_image(asset_key, campaign_name)
         message_text = extract_mms_message(matched, send_row, messages)
 
@@ -10546,7 +10591,20 @@ elif menu == "일일실적":
         """
         st.markdown(asset_pair_html, unsafe_allow_html=True)
 
-        # 발송 통계: 요청 컬럼만 표시
+        key_token = hashlib.md5(f"{selected_date}|{time_value}|{campaign_name}".encode("utf-8")).hexdigest()[:10]
+        render_daily_material_response_analysis(
+            selected_date=selected_date,
+            time_value=time_value,
+            campaign_name=campaign_name,
+            material_age_raw=material_age_raw,
+            material_region_raw=material_region_raw,
+            key_prefix=f"daily_response_{key_token}",
+            response_bundle=response_bundle,
+        )
+
+        # 발송 통계: 전체 CTR은 상단 CTR(Uniq) 카드 하나만 사용하므로 표에서는 제외
+        send_col = first_col(pd.DataFrame([send_row]), ["발송 성공 건수", "총 발송 건수"])
+        click_col = first_col(pd.DataFrame([send_row]), ["클릭 수(uniq)", "클릭 수"])
         send_count = float(send_row.get(send_col, 0)) if send_col else 0
         click_count = float(send_row.get(click_col, 0)) if click_col else 0
         orders = float(send_row.get("주문건수", 0))
@@ -10558,8 +10616,7 @@ elif menu == "일일실적":
             "소재": material,
             "URL": send_row.get("URL", ""),
             "발송건수": fmt_num(send_count),
-            "클릭수": fmt_num(click_count),
-            "CTR": fmt_pct(click_count / send_count if send_count else 0),
+            "클릭수(Uniq)": fmt_num(click_count),
             "CVR": fmt_pct(orders / click_count if click_count else 0),
             "객단가": fmt_num(amount / orders if orders else 0),
             "SPM": f"{(amount/send_count if send_count else 0):.1f}",
@@ -10572,6 +10629,13 @@ elif menu == "일일실적":
             use_container_width=True,
             hide_index=True,
         )
+
+        if matched.empty:
+            st.markdown('<div class="subsection-title">상품 실적</div>', unsafe_allow_html=True)
+            st.info("해당 발송 건과 연결된 상품 실적이 없습니다.")
+            st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
+            st.caption("연결된 상품 실적이 없어 상품 인사이트를 표시하지 않습니다.")
+            continue
 
         display_cols = [
             "전시순서", "MD", "알파코드", "쇼라코드", "상품명",
@@ -10655,16 +10719,6 @@ elif menu == "일일실적":
                         hide_index=True,
                         height=min(210, 38 * (len(report["발송이력"]) + 1)),
                     )
-
-        # 소재연령로우 / 소재지역로우가 있는 경우 현재 오전·오후 소재에 자동 연결
-        render_daily_material_response_analysis(
-            selected_date=selected_date,
-            time_value=time_value,
-            campaign_name=campaign_name,
-            material_age_raw=material_age_raw,
-            material_region_raw=material_region_raw,
-            key_prefix=f"daily_response_{selected_date}_{_v4482_time_key(time_value)}",
-        )
 
 
 
