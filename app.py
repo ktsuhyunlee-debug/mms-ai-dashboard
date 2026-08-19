@@ -9547,8 +9547,8 @@ def render_weekly_material_response_analysis(
     age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
     region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
 
-    st.markdown('<div class="subsection-title">주간 소재 반응 분포</div>', unsafe_allow_html=True)
-    age_col, region_col = st.columns(2, gap="medium")
+    # 별도 '주간 소재 반응 분포' 제목 없이 분석 항목을 바로 노출
+    age_col, region_map_col, region_rank_col = st.columns([1.15, 1.15, 1.0], gap="medium")
 
     with age_col:
         st.markdown("**성별·연령별 반응 분포**")
@@ -9565,7 +9565,7 @@ def render_weekly_material_response_analysis(
             )
             st.caption("CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선=주간 전체 평균")
 
-    with region_col:
+    with region_map_col:
         st.markdown("**지역별 반응 분포**")
         if region_selected.empty:
             st.info("선택 주차의 소재지역로우 데이터가 없습니다.")
@@ -9581,6 +9581,33 @@ def render_weekly_material_response_analysis(
                 key=f"{key_prefix}_weekly_region_map",
             )
             st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 주간 전체 대비 ±0.5%p 기준")
+
+    with region_rank_col:
+        st.markdown("**지역 TOP5 · LOW5**")
+        if region_selected.empty:
+            st.info("선택 주차의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
+            weekly_top5 = _target_rank_table(region_stats, top=True, n=5)
+            selectable_dataframe(
+                weekly_top5,
+                key=f"{key_prefix}_weekly_region_top5",
+                use_container_width=True,
+                hide_index=True,
+                height=185,
+            )
+            st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
+            weekly_low5 = _target_rank_table(region_stats, top=False, n=5)
+            selectable_dataframe(
+                weekly_low5,
+                key=f"{key_prefix}_weekly_region_low5",
+                use_container_width=True,
+                hide_index=True,
+                height=185,
+            )
+            st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
