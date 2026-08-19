@@ -3201,6 +3201,33 @@ def category_summary_table(
     return pd.concat([view, total_row], ignore_index=True)
 
 
+def _weekly_black_plotly_text(fig: go.Figure) -> go.Figure:
+    """주간실적 비-파이 그래프의 축/범례/수치/지도 라벨 글씨를 검정색으로 통일합니다."""
+    out = go.Figure(fig)
+    out.update_layout(font=dict(color="#000000"))
+    try:
+        out.update_xaxes(tickfont=dict(color="#000000"), title_font=dict(color="#000000"))
+        out.update_yaxes(tickfont=dict(color="#000000"), title_font=dict(color="#000000"))
+    except Exception:
+        pass
+    for trace in out.data:
+        try:
+            trace.textfont = dict(color="#000000")
+        except Exception:
+            pass
+    try:
+        if out.layout.legend is not None:
+            out.layout.legend.font = dict(color="#000000")
+    except Exception:
+        pass
+    try:
+        for ann in out.layout.annotations or []:
+            ann.font = dict(color="#000000")
+    except Exception:
+        pass
+    return out
+
+
 def category_pie_chart(
     table: pd.DataFrame,
     title: str,
@@ -3410,6 +3437,28 @@ def _render_selected_cell_summary(event, summary_df: pd.DataFrame | None) -> Non
             st.caption("• " + line)
 
 
+def _weekly_black_dataframe_text(data):
+    """주간실적 표의 셀/헤더 글씨를 검정색으로 통일합니다. 기존 배경색/행 강조는 유지합니다."""
+    try:
+        if isinstance(data, pd.DataFrame):
+            styler = data.style
+        elif hasattr(data, "set_properties") and hasattr(data, "data"):
+            styler = data
+        else:
+            return data
+        styler = styler.set_properties(**{"color": "#000000"})
+        try:
+            styler = styler.set_table_styles(
+                [{"selector": "th", "props": [("color", "#000000")]}],
+                overwrite=False,
+            )
+        except Exception:
+            pass
+        return styler
+    except Exception:
+        return data
+
+
 def selectable_dataframe(
     data,
     *,
@@ -3425,6 +3474,10 @@ def selectable_dataframe(
         else:
             # pandas Styler 등은 원본 DataFrame을 사용
             summary_df = getattr(data, "data", None)
+
+    # 주간실적 표는 배경/조건부 서식을 유지하면서 글씨와 숫자만 검정색으로 표시합니다.
+    if str(key).startswith("weekly_"):
+        data = _weekly_black_dataframe_text(data)
 
     if not _streamlit_supports_multi_cell_selection():
         if allow_row_selection:
@@ -9150,6 +9203,17 @@ def _target_age_short(age_value: str) -> str:
     return s or "-"
 
 
+def _target_age_axis_label(age_value: str) -> str:
+    """좁은 그래프용 연령 라벨: '50대 전반' -> '50대<br>전반'."""
+    s = _target_age_short(age_value)
+    m = re.match(r"^(\d+대)\s*(전반|후반|이상)?$", s)
+    if m:
+        decade, half = m.group(1), m.group(2)
+        return f"{decade}<br>{half}" if half else decade
+    parts = s.split()
+    return "<br>".join(parts[:2]) if len(parts) >= 2 else s
+
+
 def _target_age_sort_key(age_value: str) -> tuple:
     s = _target_age_short(age_value)
     m = re.search(r"(\d+)대", s)
@@ -9194,7 +9258,7 @@ def _target_gender_age_aggregate(age_df: pd.DataFrame, overall_uctr: float) -> p
     return grouped.sort_values(["_gender_sort", "_age_sort", "성별"]).reset_index(drop=True)
 
 
-def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go.Figure:
+def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float, compact_x: bool = False) -> go.Figure:
     fig = go.Figure()
     if age_stats is None or age_stats.empty:
         return fig
@@ -9203,8 +9267,13 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go
     plot = age_stats[pd.to_numeric(age_stats["CTR(Uniq)"], errors="coerce").fillna(0) > 0].copy()
     if plot.empty:
         return fig
-    plot["x_label"] = plot["성별"].astype(str) + "<br>" + plot["연령표시"].astype(str)
-    x_order = plot["x_label"].tolist()
+    if compact_x:
+        # 주간 3분할 화면에서는 성별 텍스트를 반복하지 않고 색/범례로만 구분합니다.
+        plot["x_label"] = plot["연령"].map(_target_age_axis_label)
+        x_order = list(dict.fromkeys(plot["x_label"].tolist()))
+    else:
+        plot["x_label"] = plot["성별"].astype(str) + "<br>" + plot["연령표시"].astype(str)
+        x_order = plot["x_label"].tolist()
     gender_specs = [("남성", "#2f6fec"), ("여성", "#ef4770")]
     plot["_gender_norm"] = plot["성별"].astype(str).str.strip().replace({"남자": "남성", "여자": "여성"})
     for gender, color in gender_specs:
@@ -9219,8 +9288,8 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go
             text=[f"{v*100:.1f}%" for v in sub["CTR(Uniq)"]],
             textposition="outside",
             cliponaxis=False,
-            customdata=list(zip(sub["성공건수"], sub["클릭수_Uniq"])),
-            hovertemplate="%{x}<br>CTR(Uniq) %{y:.1f}%<br>성공건수 %{customdata[0]:,.0f}<br>클릭수(Uniq) %{customdata[1]:,.0f}<extra></extra>",
+            customdata=list(zip(sub["성공건수"], sub["클릭수_Uniq"], sub["성별"])),
+            hovertemplate="%{customdata[2]} %{x}<br>CTR(Uniq) %{y:.1f}%<br>성공건수 %{customdata[0]:,.0f}<br>클릭수(Uniq) %{customdata[1]:,.0f}<extra></extra>",
         ))
     avg_pct = float(overall_uctr or 0) * 100
     fig.add_hline(
@@ -9238,7 +9307,12 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go
         paper_bgcolor="#ffffff",
         barmode="group",
         legend=dict(orientation="h", x=0, y=1.12),
-        xaxis=dict(categoryorder="array", categoryarray=x_order, tickangle=0),
+        xaxis=dict(
+            categoryorder="array", categoryarray=x_order,
+            tickangle=-28 if compact_x else 0,
+            tickfont=dict(size=10, color="#000000" if compact_x else None),
+            automargin=True,
+        ),
         yaxis=dict(title="CTR(Uniq)", ticksuffix="%", range=[0, ymax], gridcolor="#e5e7eb"),
     )
     return fig
@@ -9555,8 +9629,9 @@ def render_weekly_material_response_analysis(
         if age_stats.empty:
             st.info("선택 주차의 소재연령로우 데이터가 없습니다.")
         else:
-            age_fig = _target_gender_age_chart(age_stats, summary["uctr"])
-            age_fig.update_layout(height=430, margin=dict(l=30, r=15, t=42, b=65))
+            age_fig = _target_gender_age_chart(age_stats, summary["uctr"], compact_x=True)
+            age_fig = _weekly_black_plotly_text(age_fig)
+            age_fig.update_layout(height=430, margin=dict(l=30, r=15, t=42, b=95))
             st.plotly_chart(
                 age_fig,
                 use_container_width=True,
@@ -9573,6 +9648,7 @@ def render_weekly_material_response_analysis(
             st.info("분석 가능한 지역 데이터가 없습니다.")
         else:
             region_fig = _target_region_map(region_stats, summary["uctr"])
+            region_fig = _weekly_black_plotly_text(region_fig)
             region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
             st.plotly_chart(
                 region_fig,
@@ -11151,13 +11227,13 @@ elif menu == "주간실적":
     chart_left, chart_right = st.columns(2)
     with chart_left:
         st.plotly_chart(
-            weekly_heavy["product_chart"],
+            _weekly_black_plotly_text(weekly_heavy["product_chart"]),
             use_container_width=True,
             config={"displayModeBar": False},
         )
     with chart_right:
         st.plotly_chart(
-            weekly_heavy["send_chart"],
+            _weekly_black_plotly_text(weekly_heavy["send_chart"]),
             use_container_width=True,
             config={"displayModeBar": False},
         )
