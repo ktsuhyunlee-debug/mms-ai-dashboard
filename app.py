@@ -9517,6 +9517,72 @@ def render_daily_material_response_analysis(
         st.caption("지역 순위·지도는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
+def render_weekly_material_response_analysis(
+    week_start,
+    week_end,
+    material_age_raw: pd.DataFrame,
+    material_region_raw: pd.DataFrame,
+    key_prefix: str,
+) -> None:
+    """선택 주차 전체 소재의 성·연령/지역 반응 분포를 한 줄로 요약 표시합니다."""
+    start_ts = pd.to_datetime(week_start, errors="coerce")
+    end_ts = pd.to_datetime(week_end, errors="coerce")
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return
+    start_ts = start_ts.normalize()
+    end_ts = end_ts.normalize()
+
+    def _weekly_raw_slice(raw: pd.DataFrame) -> pd.DataFrame:
+        if raw is None or raw.empty or "_date" not in raw.columns:
+            return pd.DataFrame()
+        dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
+        return raw.loc[dates.notna() & dates.between(start_ts, end_ts, inclusive="both")].copy()
+
+    age_selected = _weekly_raw_slice(material_age_raw)
+    region_selected = _weekly_raw_slice(material_region_raw)
+    if age_selected.empty and region_selected.empty:
+        return
+
+    summary = _target_response_summary(age_selected, region_selected)
+    age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
+    region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
+
+    st.markdown('<div class="subsection-title">주간 소재 반응 분포</div>', unsafe_allow_html=True)
+    age_col, region_col = st.columns(2, gap="medium")
+
+    with age_col:
+        st.markdown("**성별·연령별 반응 분포**")
+        if age_stats.empty:
+            st.info("선택 주차의 소재연령로우 데이터가 없습니다.")
+        else:
+            age_fig = _target_gender_age_chart(age_stats, summary["uctr"])
+            age_fig.update_layout(height=430, margin=dict(l=30, r=15, t=42, b=65))
+            st.plotly_chart(
+                age_fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"{key_prefix}_weekly_age_chart",
+            )
+            st.caption("CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선=주간 전체 평균")
+
+    with region_col:
+        st.markdown("**지역별 반응 분포**")
+        if region_selected.empty:
+            st.info("선택 주차의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            region_fig = _target_region_map(region_stats, summary["uctr"])
+            region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
+            st.plotly_chart(
+                region_fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"{key_prefix}_weekly_region_map",
+            )
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 주간 전체 대비 ±0.5%p 기준")
+
+
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
     view = view.rename(columns={
@@ -11068,6 +11134,15 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
+
+    # 선택 주차 소재 반응 로우를 전체 합산해 성·연령 / 지역 분포를 한 줄로 표시
+    render_weekly_material_response_analysis(
+        _week_start,
+        _week_end,
+        material_age_raw,
+        material_region_raw,
+        key_prefix=f"weekly_response_{selected_year}_{week}",
+    )
 
     # 대·중카테고리 편성 및 주문 비중
     cat_left, cat_right = st.columns(2)
