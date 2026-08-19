@@ -10602,7 +10602,8 @@ elif menu == "일일실적":
             response_bundle=response_bundle,
         )
 
-        # 발송 통계: 전체 CTR은 상단 CTR(Uniq) 카드 하나만 사용하므로 표에서는 제외
+        # 발송 통계: 상세 표에서는 CTR을 함께 표시
+        # 표시 순서: 성별 → 연령 → SEG → 소재 → URL → 발송건수 → 클릭수 → CTR → CVR → 객단가 → SPM
         send_col = first_col(pd.DataFrame([send_row]), ["발송 성공 건수", "총 발송 건수"])
         click_col = first_col(pd.DataFrame([send_row]), ["클릭 수(uniq)", "클릭 수"])
         send_count = float(send_row.get(send_col, 0)) if send_col else 0
@@ -10616,7 +10617,8 @@ elif menu == "일일실적":
             "소재": material,
             "URL": send_row.get("URL", ""),
             "발송건수": fmt_num(send_count),
-            "클릭수(Uniq)": fmt_num(click_count),
+            "클릭수": fmt_num(click_count),
+            "CTR": fmt_pct(click_count / send_count if send_count else 0),
             "CVR": fmt_pct(orders / click_count if click_count else 0),
             "객단가": fmt_num(amount / orders if orders else 0),
             "SPM": f"{(amount/send_count if send_count else 0):.1f}",
