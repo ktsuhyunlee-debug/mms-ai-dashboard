@@ -1,4 +1,10 @@
 # =============================================================================
+# V4.7.2 WEEKLY ALL SENDS + DAILY MULTI IMAGE / CAROUSEL
+# - 주간 카드·그래프: 선택 주차 실제 7일 내 모든 발송건 반영
+# - 일일 이미지: 01/02 고정 해제, 발송 순서대로 01/02/03... 무제한 연결
+# - 한 소재 다중 이미지: 이전/다음 버튼 순환
+# =============================================================================
+# =============================================================================
 # V4.7 DAILY MATERIAL RESPONSE ANALYSIS
 # - 일일실적 오전/오후 소재에 소재연령로우 · 소재지역로우 자동 연결
 # - 전체 반응 요약 / 성·연령 CTR(Uniq) / 지역 지도 / TOP5·LOW5
@@ -2937,12 +2943,27 @@ def merge_lowest_price(product_df: pd.DataFrame, lowest_df: pd.DataFrame | None 
     return d
 
 
+def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
+    """동일 요일·시간·소재가 여러 발송행이어도 그래프에서 겹치지 않게 고유 라벨을 만듭니다."""
+    bases = [
+        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('소재','')}"
+        for _, r in df.iterrows()
+    ]
+    totals = pd.Series(bases).value_counts().to_dict() if bases else {}
+    seen = {}
+    labels = []
+    for base in bases:
+        seen[base] = seen.get(base, 0) + 1
+        if totals.get(base, 0) > 1:
+            labels.append(f"{base}<br>#{seen[base]}")
+        else:
+            labels.append(base)
+    return labels
+
+
 def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
     f = sw.sort_values("_date").copy()
-    labels = [
-        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('소재','')}"
-        for _, r in f.iterrows()
-    ]
+    labels = _weekly_send_chart_labels(f)
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Bar(
@@ -2989,10 +3010,7 @@ def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
 
 def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     f = sw.sort_values("_date").copy()
-    labels = [
-        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('소재','')}"
-        for _, r in f.iterrows()
-    ]
+    labels = _weekly_send_chart_labels(f)
     click_all = first_col(f, ["클릭 수", "클릭 수(uniq)"])
     click_uniq = first_col(f, ["클릭 수(uniq)", "클릭 수"])
     ctr_all = first_col(f, ["반응율", "반응율(uniq)"])
@@ -8060,10 +8078,23 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 APP_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = APP_DIR / "images"
 
-def daily_asset_key(date_value, time_value) -> str:
+def daily_asset_key(date_value, time_value="", slot_index: int | None = None) -> str:
+    """일일실적 이미지 키를 YYYYMMDD_01, _02, _03 ... 형태로 생성합니다.
+
+    slot_index가 있으면 선택일의 실제 발송 순서를 그대로 사용합니다.
+    과거 호출 호환을 위해 slot_index가 없을 때만 오전/오후 기반 01/02 규칙을 fallback으로 사용합니다.
+    """
     dt = pd.to_datetime(date_value, errors="coerce")
     if pd.isna(dt):
         return ""
+
+    if slot_index is not None:
+        try:
+            slot_num = int(slot_index)
+        except (TypeError, ValueError):
+            slot_num = 0
+        if slot_num > 0:
+            return f"{dt:%Y%m%d}_{slot_num:02d}"
 
     time_text = str(time_value).strip()
     if time_text.startswith("10") or "오전" in time_text or time_text in ["1", "01"]:
@@ -8079,27 +8110,60 @@ def daily_asset_key(date_value, time_value) -> str:
     return f"{dt:%Y%m%d}_{slot}"
 
 
-def find_daily_image(asset_key: str, campaign_name: str = ""):
+def _daily_image_natural_key(path: Path):
+    """파일명의 숫자를 숫자 순서대로 정렬해 1, 2, 10 순서를 보장합니다."""
+    parts = re.split(r"(\d+)", path.stem.lower())
+    return tuple(int(part) if part.isdigit() else part for part in parts)
+
+
+def find_daily_images(asset_key: str, campaign_name: str = "") -> list[Path]:
+    """한 발송 소재에 연결된 모든 이미지를 반환합니다.
+
+    우선순위
+    1) 캠페인명 정확 파일 및 캠페인명_01, _02 ... 파생 이미지
+    2) YYYYMMDD_01, _02 ... 소재순번 파일 및 그 뒤의 캐러셀 이미지
+
+    예: 20260819_03.jpg / 20260819_03_01.jpg / 20260819_03_02.jpg
+    또는 캠페인명.jpg / 캠페인명_01.jpg / 캠페인명_02.jpg
+    """
     if not IMAGE_DIR.exists():
-        return None
+        return []
 
-    valid_suffixes = [".jpg", ".jpeg", ".png", ".webp"]
-    files = [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in valid_suffixes]
+    valid_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
+    image_files = [
+        path for path in IMAGE_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in valid_suffixes
+    ]
 
-    # 캠페인명과 동일한 파일명을 우선 사용
-    campaign_name = str(campaign_name).strip()
+    campaign_name = str(campaign_name or "").strip()
     if campaign_name:
-        exact = [p for p in files if p.stem == campaign_name]
-        if exact:
-            return sorted(exact, key=lambda p: p.name)[0]
+        campaign_matches = [
+            path for path in image_files
+            if path.stem == campaign_name
+            or path.stem.startswith(campaign_name + "_")
+            or path.stem.startswith(campaign_name + "-")
+        ]
+        if campaign_matches:
+            return sorted(campaign_matches, key=_daily_image_natural_key)
 
-    # 기존 날짜_01/02 방식도 계속 지원
+    asset_key = str(asset_key or "").strip()
     if asset_key:
-        matches = [p for p in files if p.name.startswith(asset_key)]
-        if matches:
-            return sorted(matches, key=lambda p: p.name)[0]
+        key_matches = [
+            path for path in image_files
+            if path.stem == asset_key
+            or path.stem.startswith(asset_key + "_")
+            or path.stem.startswith(asset_key + "-")
+        ]
+        if key_matches:
+            return sorted(key_matches, key=_daily_image_natural_key)
 
-    return None
+    return []
+
+
+def find_daily_image(asset_key: str, campaign_name: str = ""):
+    """기존 단일 이미지 호출 호환용: 첫 번째 이미지만 반환합니다."""
+    images = find_daily_images(asset_key, campaign_name)
+    return images[0] if images else None
 
 
 def clean_mms_message(value) -> str:
@@ -8916,12 +8980,22 @@ def _build_daily_menu_bundle(
     pday = merge_lowest_price(pday, lowest)
 
     if "시간대" in sday.columns:
-        sday["_sort_time"] = pd.to_datetime(sday["시간대"].astype(str), errors="coerce")
-        sort_cols = ["_sort_time"] + (["소재"] if "소재" in sday.columns else [])
-        sday = sday.sort_values(sort_cols)
+        # Excel time/문자열/시간 객체를 모두 HH:MM으로 정규화해 실제 시간순으로 정렬합니다.
+        sday["_sort_time_key"] = sday["시간대"].map(_v4482_time_key)
+        sday["_sort_time"] = pd.to_datetime(
+            "2000-01-01 " + sday["_sort_time_key"].replace("", pd.NA).astype("string"),
+            errors="coerce",
+        )
+        sort_cols = ["_sort_time"]
+        for _tie_col in ["소재", "캠페인명"]:
+            if _tie_col in sday.columns:
+                sort_cols.append(_tie_col)
+        sday = sday.sort_values(sort_cols, na_position="last")
 
     sections = []
-    for _, send_row in sday.iterrows():
+    # 선택일의 실제 발송 순서대로 01, 02, 03 ... 이미지 슬롯을 부여합니다.
+    # 숫자가 낮을수록 앞 시간대이며 소재 수에는 제한이 없습니다.
+    for asset_slot, (_, send_row) in enumerate(sday.iterrows(), start=1):
         raw_time_value = send_row.get("시간대", "")
         time_value = _v4482_time_key(raw_time_value)
         material = str(send_row.get("소재", "") or "").strip()
@@ -8971,6 +9045,7 @@ def _build_daily_menu_bundle(
             "send_row": send_row.to_dict(),
             "time_value": time_value,
             "material": material,
+            "asset_slot": asset_slot,
             "matched": matched,
             "reports": reports,
         })
@@ -10412,6 +10487,7 @@ elif menu == "일일실적":
         send_row = pd.Series(section["send_row"])
         time_value = section["time_value"]
         material = section["material"]
+        asset_slot = int(section.get("asset_slot", 1) or 1)
         matched = section["matched"].copy()
         cached_reports = section["reports"]
 
@@ -10419,7 +10495,7 @@ elif menu == "일일실적":
         part_title = f"{display_time} · {material}" if material else display_time
         st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
 
-        asset_key = daily_asset_key(selected_date, time_value)
+        asset_key = daily_asset_key(selected_date, time_value, slot_index=asset_slot)
         campaign_name = str(send_row.get("캠페인명", "")).strip()
 
         response_bundle = _daily_material_response_bundle(
@@ -10464,13 +10540,48 @@ elif menu == "일일실적":
         )
         st.markdown(f'<div class="daily-campaign-kpi-grid">{campaign_cards_html}</div>', unsafe_allow_html=True)
 
-        image_path = find_daily_image(asset_key, campaign_name)
+        image_paths = find_daily_images(asset_key, campaign_name)
         message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
 
         import html
 
+        image_state_key = f"daily_image_index_{selected_date}_{asset_slot}_{hashlib.md5(campaign_name.encode('utf-8')).hexdigest()[:8]}"
+        image_count = len(image_paths)
+        current_image_index = int(st.session_state.get(image_state_key, 0) or 0)
+        if image_count <= 0:
+            current_image_index = 0
+        elif current_image_index >= image_count or current_image_index < 0:
+            current_image_index = 0
+        st.session_state[image_state_key] = current_image_index
+
+        # 캐러셀처럼 한 소재에 이미지가 여러 장이면 이전/다음 버튼으로 순환합니다.
+        if image_count > 1:
+            control_left, _ = st.columns([1, 1.35])
+            with control_left:
+                prev_col, index_col, next_col = st.columns([1, 1.2, 1])
+                prev_clicked = prev_col.button(
+                    "◀ 이전",
+                    key=f"{image_state_key}_prev",
+                    use_container_width=True,
+                )
+                next_clicked = next_col.button(
+                    "다음 ▶",
+                    key=f"{image_state_key}_next",
+                    use_container_width=True,
+                )
+                if prev_clicked:
+                    current_image_index = (current_image_index - 1) % image_count
+                elif next_clicked:
+                    current_image_index = (current_image_index + 1) % image_count
+                st.session_state[image_state_key] = current_image_index
+                index_col.markdown(
+                    f"<div style='text-align:center; padding-top:0.55rem; font-weight:700;'>{current_image_index + 1} / {image_count}</div>",
+                    unsafe_allow_html=True,
+                )
+
+        image_path = image_paths[current_image_index] if image_count else None
         if image_path is not None:
             try:
                 modified_ns = image_path.stat().st_mtime_ns
@@ -10484,7 +10595,7 @@ elif menu == "일일실적":
         else:
             image_body = (
                 '<div class="asset-empty">images 폴더에<br>'
-                + html.escape(f"{asset_key}_ 로 시작하는 이미지가 없습니다.")
+                + html.escape(f"{asset_key} 또는 캠페인명으로 연결되는 이미지가 없습니다.")
                 + '</div>'
             )
 
@@ -10543,7 +10654,7 @@ elif menu == "일일실적":
         _daily_send_view = clean_identifier_columns(send_view)
         selectable_dataframe(
             _daily_send_view,
-            key=f"daily_send_stats_{selected_date}_{time_value}",
+            key=f"daily_send_stats_{selected_date}_{asset_slot}_{key_token}",
             use_container_width=True,
             hide_index=True,
         )
@@ -10591,7 +10702,7 @@ elif menu == "일일실적":
         _daily_product_view = clean_identifier_columns(product_view)
         selectable_dataframe(
             _daily_product_view,
-            key=f"daily_product_stats_{selected_date}_{time_value}",
+            key=f"daily_product_stats_{selected_date}_{asset_slot}_{key_token}",
             use_container_width=True,
             hide_index=True,
             height=280,
@@ -10632,7 +10743,7 @@ elif menu == "일일실적":
                     _daily_history_view = clean_identifier_columns(report["발송이력"])
                     selectable_dataframe(
                         _daily_history_view,
-                        key=f"daily_product_history_{selected_date}_{time_value}_{_daily_report_idx}",
+                        key=f"daily_product_history_{selected_date}_{asset_slot}_{key_token}_{_daily_report_idx}",
                         use_container_width=True,
                         hide_index=True,
                         height=min(210, 38 * (len(report["발송이력"]) + 1)),
@@ -10698,7 +10809,19 @@ elif menu == "주간실적":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 주차 화면으로 바로 연결됩니다.")
 
     pw = year_products[year_products["주차"].astype(str) == week].copy()
-    sw = year_sends[year_sends["주차"].astype(str) == week].copy()
+
+    # 카드·그래프·소재/SEG/요일/시간대 표 모두 선택 주차의 실제 날짜 범위에 있는
+    # 모든 발송건을 사용합니다. 소재 시트의 '주차' 값이 비어 있거나 표기가 달라도 누락하지 않습니다.
+    _week_start, _week_end = _weekly_period_bounds(int(selected_year), str(week), pw)
+    if pd.notna(_week_start) and pd.notna(_week_end):
+        _year_send_dates = pd.to_datetime(year_sends["_date"], errors="coerce").dt.normalize()
+        sw = year_sends[
+            _year_send_dates.notna()
+            & _year_send_dates.ge(_week_start)
+            & _year_send_dates.le(_week_end)
+        ].copy()
+    else:
+        sw = year_sends[year_sends["주차"].astype(str) == week].copy()
 
     # 주간실적 표 공통 운영구분 표시: 원본에 '재편성' 컬럼이 없더라도
     # 상품구분/신규구분/운영구분/편성구분 등 기존 운영구분 컬럼에서 안전하게 보완합니다.
@@ -10735,15 +10858,26 @@ elif menu == "주간실적":
     spm = amount / send_count if send_count else 0
 
     # 전주 대비 카드 증감
-    year_week_names = [str(x) for x in (
-        year_sends.groupby("주차")["_date"].min().sort_values().index
-    )]
+    # 전주 역시 상품 주차 선택 목록을 기준으로 잡고 발송행은 실제 날짜 범위로 조회합니다.
+    # 소재 시트의 주차 라벨 누락 여부가 전주 비교에 영향을 주지 않도록 합니다.
+    year_week_names = [str(x) for x in weeks]
     prev_sw = pd.DataFrame()
     prev_pw = pd.DataFrame()
     if week in year_week_names and year_week_names.index(week) > 0:
         prev_week = year_week_names[year_week_names.index(week) - 1]
-        prev_sw = year_sends[year_sends["주차"].astype(str) == prev_week]
-        prev_pw = year_products[year_products["주차"].astype(str) == prev_week]
+        prev_pw = year_products[year_products["주차"].astype(str) == prev_week].copy()
+        _prev_week_start, _prev_week_end = _weekly_period_bounds(
+            int(selected_year), str(prev_week), prev_pw
+        )
+        if pd.notna(_prev_week_start) and pd.notna(_prev_week_end):
+            _year_send_dates = pd.to_datetime(year_sends["_date"], errors="coerce").dt.normalize()
+            prev_sw = year_sends[
+                _year_send_dates.notna()
+                & _year_send_dates.ge(_prev_week_start)
+                & _year_send_dates.le(_prev_week_end)
+            ].copy()
+        else:
+            prev_sw = year_sends[year_sends["주차"].astype(str) == prev_week].copy()
 
     def prev_metric(column, default=0):
         return float(prev_sw[column].sum()) if not prev_sw.empty and column in prev_sw.columns else default
