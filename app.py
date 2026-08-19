@@ -78,8 +78,8 @@ st.markdown(
     --surface: #ffffff;
     --surface-soft: #f8fafc;
     --border: #e4e8ef;
-    --text: #1f2937;
-    --muted: #6b7280;
+    --text: #111827;
+    --muted: #475569;
     --primary: #2f6fec;
     --primary-soft: #eef4ff;
     --success: #2e8b57;
@@ -569,6 +569,40 @@ div[data-testid="stPlotlyChart"] {
     border-radius: 14px;
     padding: 8px;
     box-shadow: 0 3px 12px rgba(25, 42, 70, 0.04);
+}
+
+/* V4.7.4 가독성 개선: 크기/배경/그래프 색상은 유지하고 글씨만 진하게 */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataFrame"] [role="rowheader"] {
+    color: #111827 !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"] {
+    font-weight: 800 !important;
+}
+
+/* Plotly hover 라벨은 건드리지 않고 화면에 상시 노출되는 축/값/범례/지도 라벨만 강화 */
+div[data-testid="stPlotlyChart"] .xtick text,
+div[data-testid="stPlotlyChart"] .ytick text,
+div[data-testid="stPlotlyChart"] .legendtext,
+div[data-testid="stPlotlyChart"] .legendtitletext,
+div[data-testid="stPlotlyChart"] .gtitle,
+div[data-testid="stPlotlyChart"] .annotation-text,
+div[data-testid="stPlotlyChart"] .barlayer text,
+div[data-testid="stPlotlyChart"] .scatterlayer text,
+div[data-testid="stPlotlyChart"] .geolayer text,
+div[data-testid="stPlotlyChart"] .pielayer text {
+    fill: #111827 !important;
+    color: #111827 !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p,
+.stCaptionContainer,
+.stCaptionContainer p {
+    color: #475569 !important;
 }
 
 .stButton > button,
@@ -3426,21 +3460,31 @@ def selectable_dataframe(
             # pandas Styler 등은 원본 DataFrame을 사용
             summary_df = getattr(data, "data", None)
 
+    # 표 배경/조건부 색상은 유지하고 셀 글자색만 더 진하게 적용합니다.
+    display_data = data
+    try:
+        if isinstance(data, pd.DataFrame):
+            display_data = data.style.set_properties(**{"color": "#111827"})
+        elif hasattr(data, "set_properties") and hasattr(data, "data"):
+            display_data = data.set_properties(**{"color": "#111827"})
+    except Exception:
+        display_data = data
+
     if not _streamlit_supports_multi_cell_selection():
         if allow_row_selection:
             return st.dataframe(
-                data,
+                display_data,
                 key=key,
                 on_select="rerun",
                 selection_mode="single-row",
                 **kwargs,
             )
-        return st.dataframe(data, **kwargs)
+        return st.dataframe(display_data, **kwargs)
 
     widget_key = f"{key}_{_selection_table_signature(summary_df)}"
     modes = ["single-row", "multi-cell"] if allow_row_selection else "multi-cell"
     event = st.dataframe(
-        data,
+        display_data,
         key=widget_key,
         on_select="rerun",
         selection_mode=modes,
@@ -9237,6 +9281,7 @@ def _target_gender_age_chart(age_stats: pd.DataFrame, overall_uctr: float) -> go
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
         barmode="group",
+        font=dict(color="#111827"),
         legend=dict(orientation="h", x=0, y=1.12),
         xaxis=dict(categoryorder="array", categoryarray=x_order, tickangle=0),
         yaxis=dict(title="CTR(Uniq)", ticksuffix="%", range=[0, ymax], gridcolor="#e5e7eb"),
@@ -9323,7 +9368,7 @@ def _target_region_map(region_stats: pd.DataFrame, overall_uctr: float) -> go.Fi
             mode="markers+text",
             text=sub["시군구"],
             textposition="top center",
-            textfont=dict(size=9, color="#334155"),
+            textfont=dict(size=9, color="#111827"),
             name=bucket,
             marker=dict(size=sizes, color=color_map[bucket], opacity=0.85, line=dict(color="#ffffff", width=1)),
             customdata=list(zip(sub["지역"], sub["성공건수"], sub["CTR(Uniq)"] * 100, sub["전체 대비"] * 100)),
@@ -9343,6 +9388,7 @@ def _target_region_map(region_stats: pd.DataFrame, overall_uctr: float) -> go.Fi
         height=560,
         margin=dict(l=0, r=0, t=10, b=0),
         paper_bgcolor="#ffffff",
+        font=dict(color="#111827"),
         legend=dict(
             orientation="h", x=0.02, y=0.02,
             title=f"전체 평균 {avg_pct:.1f}% · ±0.5%p 기준",
@@ -11516,7 +11562,7 @@ elif menu == "상품구분":
         ],
         "등급": ["🔴 부진 상품", "🟠 관찰 상품", "🟡 안정 상품", "🟢 우수 상품", "🔵 핵심 상품"],
     })
-    st.dataframe(grade_rule_df, use_container_width=True, hide_index=True, height=212)
+    st.dataframe(grade_rule_df.style.set_properties(**{"color": "#111827"}), use_container_width=True, hide_index=True, height=212)
 
     filter_col1, filter_col2 = st.columns([1.5, 1])
     with filter_col1:
