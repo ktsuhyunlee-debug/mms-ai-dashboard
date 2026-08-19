@@ -808,15 +808,6 @@ hr {
 )
 
 GRADE_ORDER = ["핵심 상품", "우수 상품", "안정 상품", "관찰 상품", "부진 상품"]
-CASE_ORDER = [
-    "가격 경쟁력 부족 사례",
-    "기네스 갱신 사례",
-    "타겟 확대 운영 사례",
-    "시즌 상품 사례",
-    "운영 피로도 사례",
-    "보답프로그램 영향 사례",
-]
-
 
 def first_col(df: pd.DataFrame, names: Iterable[str]) -> str | None:
     for name in names:
@@ -1621,37 +1612,6 @@ def delta_for_latest(df: pd.DataFrame, metric: str, pp: bool = False) -> str:
         return "-"
     return change_label((cur - prev) / abs(prev))
 
-
-def classify_cases(row: pd.Series, history: pd.DataFrame) -> list[str]:
-    cases = []
-    name = str(row["상품명"])
-    amount = float(row["주문금액"])
-    prior = history[(history["상품명"] == name) & (history["_date"] < row["_date"])].sort_values("_date")
-
-    if len(prior) and amount > prior["주문금액"].max() and amount >= 3_000_000:
-        cases.append("기네스 갱신 사례")
-
-    if len(prior):
-        last = prior.iloc[-1]
-        if (
-            str(last.get("성별", "")) != str(row.get("성별", ""))
-            or str(last.get("연령", "")) != str(row.get("연령", ""))
-        ):
-            cases.append("타겟 확대 운영 사례")
-        gap = (row["_date"] - last["_date"]).days
-        if gap <= 21 and amount < last["주문금액"] * 0.75:
-            cases.append("운영 피로도 사례")
-        if row.get("멤버십혜택가", 0) < last.get("멤버십혜택가", 0) and amount < last["주문금액"]:
-            cases.append("가격 경쟁력 부족 사례")
-
-    season_words = ["선풍기", "에어컨", "우양산", "래쉬가드", "삼계탕", "장어", "아이스크림", "드라이기"]
-    if any(word in name for word in season_words):
-        cases.append("시즌 상품 사례")
-
-    if amount < 1_000_000 and float(row.get("할인율", 0)) >= 0.5:
-        cases.append("가격 경쟁력 부족 사례")
-
-    return list(dict.fromkeys(cases))
 
 
 def product_history_rows(row: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
@@ -4821,19 +4781,6 @@ def _extract_recent_unassigned_days(sentence: str):
 
 
 
-def _v4467_repeated_underperformer_keys(products_all: pd.DataFrame, week_end):
-    """기준일 이전 2회 이상 운영했고 300만원 이상 달성이 0회인 상품 master key 집합."""
-    if products_all is None or products_all.empty:
-        return set()
-    d = _attach_product_master_keys(products_all.copy())
-    d["_date_guard"] = pd.to_datetime(d["_date"], errors="coerce")
-    d = d[d["_date_guard"].notna() & (d["_date_guard"] <= pd.to_datetime(week_end))]
-    out = set()
-    for key, g in d.groupby("_product_master_key"):
-        vals = pd.to_numeric(g["주문금액"], errors="coerce").fillna(0)
-        if len(vals) >= 2 and int((vals >= 3_000_000).sum()) == 0:
-            out.add(str(key))
-    return out
 
 def _v4468_ensure_recommendation_action(sentences):
     """재편성 우선 후보가 액션 없이 끝나는 경우 누적 검증 수준에 맞는 최소 실행 액션을 보장."""
@@ -8112,7 +8059,6 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
 APP_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = APP_DIR / "images"
-MESSAGE_DIR = APP_DIR / "messages"
 
 def daily_asset_key(date_value, time_value) -> str:
     dt = pd.to_datetime(date_value, errors="coerce")
@@ -9121,19 +9067,6 @@ def _build_weekly_heavy_bundle(
     }
 
 
-def _target_material_name(campaign_name: str) -> str:
-    parts = [p.strip() for p in str(campaign_name or "").split("_") if p.strip()]
-    if not parts:
-        return "-"
-    if "쇼핑라운지" in parts:
-        idx = parts.index("쇼핑라운지")
-        tail = parts[idx + 1:]
-        if len(tail) >= 2:
-            return " · ".join(tail)
-        if tail:
-            return tail[0]
-    return parts[-1]
-
 
 def _target_age_short(age_value: str) -> str:
     s = str(age_value or "").strip()
@@ -9361,23 +9294,6 @@ def _target_age_table(age_stats: pd.DataFrame) -> pd.DataFrame:
     view["전체 대비"] = view["전체 대비"].map(lambda x: f"{'▲' if x > 0 else ('▼' if x < 0 else '-')} {abs(float(x))*100:.1f}%p")
     return view[["순위", "성별", "연령", "성공건수", "클릭수(Uniq)", "CTR(Uniq)", "전체 대비"]]
 
-
-def _target_find_daily_section(selected_date, campaign_name, products, sends, lowest):
-    bundle = _build_daily_menu_bundle(products, sends, lowest, selected_date)
-    for section in bundle.get("sections", []):
-        row = section.get("send_row", {})
-        if str(row.get("캠페인명", "") or "").strip() == str(campaign_name or "").strip():
-            return section
-    # 캠페인 정확 일치가 없으면 시간대를 기준으로 fallback
-    raw_parts = str(campaign_name or "").split("_")
-    campaign_time = ""
-    if len(raw_parts) >= 2 and re.fullmatch(r"\d{3,4}", raw_parts[1] or ""):
-        t = raw_parts[1].zfill(4)
-        campaign_time = f"{t[:2]}:{t[2:]}"
-    for section in bundle.get("sections", []):
-        if campaign_time and _v4482_time_key(section.get("time_value", "")) == _v4482_time_key(campaign_time):
-            return section
-    return None
 
 
 def _daily_response_time_key(value) -> str:
@@ -11919,38 +11835,5 @@ elif menu == "편성 프로그램":
                             key=f"schedule_history_status_{candidate_signature}_{status}",
                             use_container_width=True, hide_index=True,
                         )
-
-
-# Daily insight ruleset marker for regression/audit.
-
-
-# V4.4.62 REPORT STYLE GUARD
-# Scope:
-# 1) Daily insight output: report-style nominal endings.
-# 2) Weekly: ONLY product-category insight sentences are normalized.
-#    Other weekly sections/logic must remain untouched.
-
-_V4462_ENDING_RULES = [
-    (r"확인됩니다\.?$", "확인"),
-    (r"확인되었습니다\.?$", "확인"),
-    (r"기록했습니다\.?$", "기록"),
-    (r"기록되었습니다\.?$", "기록"),
-    (r"유지했습니다\.?$", "유지"),
-    (r"유지되었습니다\.?$", "유지"),
-    (r"개선되었습니다\.?$", "개선"),
-    (r"감소했습니다\.?$", "감소"),
-    (r"증가했습니다\.?$", "증가"),
-    (r"필요합니다\.?$", "필요"),
-    (r"적절합니다\.?$", "적절"),
-    (r"가능합니다\.?$", "가능"),
-    (r"제한적입니다\.?$", "제한적"),
-    (r"어렵습니다\.?$", "어려움"),
-    (r"보입니다\.?$", "보임"),
-    (r"판단됩니다\.?$", "판단"),
-    (r"예상됩니다\.?$", "예상"),
-    (r"검토하는 것이 좋습니다\.?$", "검토 필요"),
-    (r"검토하는 것이 필요합니다\.?$", "검토 필요"),
-    (r"검토가 필요합니다\.?$", "검토 필요"),
-]
 
 
