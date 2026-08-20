@@ -3160,11 +3160,16 @@ def weekly_display_format(df: pd.DataFrame) -> pd.DataFrame:
 
 def category_summary_table(
     pw: pd.DataFrame,
-    category_col: str,
+    category_col: str | None,
     week: str,
     year: int,
 ) -> pd.DataFrame:
     """편성비중·주문비중·주문금액과 총합계를 생성합니다."""
+    # 대/중/소 카테고리 컬럼명이 원본마다 다를 수 있으므로
+    # 요청한 카테고리 컬럼이 없으면 주간 화면이 중단되지 않도록 빈 표를 반환합니다.
+    if not category_col or category_col not in pw.columns:
+        return pd.DataFrame(columns=["연도", "주차", "행 레이블", "편성비중", "주문비중", "주문금액"])
+
     cat = (
         pw.groupby(category_col, dropna=False, as_index=False)
         .agg(
@@ -9165,8 +9170,14 @@ def _build_weekly_heavy_bundle(
         "detail_error": detail_error,
         "product_chart": weekly_product_chart(sw),
         "send_chart": weekly_send_chart(sw),
-        "big_table": category_summary_table(pw, "대카", week, selected_year),
-        "mid_table": category_summary_table(pw, "중카", week, selected_year),
+        "big_table": category_summary_table(pw, first_col(pw, ["대카", "대카테고리", "대분류"]), week, selected_year),
+        "mid_table": category_summary_table(pw, first_col(pw, ["중카", "중카테고리", "중분류"]), week, selected_year),
+        "small_table": category_summary_table(
+            pw,
+            first_col(pw, ["소카", "소카테고리", "소분류", "세부카테고리"]),
+            week,
+            selected_year,
+        ),
         "seg_table": grouped_send_table(sw, ["성별", "연령"]),
         "weekday_table": grouped_send_table(sw, ["요일"]),
         "time_table": grouped_send_table(sw, ["시간대"]),
@@ -11265,44 +11276,71 @@ elif menu == "주간실적":
         key_prefix=f"weekly_response_{selected_year}_{week}",
     )
 
-    # 대·중카테고리 편성 및 주문 비중
-    cat_left, cat_right = st.columns(2)
+    # 대·중·소카테고리 편성 및 주문 비중
+    cat_left, cat_mid, cat_right = st.columns(3)
 
     with cat_left:
         big_table = weekly_heavy["big_table"].copy()
-        st.plotly_chart(
-            category_pie_chart(big_table, "대카테고리 주문비중"),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-        _weekly_table_title("대카테고리 편성 및 주문 비중")
-        _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
-        selectable_dataframe(
-            _style_weekly_category_total(_big_table_display),
-            summary_df=_big_table_display,
-            key=f"weekly_big_category_{selected_year}_{week}",
-            use_container_width=True,
-            hide_index=True,
-            height=430,
-        )
+        if big_table.empty:
+            st.info("대카테고리 데이터가 없습니다.")
+        else:
+            st.plotly_chart(
+                category_pie_chart(big_table, "대카테고리 주문비중"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            _weekly_table_title("대카테고리 편성 및 주문 비중")
+            _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
+            selectable_dataframe(
+                _style_weekly_category_total(_big_table_display),
+                summary_df=_big_table_display,
+                key=f"weekly_big_category_{selected_year}_{week}",
+                use_container_width=True,
+                hide_index=True,
+                height=430,
+            )
+
+    with cat_mid:
+        mid_table = weekly_heavy["mid_table"].copy()
+        if mid_table.empty:
+            st.info("중카테고리 데이터가 없습니다.")
+        else:
+            st.plotly_chart(
+                category_pie_chart(mid_table, "중카테고리 주문비중"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            _weekly_table_title("중카테고리 편성 및 주문 비중")
+            _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
+            selectable_dataframe(
+                _style_weekly_category_total(_mid_table_display),
+                summary_df=_mid_table_display,
+                key=f"weekly_mid_category_{selected_year}_{week}",
+                use_container_width=True,
+                hide_index=True,
+                height=560,
+            )
 
     with cat_right:
-        mid_table = weekly_heavy["mid_table"].copy()
-        st.plotly_chart(
-            category_pie_chart(mid_table, "중카테고리 주문비중"),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-        _weekly_table_title("중카테고리 편성 및 주문 비중")
-        _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
-        selectable_dataframe(
-            _style_weekly_category_total(_mid_table_display),
-            summary_df=_mid_table_display,
-            key=f"weekly_mid_category_{selected_year}_{week}",
-            use_container_width=True,
-            hide_index=True,
-            height=560,
-        )
+        small_table = weekly_heavy["small_table"].copy()
+        if small_table.empty:
+            st.info("소카테고리 데이터가 없습니다.")
+        else:
+            st.plotly_chart(
+                category_pie_chart(small_table, "소카테고리 주문비중"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            _weekly_table_title("소카테고리 편성 및 주문 비중")
+            _small_table_display = clean_identifier_columns(weekly_display_format(small_table))
+            selectable_dataframe(
+                _style_weekly_category_total(_small_table_display),
+                summary_df=_small_table_display,
+                key=f"weekly_small_category_{selected_year}_{week}",
+                use_container_width=True,
+                hide_index=True,
+                height=560,
+            )
 
     tabs = st.tabs([
         "주간실적 분석", "상품 실적", "소재 실적",
