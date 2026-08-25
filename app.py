@@ -9939,6 +9939,120 @@ def render_weekly_material_response_analysis(
             st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
+def render_home_material_response_analysis(
+    applied_sends: pd.DataFrame,
+    material_age_raw: pd.DataFrame,
+    material_region_raw: pd.DataFrame,
+    key_prefix: str,
+) -> None:
+    """Home 분석 조건 적용 후 실제 남은 발송일과 정확히 동일한 날짜만 반응 분포에 사용합니다."""
+    if applied_sends is None or applied_sends.empty or "_date" not in applied_sends.columns:
+        st.info("적용된 분석 조건에 해당하는 반응 데이터가 없습니다.")
+        return
+
+    applied_dates = pd.to_datetime(
+        applied_sends["_date"], errors="coerce"
+    ).dt.normalize().dropna().unique()
+    if len(applied_dates) == 0:
+        st.info("적용된 분석 조건에 해당하는 반응 데이터가 없습니다.")
+        return
+
+    applied_date_index = pd.DatetimeIndex(applied_dates)
+
+    def _home_raw_slice(raw: pd.DataFrame) -> pd.DataFrame:
+        if raw is None or raw.empty or "_date" not in raw.columns:
+            return pd.DataFrame()
+        raw_dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
+        return raw.loc[raw_dates.notna() & raw_dates.isin(applied_date_index)].copy()
+
+    age_selected = _home_raw_slice(material_age_raw)
+    region_selected = _home_raw_slice(material_region_raw)
+    if age_selected.empty and region_selected.empty:
+        st.info("적용된 분석 조건의 날짜에 해당하는 소재연령로우·소재지역로우 데이터가 없습니다.")
+        return
+
+    summary = _target_response_summary(age_selected, region_selected)
+    age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
+    region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
+    province_stats = _target_province_response_summary(region_selected)
+
+    age_col, region_map_col, region_rank_col = st.columns([1.15, 1.15, 1.0], gap="medium")
+
+    with age_col:
+        st.markdown("**성별·연령별 반응 분포**")
+        if age_stats.empty:
+            st.info("적용된 분석 조건의 소재연령로우 데이터가 없습니다.")
+        else:
+            age_fig = _target_gender_age_chart(age_stats, summary["uctr"], compact_x=True)
+            age_fig = _weekly_black_plotly_text(age_fig)
+            age_fig.update_layout(height=430, margin=dict(l=30, r=15, t=42, b=95))
+            st.plotly_chart(
+                age_fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"{key_prefix}_home_age_chart",
+            )
+            st.caption("CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선=분석기간 전체 평균")
+
+    with region_map_col:
+        st.markdown("**지역별 반응 분포**")
+        if region_selected.empty:
+            st.info("적용된 분석 조건의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            region_fig = _target_region_map(
+                region_stats,
+                summary["uctr"],
+                show_labels=False,
+                province_summary=province_stats,
+            )
+            region_fig = _weekly_black_plotly_text(region_fig)
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
+            st.plotly_chart(
+                region_fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displayModeBar": False,
+                    "displaylogo": False,
+                    "responsive": True,
+                    "doubleClick": "reset",
+                },
+                key=f"{key_prefix}_home_region_map",
+            )
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 시도표는 CTR(Uniq) 높은 순")
+
+    with region_rank_col:
+        st.markdown("**지역 TOP5 · LOW5**")
+        if region_selected.empty:
+            st.info("적용된 분석 조건의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
+            home_top5 = _target_rank_table(region_stats, top=True, n=5)
+            selectable_dataframe(
+                home_top5,
+                key=f"{key_prefix}_home_region_top5",
+                use_container_width=True,
+                hide_index=True,
+                height=168,
+                row_height=26,
+            )
+            st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
+            home_low5 = _target_rank_table(region_stats, top=False, n=5)
+            selectable_dataframe(
+                home_low5,
+                key=f"{key_prefix}_home_region_low5",
+                use_container_width=True,
+                hide_index=True,
+                height=168,
+                row_height=26,
+            )
+            st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
+
+
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
     view = view.rename(columns={
@@ -10449,6 +10563,13 @@ if menu == "홈":
         home_data_min = home_valid_dates.min().date()
         home_data_max = home_valid_dates.max().date()
 
+    # 분석 조건 달력은 데이터 범위에 더해 2026년 전체를 반드시 열어둡니다.
+    # 데이터가 다른 연도까지 이어져 있으면 해당 연도 범위도 함께 유지합니다.
+    home_calendar_year_min = min(home_data_min.year, 2026, datetime.now().year)
+    home_calendar_year_max = max(home_data_max.year, 2026, datetime.now().year)
+    home_calendar_min = datetime(home_calendar_year_min, 1, 1).date()
+    home_calendar_max = datetime(home_calendar_year_max, 12, 31).date()
+
     default_draft, default_applied = _home_analysis_default_state(home_data_min, home_data_max)
     if "home_analysis_draft" not in st.session_state:
         st.session_state.home_analysis_draft = default_draft
@@ -10458,13 +10579,13 @@ if menu == "홈":
     draft = st.session_state.home_analysis_draft
     applied = st.session_state.home_analysis_applied
 
-    # 데이터 갱신으로 기존 저장 날짜가 현재 데이터 범위를 벗어난 경우 안전하게 보정
+    # 저장된 분석 날짜는 달력 허용 범위 안에서만 보정합니다.
     def _home_clamp_date(value, fallback):
         parsed = pd.to_datetime(value, errors="coerce")
         if pd.isna(parsed):
             return fallback
         parsed_date = parsed.date()
-        return min(max(parsed_date, home_data_min), home_data_max)
+        return min(max(parsed_date, home_calendar_min), home_calendar_max)
 
     draft["base_start"] = _home_clamp_date(draft.get("base_start"), home_data_min)
     draft["base_end"] = _home_clamp_date(draft.get("base_end"), home_data_max)
@@ -10539,8 +10660,8 @@ if menu == "홈":
         draft["base_start"] = st.date_input(
             "기본 시작일",
             value=draft.get("base_start", home_data_min),
-            min_value=home_data_min,
-            max_value=home_data_max,
+            min_value=home_calendar_min,
+            max_value=home_calendar_max,
             format="YYYY-MM-DD",
             key="home_analysis_base_start",
             label_visibility="collapsed",
@@ -10551,8 +10672,8 @@ if menu == "홈":
         draft["base_end"] = st.date_input(
             "기본 종료일",
             value=draft.get("base_end", home_data_max),
-            min_value=home_data_min,
-            max_value=home_data_max,
+            min_value=home_calendar_min,
+            max_value=home_calendar_max,
             format="YYYY-MM-DD",
             key="home_analysis_base_end",
             label_visibility="collapsed",
@@ -10574,14 +10695,14 @@ if menu == "홈":
                 row[0].markdown(f"**{idx}**")
                 item["start"] = row[1].date_input(
                     f"포함 시작일 {idx}", value=item["start"],
-                    min_value=home_data_min, max_value=home_data_max,
+                    min_value=home_calendar_min, max_value=home_calendar_max,
                     format="YYYY-MM-DD", key=f"home_inc_start_{item['id']}",
                     label_visibility="collapsed",
                 )
                 row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
                 item["end"] = row[3].date_input(
                     f"포함 종료일 {idx}", value=item["end"],
-                    min_value=home_data_min, max_value=home_data_max,
+                    min_value=home_calendar_min, max_value=home_calendar_max,
                     format="YYYY-MM-DD", key=f"home_inc_end_{item['id']}",
                     label_visibility="collapsed",
                 )
@@ -10618,14 +10739,14 @@ if menu == "홈":
                 row[0].markdown(f"**{idx}**")
                 item["start"] = row[1].date_input(
                     f"제외 시작일 {idx}", value=item["start"],
-                    min_value=home_data_min, max_value=home_data_max,
+                    min_value=home_calendar_min, max_value=home_calendar_max,
                     format="YYYY-MM-DD", key=f"home_exc_start_{item['id']}",
                     label_visibility="collapsed",
                 )
                 row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
                 item["end"] = row[3].date_input(
                     f"제외 종료일 {idx}", value=item["end"],
-                    min_value=home_data_min, max_value=home_data_max,
+                    min_value=home_calendar_min, max_value=home_calendar_max,
                     format="YYYY-MM-DD", key=f"home_exc_end_{item['id']}",
                     label_visibility="collapsed",
                 )
@@ -10727,6 +10848,14 @@ if menu == "홈":
         st.rerun()
 
     applied = st.session_state.home_analysis_applied
+    home_applied_sends = apply_home_analysis_date_filter(
+        sends,
+        applied["mode"],
+        applied["base_start"],
+        applied["base_end"],
+        applied["include_ranges"],
+        applied["exclude_ranges"],
+    )
     home_aggregate_key = (
         str(applied.get("mode", "전체")),
         str(applied.get("base_start", "")),
@@ -10783,6 +10912,15 @@ if menu == "홈":
                 f'<div class="metric-delta">직전 대비 {delta}</div></div>',
                 unsafe_allow_html=True,
             )
+
+    # Home 반응 분포: 분석 조건 적용 후 실제 남은 발송일과 1:1로 동일한 날짜만 사용
+    st.markdown('<div class="section-title">반응 분포</div>', unsafe_allow_html=True)
+    render_home_material_response_analysis(
+        home_applied_sends,
+        material_age_raw,
+        material_region_raw,
+        key_prefix="home_applied_response",
+    )
 
     # 월간 그래프와 표
     st.markdown('<div class="section-title">월별 SPM / 발송대비매출</div>', unsafe_allow_html=True)
