@@ -3508,9 +3508,14 @@ def selectable_dataframe(
     return event
 
 
-def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
-    """주간 상품실적: 총합계는 배경색을 건드리지 않고 Bold만 적용."""
+def style_weekly_product_rows(
+    formatted_df: pd.DataFrame,
+    raw_amounts: list,
+    group_end_rows: set[int] | None = None,
+):
+    """주간 상품실적: 성과 배경색을 유지하면서 발송 조건 그룹 끝에 굵은 구분선을 표시."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
+    group_end_rows = set(group_end_rows or set())
 
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
@@ -3522,15 +3527,24 @@ def style_weekly_product_rows(formatted_df: pd.DataFrame, raw_amounts: list):
             styles.iloc[idx, :] = "font-weight: 800 !important;"
             continue
 
+        row_style = ""
         try:
             value = float(amount)
         except (TypeError, ValueError):
-            continue
+            value = None
 
-        if value >= 3_000_000:
-            styles.iloc[idx, :] = "background-color: #fff2cc;"
-        elif value < 1_000_000:
-            styles.iloc[idx, :] = "background-color: #e7e6e6;"
+        if value is not None:
+            if value >= 3_000_000:
+                row_style += "background-color: #fff2cc;"
+            elif value < 1_000_000:
+                row_style += "background-color: #e7e6e6;"
+
+        # 일자/요일/시간대/성별/연령/소재가 바뀌는 그룹의 마지막 행 아래를 굵게 표시
+        if idx in group_end_rows:
+            row_style += "border-bottom: 3px solid #6b7280 !important;"
+
+        if row_style:
+            styles.iloc[idx, :] = row_style
 
     return styles
 
@@ -11697,6 +11711,23 @@ elif menu == "주간실적":
             "추가노출", "재편성", "주문비중"
         ]
         view = product_sorted[[c for c in cols if c in product_sorted.columns]].copy()
+
+        # 같은 일자/요일/시간대/성별/연령/소재는 하나의 발송 그룹으로 보고,
+        # 각 그룹의 마지막 상품 행 아래에 굵은 구분선을 표시합니다.
+        group_cols = [c for c in ["일자", "요일", "시간대", "성별", "연령", "소재"] if c in view.columns]
+        group_end_rows: set[int] = set()
+        if group_cols and not view.empty:
+            group_keys = (
+                view[group_cols]
+                .fillna("")
+                .astype(str)
+                .apply(lambda row: tuple(v.strip() for v in row), axis=1)
+                .tolist()
+            )
+            for idx in range(len(group_keys)):
+                if idx == len(group_keys) - 1 or group_keys[idx] != group_keys[idx + 1]:
+                    group_end_rows.add(idx)
+
         total = {c: "" for c in view.columns}
         total[view.columns[0]] = "총합계"
         for c in ["주문건수", "주문수량", "주문금액"]:
@@ -11711,7 +11742,7 @@ elif menu == "주간실적":
         )
         formatted_view = clean_identifier_columns(weekly_display_format(view))
         styled_view = formatted_view.style.apply(
-            lambda _: style_weekly_product_rows(formatted_view, raw_amounts),
+            lambda _: style_weekly_product_rows(formatted_view, raw_amounts, group_end_rows),
             axis=None,
         )
         selectable_dataframe(
