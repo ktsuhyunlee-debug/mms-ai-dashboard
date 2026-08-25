@@ -3235,11 +3235,62 @@ def _weekly_black_plotly_text(fig: go.Figure) -> go.Figure:
     return out
 
 
+def _category_top_product_hover(
+    pw: pd.DataFrame | None,
+    category_col: str | None,
+    top_n: int = 3,
+) -> dict[str, str]:
+    """카테고리별 주문금액 상위 상품을 hover용 문자열로 생성합니다."""
+    if (
+        pw is None
+        or pw.empty
+        or not category_col
+        or category_col not in pw.columns
+        or "상품명" not in pw.columns
+        or "주문금액" not in pw.columns
+    ):
+        return {}
+
+    d = pw[[category_col, "상품명", "주문금액"]].copy()
+    d[category_col] = d[category_col].fillna("미분류").astype(str)
+    d["상품명"] = d["상품명"].fillna("상품명 없음").astype(str).str.strip()
+    d.loc[d["상품명"].eq(""), "상품명"] = "상품명 없음"
+    d["주문금액"] = pd.to_numeric(d["주문금액"], errors="coerce").fillna(0)
+
+    product_stats = (
+        d.groupby([category_col, "상품명"], as_index=False, dropna=False)
+        .agg(
+            발송횟수=("상품명", "size"),
+            주문금액=("주문금액", "sum"),
+        )
+        .sort_values(
+            [category_col, "주문금액", "발송횟수", "상품명"],
+            ascending=[True, False, False, True],
+        )
+    )
+
+    hover_map: dict[str, str] = {}
+    for category, group in product_stats.groupby(category_col, sort=False):
+        top = group.head(max(int(top_n), 1))
+        lines = []
+        for rank, (_, row) in enumerate(top.iterrows(), start=1):
+            product_name = _html.escape(str(row["상품명"]))
+            send_count = int(row["발송횟수"])
+            amount = float(row["주문금액"])
+            lines.append(
+                f"{rank}. {product_name} · {send_count}회 · {amount:,.0f}원"
+            )
+        hover_map[str(category)] = "<br>".join(lines)
+    return hover_map
+
+
 def category_pie_chart(
     table: pd.DataFrame,
     title: str,
+    pw: pd.DataFrame | None = None,
+    category_col: str | None = None,
 ) -> go.Figure:
-    """주문비중 큰 순서부터 시계방향으로 표시합니다."""
+    """주문비중 큰 순서부터 시계방향으로 표시하고 카테고리별 TOP3 상품을 hover에 노출합니다."""
     data = table[table["행 레이블"] != "총합계"].copy()
     data = data.sort_values(
         ["주문비중", "주문금액"],
@@ -3248,17 +3299,26 @@ def category_pie_chart(
 
     # 음수 주문금액은 파이에서 표현할 수 없어 0으로 처리하되 표에는 원값 유지
     values = pd.to_numeric(data["주문금액"], errors="coerce").fillna(0).clip(lower=0)
+    hover_map = _category_top_product_hover(pw, category_col, top_n=3)
+    hover_top3 = data["행 레이블"].astype(str).map(hover_map).fillna("-")
 
     fig = go.Figure(
         go.Pie(
             labels=data["행 레이블"],
             values=values,
+            customdata=hover_top3,
             sort=False,
             direction="clockwise",
             rotation=0,
             textinfo="label+percent",
             textposition="inside",
-            hovertemplate="%{label}<br>주문금액 %{value:,.0f}원<br>비중 %{percent}<extra></extra>",
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "주문금액 %{value:,.0f}원<br>"
+                "비중 %{percent}<br><br>"
+                "<b>TOP 상품</b><br>%{customdata}"
+                "<extra></extra>"
+            ),
         )
     )
     fig.update_layout(
@@ -11647,7 +11707,12 @@ elif menu == "주간실적":
             st.info("대카테고리 데이터가 없습니다.")
         else:
             st.plotly_chart(
-                category_pie_chart(big_table, "대카테고리 주문비중"),
+                category_pie_chart(
+                    big_table,
+                    "대카테고리 주문비중",
+                    pw=pw,
+                    category_col=first_col(pw, ["대카", "대카테고리", "대분류"]),
+                ),
                 use_container_width=True,
                 config={"displayModeBar": False},
             )
@@ -11668,7 +11733,12 @@ elif menu == "주간실적":
             st.info("중카테고리 데이터가 없습니다.")
         else:
             st.plotly_chart(
-                category_pie_chart(mid_table, "중카테고리 주문비중"),
+                category_pie_chart(
+                    mid_table,
+                    "중카테고리 주문비중",
+                    pw=pw,
+                    category_col=first_col(pw, ["중카", "중카테고리", "중분류"]),
+                ),
                 use_container_width=True,
                 config={"displayModeBar": False},
             )
@@ -11689,7 +11759,12 @@ elif menu == "주간실적":
             st.info("소카테고리 데이터가 없습니다.")
         else:
             st.plotly_chart(
-                category_pie_chart(small_table, "소카테고리 주문비중"),
+                category_pie_chart(
+                    small_table,
+                    "소카테고리 주문비중",
+                    pw=pw,
+                    category_col=first_col(pw, ["소카", "소카테고리", "소분류", "세부카테고리"]),
+                ),
                 use_container_width=True,
                 config={"displayModeBar": False},
             )
