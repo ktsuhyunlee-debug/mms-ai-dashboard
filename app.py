@@ -9525,11 +9525,12 @@ def _target_region_map(
         # 주간 지도 높이(430px)의 실제 플롯 영역 안에서 표가 스크롤 없이 한 번에 보이도록
         # 헤더/행 간격을 조금 촘촘하게 잡고, 표의 마지막 행이 지도 하단 끝선과 맞도록 계산합니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 28
-        province_table_target_height = 419.0
+        # 헤더는 낮추고, 마지막 행의 하단 테두리가 잘리지 않도록 전체 표 높이에 여유를 둡니다.
+        province_header_height = 22
+        province_table_target_height = 408.0
         province_cell_height = max(
-            19.5,
-            min(23.8, (province_table_target_height - province_header_height) / province_rows),
+            18.0,
+            min(22.5, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9561,7 +9562,8 @@ def _target_region_map(
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
         # 가로 위치는 유지하고, 세로 domain을 지도와 동일한 전체 영역으로 사용해
         # 표 상단/하단 끝선이 지도 플롯 끝선과 맞도록 합니다.
-        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.0, 1.0])
+        # 상·하단을 차트 경계에서 아주 조금 안쪽으로 넣어 마지막 행 테두리 clipping을 방지합니다.
+        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.025, 0.975])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
