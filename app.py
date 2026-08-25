@@ -9942,6 +9942,122 @@ def render_weekly_material_response_analysis(
             st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
+
+def render_home_material_response_analysis(
+    selected_sends: pd.DataFrame,
+    material_age_raw: pd.DataFrame,
+    material_region_raw: pd.DataFrame,
+    key_prefix: str,
+) -> None:
+    """Home 분석 조건에 실제 포함된 날짜만 사용해 성·연령/지역 반응 분포를 표시합니다."""
+    if selected_sends is None or selected_sends.empty or "_date" not in selected_sends.columns:
+        return
+
+    selected_dates = (
+        pd.to_datetime(selected_sends["_date"], errors="coerce")
+        .dt.normalize()
+        .dropna()
+        .drop_duplicates()
+    )
+    if selected_dates.empty:
+        return
+
+    selected_date_index = pd.DatetimeIndex(selected_dates)
+
+    def _home_raw_slice(raw: pd.DataFrame) -> pd.DataFrame:
+        if raw is None or raw.empty or "_date" not in raw.columns:
+            return pd.DataFrame()
+        dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
+        return raw.loc[dates.notna() & dates.isin(selected_date_index)].copy()
+
+    age_selected = _home_raw_slice(material_age_raw)
+    region_selected = _home_raw_slice(material_region_raw)
+    if age_selected.empty and region_selected.empty:
+        return
+
+    summary = _target_response_summary(age_selected, region_selected)
+    age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
+    region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
+    province_stats = _target_province_response_summary(region_selected)
+
+    st.markdown('<div class="section-title">반응 분포</div>', unsafe_allow_html=True)
+    age_col, region_map_col, region_rank_col = st.columns([1.15, 1.15, 1.0], gap="medium")
+
+    with age_col:
+        st.markdown("**성별·연령별 반응 분포**")
+        if age_stats.empty:
+            st.info("선택 기간의 소재연령로우 데이터가 없습니다.")
+        else:
+            age_fig = _target_gender_age_chart(age_stats, summary["uctr"], compact_x=True)
+            age_fig = _weekly_black_plotly_text(age_fig)
+            age_fig.update_layout(height=430, margin=dict(l=30, r=15, t=42, b=95))
+            st.plotly_chart(
+                age_fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"{key_prefix}_home_age_chart",
+            )
+            st.caption("CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선=선택 기간 전체 평균")
+
+    with region_map_col:
+        st.markdown("**지역별 반응 분포**")
+        if region_selected.empty:
+            st.info("선택 기간의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            region_fig = _target_region_map(
+                region_stats,
+                summary["uctr"],
+                show_labels=False,
+                province_summary=province_stats,
+            )
+            region_fig = _weekly_black_plotly_text(region_fig)
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=10))
+            st.plotly_chart(
+                region_fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displayModeBar": False,
+                    "displaylogo": False,
+                    "responsive": True,
+                    "doubleClick": "reset",
+                },
+                key=f"{key_prefix}_home_region_map",
+            )
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 시도표는 CTR(Uniq) 높은 순")
+
+    with region_rank_col:
+        st.markdown("**지역 TOP5 · LOW5**")
+        if region_selected.empty:
+            st.info("선택 기간의 소재지역로우 데이터가 없습니다.")
+        elif region_stats.empty:
+            st.info("분석 가능한 지역 데이터가 없습니다.")
+        else:
+            st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
+            home_top5 = _target_rank_table(region_stats, top=True, n=5)
+            selectable_dataframe(
+                home_top5,
+                key=f"{key_prefix}_home_region_top5",
+                use_container_width=True,
+                hide_index=True,
+                height=168,
+                row_height=26,
+            )
+            st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
+            home_low5 = _target_rank_table(region_stats, top=False, n=5)
+            selectable_dataframe(
+                home_low5,
+                key=f"{key_prefix}_home_region_low5",
+                use_container_width=True,
+                hide_index=True,
+                height=168,
+                row_height=26,
+            )
+            st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
+
+
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
     view = view.rename(columns={
@@ -10751,6 +10867,16 @@ if menu == "홈":
         max_entries=8,
     )
 
+    # Home 반응 분포도 동일한 적용 조건(포함/제외 날짜 포함)을 그대로 사용합니다.
+    home_applied_sends = apply_home_analysis_date_filter(
+        sends,
+        applied["mode"],
+        applied["base_start"],
+        applied["base_end"],
+        applied["include_ranges"],
+        applied["exclude_ranges"],
+    )
+
     # 월간 기간 필터
     c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
     with c1:
@@ -10786,6 +10912,15 @@ if menu == "홈":
                 f'<div class="metric-delta">직전 대비 {delta}</div></div>',
                 unsafe_allow_html=True,
             )
+
+
+    # 주간실적의 성별·연령/지역 반응 분포를 Home 분석 적용 기간 기준으로 동일하게 노출합니다.
+    render_home_material_response_analysis(
+        home_applied_sends,
+        material_age_raw,
+        material_region_raw,
+        key_prefix="home_applied_response",
+    )
 
     # 월간 그래프와 표
     st.markdown('<div class="section-title">월별 SPM / 발송대비매출</div>', unsafe_allow_html=True)
