@@ -9529,7 +9529,7 @@ def _target_region_map(
         province_table_target_height = 419.0
         province_cell_height = max(
             19.5,
-            min(24.5, (province_table_target_height - province_header_height) / province_rows),
+            min(23.8, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9540,7 +9540,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=12.3),
+                    font=dict(color="#000000", size=12.0),
                     height=province_header_height,
                 ),
                 cells=dict(
@@ -9552,7 +9552,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    font=dict(color="#000000", size=12.3),
+                    font=dict(color="#000000", size=12.0),
                     height=province_cell_height,
                 ),
             ),
