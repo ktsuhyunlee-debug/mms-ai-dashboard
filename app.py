@@ -11681,10 +11681,17 @@ elif menu == "주간실적":
     with tabs[1]:
         total_amount = pw["주문금액"].sum()
         pw["주문비중"] = pw["주문금액"] / total_amount if total_amount else 0
-        sort_cols = [c for c in ["_date", "시간대", "전시순서"] if c in pw.columns]
-        product_sorted = pw.sort_values(sort_cols) if sort_cols else pw
+
+        # 동일 발송 조건(일자/요일/시간대/성별/연령/소재)의 상품을 연속 배치합니다.
+        # 그룹 내부에서는 전시순서 → 상품명 순으로 정렬합니다.
+        group_sort_cols = [
+            "_date", "요일", "시간대", "성별", "연령", "소재",
+            "전시순서", "상품명",
+        ]
+        sort_cols = [c for c in group_sort_cols if c in pw.columns]
+        product_sorted = pw.sort_values(sort_cols, kind="stable") if sort_cols else pw
         cols = [
-            "일자", "요일", "시간대", "성별", "연령", "소재",
+            "일자", "요일", "시간대", "성별", "연령", "소재", "MD",
             "전시순서", "상품명", "멤버십혜택가",
             "주문건수", "주문수량", "주문금액",
             "추가노출", "재편성", "주문비중"
