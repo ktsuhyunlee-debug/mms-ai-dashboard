@@ -3274,7 +3274,9 @@ def _category_top_product_hover(
         top = group.head(max(int(top_n), 1))
         lines = []
         for rank, (_, row) in enumerate(top.iterrows(), start=1):
-            product_name = _html.escape(str(row["상품명"]))
+            # hover 박스가 과도하게 넓어지지 않도록 표시용 상품명만 축약
+            compact_name = _weekly_short_display_name(str(row["상품명"]), max_len=24)
+            product_name = _html.escape(compact_name)
             send_count = int(row["발송횟수"])
             amount = float(row["주문금액"])
             lines.append(
