@@ -9467,11 +9467,11 @@ def _target_region_aggregate(region_df: pd.DataFrame, overall_uctr: float, min_s
 
 
 def _target_province_response_summary(region_df: pd.DataFrame) -> pd.DataFrame:
-    """선택 기간의 시도별 CTR(Uniq)과 클릭수(Uniq) 비중을 계산합니다.
+    """선택 기간의 시도별 성공건수·클릭수(Uniq)·CTR(Uniq)을 집계합니다.
 
-    클릭수(Uniq) 비중은 각 시도의 클릭수(Uniq)가 전체 클릭수(Uniq)에서 차지하는 비중입니다.
+    CTR(Uniq) = 클릭수(Uniq) / 성공건수이며, CTR(Uniq) 높은 순으로 정렬합니다.
     """
-    columns = ["시도", "성공건수", "클릭수_Uniq", "CTR(Uniq)", "클릭수(Uniq) 비중"]
+    columns = ["시도", "성공건수", "클릭수_Uniq", "CTR(Uniq)"]
     if region_df is None or region_df.empty:
         return pd.DataFrame(columns=columns)
 
@@ -9495,13 +9495,9 @@ def _target_province_response_summary(region_df: pd.DataFrame) -> pd.DataFrame:
     grouped["CTR(Uniq)"] = grouped["클릭수_Uniq"].div(
         grouped["성공건수"].replace(0, pd.NA)
     ).fillna(0)
-    total_clicks = float(grouped["클릭수_Uniq"].sum())
-    grouped["클릭수(Uniq) 비중"] = (
-        grouped["클릭수_Uniq"] / total_clicks if total_clicks > 0 else 0.0
-    )
     return grouped.sort_values(
-        ["CTR(Uniq)", "클릭수(Uniq) 비중", "시도"],
-        ascending=[False, False, True],
+        ["CTR(Uniq)", "클릭수_Uniq", "성공건수", "시도"],
+        ascending=[False, False, False, True],
     ).reset_index(drop=True)[columns]
 
 
@@ -9577,8 +9573,9 @@ def _target_region_map(
         province_view = province_summary.copy().reset_index(drop=True)
         # 순위 번호 없이 시도명만 표시
         province_view["시도표시"] = province_view["시도"].astype(str)
+        province_view["성공표시"] = province_view["성공건수"].map(lambda x: f"{int(round(float(x))):,}")
+        province_view["클릭표시"] = province_view["클릭수_Uniq"].map(lambda x: f"{int(round(float(x))):,}")
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
-        province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
         # 주간 지도(430px) 안에서 표가 스크롤 없이 한 번에 보이되
         # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
@@ -9591,10 +9588,10 @@ def _target_region_map(
 
         fig.add_trace(
             go.Table(
-                columnwidth=[1.08, 1.18, 1.72],
+                columnwidth=[1.02, 1.18, 1.20, 1.10],
                 header=dict(
-                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq)&nbsp;비중</b>"],
-                    align=["center", "center", "center"],
+                    values=["<b>시도</b>", "<b>성공건수</b>", "<b>클릭수(Uniq)</b>", "<b>CTR(Uniq)</b>"],
+                    align=["center", "center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
                     font=dict(color="#000000", size=12.0),
@@ -9603,14 +9600,15 @@ def _target_region_map(
                 cells=dict(
                     values=[
                         province_view["시도표시"],
+                        province_view["성공표시"],
+                        province_view["클릭표시"],
                         province_view["CTR표시"],
-                        province_view["비중표시"],
                     ],
-                    align=["center", "center", "center"],
+                    align=["center", "center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    # 시도명은 12 유지, CTR/클릭 비중 숫자만 살짝 확대
-                    font=dict(color="#000000", size=[12.0, 12.6, 12.6]),
+                    # 시도명은 12 유지, 수치만 살짝 크게 표시
+                    font=dict(color="#000000", size=[12.0, 12.4, 12.4, 12.6]),
                     height=province_cell_height,
                 ),
             ),
@@ -9909,7 +9907,7 @@ def render_weekly_material_response_analysis(
                 },
                 key=f"{key_prefix}_weekly_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 클릭수(Uniq) 비중=주간 전체 클릭수(Uniq) 중 비중")
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 시도표는 CTR(Uniq) 높은 순")
 
     with region_rank_col:
         st.markdown("**지역 TOP5 · LOW5**")
