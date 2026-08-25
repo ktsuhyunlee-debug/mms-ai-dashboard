@@ -9462,7 +9462,7 @@ def _target_region_map(
             specs=[[{"type": "geo"}, {"type": "table"}]],
             # 우측 표가 차트 오른쪽 경계에 붙어 테두리가 잘리지 않도록
             # 지도/표 영역을 약간 여유 있게 배분합니다.
-            column_widths=[0.64, 0.34],
+            column_widths=[0.62, 0.36],
             horizontal_spacing=0.02,
         )
     else:
@@ -9522,25 +9522,25 @@ def _target_region_map(
         province_view["시도표시"] = province_view["시도"].astype(str)
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
-        # 주간 지도 높이(430px) 안에서 시도 표 전체가 한 번에 보이도록
-        # 폰트 12를 유지하되 헤더/행 높이를 행 수에 맞춰 압축해 내부 스크롤을 방지합니다.
+        # 주간 지도 높이(430px) 안에서 시도 표 전체가 한 번에 보이도록 유지하면서
+        # 글씨는 12.3으로 키우고, 위/아래 여백이 비슷하게 보이도록 표 높이를 미세 조정합니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 30
-        province_table_target_height = 404
+        province_header_height = 31
+        province_table_target_height = 408
         province_cell_height = max(
             20,
-            min(22, int((province_table_target_height - province_header_height) / province_rows)),
+            min(24, int((province_table_target_height - province_header_height) / province_rows)),
         )
 
         fig.add_trace(
             go.Table(
-                columnwidth=[1.00, 1.10, 1.62],
+                columnwidth=[1.08, 1.18, 1.72],
                 header=dict(
                     values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq)&nbsp;비중</b>"],
                     align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=12),
+                    font=dict(color="#000000", size=12.3),
                     height=province_header_height,
                 ),
                 cells=dict(
@@ -9552,15 +9552,15 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    font=dict(color="#000000", size=12),
+                    font=dict(color="#000000", size=12.3),
                     height=province_cell_height,
                 ),
             ),
             row=1, col=2,
         )
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
-        # 우측 끝을 안쪽으로 넣어 테두리 잘림을 방지하고 지도와 같은 높이로 맞춥니다.
-        fig.data[-1].domain = dict(x=[0.66, 0.965], y=[0.0, 1.0])
+        # 표를 조금 더 넓히고, 위/아래 여백이 균형 있게 보이도록 살짝 안쪽에 배치합니다.
+        fig.data[-1].domain = dict(x=[0.63, 0.985], y=[0.02, 0.98])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
