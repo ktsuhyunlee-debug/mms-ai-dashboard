@@ -9579,13 +9579,13 @@ def _target_region_map(
         # 주간 지도(430px) 안에서 표가 스크롤 없이 한 번에 보이되
         # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 22
-        # 430px 주간 차트에서 마지막 행의 하단 테두리가 잘리지 않도록
-        # 표 내용 높이를 domain보다 약간 작게 잡아 하단 안전 여백을 확보합니다.
-        province_table_target_height = 388.0
+        # 주간 430px 차트 안에서 제주 행과 마지막 하단 테두리까지 완전히 보이도록
+        # 헤더를 낮추고 본문 행도 아주 조금 압축합니다.
+        province_header_height = 18
+        province_table_target_height = 360.0
         province_cell_height = max(
-            18.0,
-            min(22.0, (province_table_target_height - province_header_height) / province_rows),
+            17.5,
+            min(20.0, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9596,7 +9596,7 @@ def _target_region_map(
                     align=["center", "center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=12.0),
+                    font=dict(color="#000000", size=11.4),
                     height=province_header_height,
                 ),
                 cells=dict(
