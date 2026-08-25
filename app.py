@@ -9580,10 +9580,12 @@ def _target_region_map(
         # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
         province_header_height = 22
-        province_table_target_height = 399.0
+        # 430px 주간 차트에서 마지막 행의 하단 테두리가 잘리지 않도록
+        # 표 내용 높이를 domain보다 약간 작게 잡아 하단 안전 여백을 확보합니다.
+        province_table_target_height = 388.0
         province_cell_height = max(
             18.0,
-            min(22.2, (province_table_target_height - province_header_height) / province_rows),
+            min(22.0, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9616,8 +9618,9 @@ def _target_region_map(
         )
         # 지도/표 모두 바깥 경계선이 SVG 끝에 닿지 않도록 사방에 안전 여백을 둡니다.
         # 표의 오른쪽/상하 테두리와 지도의 외곽이 잘리는 현상을 동시에 방지합니다.
-        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.018, 0.982])
-        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.018, 0.982])
+        # 표/지도 하단 선이 차트 경계에 닿지 않도록 상하 domain을 살짝 안쪽으로 둡니다.
+        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.028, 0.972])
+        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.028, 0.972])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9892,8 +9895,8 @@ def render_weekly_material_response_analysis(
                 province_summary=province_stats,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
-            # 430px 안에서 지도/시도표가 끝까지 보이면서 외곽선도 잘리지 않도록 여백을 최소화합니다.
-            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
+            # 430px 안에서 마지막 행 하단 테두리까지 완전히 보이도록 하단 여백을 확보합니다.
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=10))
             st.plotly_chart(
                 region_fig,
                 use_container_width=True,
