@@ -3511,17 +3511,21 @@ def selectable_dataframe(
 def style_weekly_product_rows(
     formatted_df: pd.DataFrame,
     raw_amounts: list,
-    group_end_rows: set[int] | None = None,
+    separator_rows: set[int] | None = None,
 ):
-    """주간 상품실적: 성과 배경색을 유지하면서 발송 조건 그룹 끝에 굵은 구분선을 표시."""
+    """주간 상품실적: 성과 배경색과 실제 표시되는 그룹 구분선 행을 함께 적용."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
-    group_end_rows = set(group_end_rows or set())
+    separator_rows = set(separator_rows or set())
 
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
             break
 
         row_values = [_clean_text_value(v) for v in formatted_df.iloc[idx].tolist()]
+        if idx in separator_rows:
+            styles.iloc[idx, :] = "color: #4b5563 !important; font-weight: 900 !important; background-color: #ffffff !important;"
+            continue
+
         if any(v == "총합계" for v in row_values):
             # 배경색 지정 금지: Streamlit 기본 흰 배경 유지
             styles.iloc[idx, :] = "font-weight: 800 !important;"
@@ -3538,10 +3542,6 @@ def style_weekly_product_rows(
                 row_style += "background-color: #fff2cc;"
             elif value < 1_000_000:
                 row_style += "background-color: #e7e6e6;"
-
-        # 일자/요일/시간대/성별/연령/소재가 바뀌는 그룹의 마지막 행 아래를 굵게 표시
-        if idx in group_end_rows:
-            row_style += "border-bottom: 3px solid #6b7280 !important;"
 
         if row_style:
             styles.iloc[idx, :] = row_style
@@ -11713,7 +11713,7 @@ elif menu == "주간실적":
         view = product_sorted[[c for c in cols if c in product_sorted.columns]].copy()
 
         # 같은 일자/요일/시간대/성별/연령/소재는 하나의 발송 그룹으로 보고,
-        # 각 그룹의 마지막 상품 행 아래에 굵은 구분선을 표시합니다.
+        # 각 그룹의 마지막 상품 행 아래에 Streamlit에서도 실제 보이는 구분선 행을 삽입합니다.
         group_cols = [c for c in ["일자", "요일", "시간대", "성별", "연령", "소재"] if c in view.columns]
         group_end_rows: set[int] = set()
         if group_cols and not view.empty:
@@ -11735,14 +11735,33 @@ elif menu == "주간실적":
                 total[c] = product_sorted[c].sum()
         if "주문비중" in view.columns:
             total["주문비중"] = 1.0
-        view = pd.concat([view, pd.DataFrame([total])], ignore_index=True)
-        raw_amounts = (
+
+        # 실제 데이터 먼저 포맷한 뒤, 그룹 사이에 진한 선(━) 행을 추가합니다.
+        raw_data_amounts = (
             list(pd.to_numeric(view["주문금액"], errors="coerce"))
-            if "주문금액" in view.columns else []
+            if "주문금액" in view.columns else [None] * len(view)
         )
-        formatted_view = clean_identifier_columns(weekly_display_format(view))
+        formatted_data = clean_identifier_columns(weekly_display_format(view))
+
+        display_rows = []
+        display_amounts = []
+        separator_rows: set[int] = set()
+        separator_value = "━━━━━━"
+        for idx in range(len(formatted_data)):
+            display_rows.append(formatted_data.iloc[idx].to_dict())
+            display_amounts.append(raw_data_amounts[idx] if idx < len(raw_data_amounts) else None)
+            if idx in group_end_rows:
+                separator_rows.add(len(display_rows))
+                display_rows.append({c: separator_value for c in formatted_data.columns})
+                display_amounts.append(None)
+
+        formatted_view = pd.DataFrame(display_rows, columns=formatted_data.columns)
+        total_formatted = clean_identifier_columns(weekly_display_format(pd.DataFrame([total], columns=view.columns)))
+        formatted_view = pd.concat([formatted_view, total_formatted], ignore_index=True)
+        display_amounts.append(product_sorted["주문금액"].sum() if "주문금액" in product_sorted.columns else None)
+
         styled_view = formatted_view.style.apply(
-            lambda _: style_weekly_product_rows(formatted_view, raw_amounts, group_end_rows),
+            lambda _: style_weekly_product_rows(formatted_view, display_amounts, separator_rows),
             axis=None,
         )
         selectable_dataframe(
