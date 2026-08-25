@@ -10799,23 +10799,34 @@ if menu == "홈":
                 unsafe_allow_html=True,
             )
 
-    # Home 적용 기간 기준 소재 반응 분포: 주간실적과 동일한 3개 영역을 그대로 재사용
-    home_response_age = apply_home_analysis_date_filter(
-        material_age_raw,
+    # Home 반응 분포는 분석 조건 적용 후 실제 집계 대상에 남은 발송일과 1:1로 동기화한다.
+    # 포함/제외가 비연속 구간이어도 소재연령/지역로우가 같은 날짜 집합만 사용하도록 보장한다.
+    home_filtered_sends = apply_home_analysis_date_filter(
+        sends,
         applied["mode"],
         applied["base_start"],
         applied["base_end"],
         applied["include_ranges"],
         applied["exclude_ranges"],
     )
-    home_response_region = apply_home_analysis_date_filter(
-        material_region_raw,
-        applied["mode"],
-        applied["base_start"],
-        applied["base_end"],
-        applied["include_ranges"],
-        applied["exclude_ranges"],
-    )
+    if home_filtered_sends.empty:
+        home_analysis_dates = pd.DatetimeIndex([])
+    else:
+        home_analysis_dates = pd.DatetimeIndex(
+            pd.to_datetime(home_filtered_sends["_date"], errors="coerce")
+            .dt.normalize()
+            .dropna()
+            .unique()
+        )
+
+    def _home_response_by_applied_dates(raw: pd.DataFrame) -> pd.DataFrame:
+        if raw is None or raw.empty or "_date" not in raw.columns or len(home_analysis_dates) == 0:
+            return raw.iloc[0:0].copy() if isinstance(raw, pd.DataFrame) else pd.DataFrame()
+        raw_dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
+        return raw.loc[raw_dates.isin(home_analysis_dates)].copy()
+
+    home_response_age = _home_response_by_applied_dates(material_age_raw)
+    home_response_region = _home_response_by_applied_dates(material_region_raw)
     st.markdown('<div class="section-title">반응 분포</div>', unsafe_allow_html=True)
     if home_response_age.empty and home_response_region.empty:
         st.info("적용된 Home 분석 기간에 소재연령로우/소재지역로우 데이터가 없습니다.")
