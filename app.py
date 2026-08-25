@@ -9579,13 +9579,11 @@ def _target_region_map(
         # 주간 지도(430px) 안에서 표가 스크롤 없이 한 번에 보이되
         # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
-        # 주간 430px 차트 안에서 제주 행과 마지막 하단 테두리까지 완전히 보이도록
-        # 헤더만 낮추고 본문 행 높이는 기존 수준(18~22px)을 유지합니다.
-        province_header_height = 18
-        province_table_target_height = 388.0
+        province_header_height = 22
+        province_table_target_height = 399.0
         province_cell_height = max(
             18.0,
-            min(22.0, (province_table_target_height - province_header_height) / province_rows),
+            min(22.2, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9596,7 +9594,7 @@ def _target_region_map(
                     align=["center", "center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=11.4),
+                    font=dict(color="#000000", size=12.0),
                     height=province_header_height,
                 ),
                 cells=dict(
@@ -9618,9 +9616,8 @@ def _target_region_map(
         )
         # 지도/표 모두 바깥 경계선이 SVG 끝에 닿지 않도록 사방에 안전 여백을 둡니다.
         # 표의 오른쪽/상하 테두리와 지도의 외곽이 잘리는 현상을 동시에 방지합니다.
-        # 표/지도 하단 선이 차트 경계에 닿지 않도록 상하 domain을 살짝 안쪽으로 둡니다.
-        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.028, 0.972])
-        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.028, 0.972])
+        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.018, 0.982])
+        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.018, 0.982])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9837,9 +9834,8 @@ def render_weekly_material_response_analysis(
     material_age_raw: pd.DataFrame,
     material_region_raw: pd.DataFrame,
     key_prefix: str,
-    context_label: str = "주간",
 ) -> None:
-    """선택 기간 전체 소재의 성·연령/지역 반응 분포를 한 줄로 요약 표시합니다."""
+    """선택 주차 전체 소재의 성·연령/지역 반응 분포를 한 줄로 요약 표시합니다."""
     start_ts = pd.to_datetime(week_start, errors="coerce")
     end_ts = pd.to_datetime(week_end, errors="coerce")
     if pd.isna(start_ts) or pd.isna(end_ts):
@@ -9863,17 +9859,13 @@ def render_weekly_material_response_analysis(
     region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
     province_stats = _target_province_response_summary(region_selected)
 
-    # 주간/홈에서 동일한 시각화를 재사용하되 안내 문구만 조회 범위에 맞춰 표시
-    is_home_period = str(context_label).strip() == "기간"
-    selection_text = "선택 기간" if is_home_period else "선택 주차"
-    average_text = "선택 기간 전체 평균" if is_home_period else "주간 전체 평균"
-
+    # 별도 '주간 소재 반응 분포' 제목 없이 분석 항목을 바로 노출
     age_col, region_map_col, region_rank_col = st.columns([1.15, 1.15, 1.0], gap="medium")
 
     with age_col:
         st.markdown("**성별·연령별 반응 분포**")
         if age_stats.empty:
-            st.info(f"{selection_text}의 소재연령로우 데이터가 없습니다.")
+            st.info("선택 주차의 소재연령로우 데이터가 없습니다.")
         else:
             age_fig = _target_gender_age_chart(age_stats, summary["uctr"], compact_x=True)
             age_fig = _weekly_black_plotly_text(age_fig)
@@ -9884,12 +9876,12 @@ def render_weekly_material_response_analysis(
                 config={"displayModeBar": False},
                 key=f"{key_prefix}_weekly_age_chart",
             )
-            st.caption(f"CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선={average_text}")
+            st.caption("CTR(Uniq) 0% 초과 구간만 표시 · 남성=파랑 / 여성=빨강 · 점선=주간 전체 평균")
 
     with region_map_col:
         st.markdown("**지역별 반응 분포**")
         if region_selected.empty:
-            st.info(f"{selection_text}의 소재지역로우 데이터가 없습니다.")
+            st.info("선택 주차의 소재지역로우 데이터가 없습니다.")
         elif region_stats.empty:
             st.info("분석 가능한 지역 데이터가 없습니다.")
         else:
@@ -9900,8 +9892,8 @@ def render_weekly_material_response_analysis(
                 province_summary=province_stats,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
-            # 430px 안에서 마지막 행 하단 테두리까지 완전히 보이도록 하단 여백을 확보합니다.
-            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=10))
+            # 430px 안에서 지도/시도표가 끝까지 보이면서 외곽선도 잘리지 않도록 여백을 최소화합니다.
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
             st.plotly_chart(
                 region_fig,
                 use_container_width=True,
@@ -9920,7 +9912,7 @@ def render_weekly_material_response_analysis(
     with region_rank_col:
         st.markdown("**지역 TOP5 · LOW5**")
         if region_selected.empty:
-            st.info(f"{selection_text}의 소재지역로우 데이터가 없습니다.")
+            st.info("선택 주차의 소재지역로우 데이터가 없습니다.")
         elif region_stats.empty:
             st.info("분석 가능한 지역 데이터가 없습니다.")
         else:
@@ -10457,12 +10449,6 @@ if menu == "홈":
         home_data_min = home_valid_dates.min().date()
         home_data_max = home_valid_dates.max().date()
 
-    # 데이터 범위와 별개로 현재 연도 전체를 달력 탐색 범위에 포함합니다.
-    # 예: 데이터 max가 이전 연도여도 2026년 달력을 열고 날짜를 선택할 수 있습니다.
-    current_year = datetime.now().year
-    home_calendar_min = min(home_data_min, datetime(current_year, 1, 1).date())
-    home_calendar_max = max(home_data_max, datetime(current_year, 12, 31).date())
-
     default_draft, default_applied = _home_analysis_default_state(home_data_min, home_data_max)
     if "home_analysis_draft" not in st.session_state:
         st.session_state.home_analysis_draft = default_draft
@@ -10472,14 +10458,13 @@ if menu == "홈":
     draft = st.session_state.home_analysis_draft
     applied = st.session_state.home_analysis_applied
 
-    # 기존 저장 날짜는 달력 탐색 범위 안에서만 보정합니다.
-    # 데이터 범위 밖의 현재 연도 날짜도 선택 자체는 가능하게 유지합니다.
+    # 데이터 갱신으로 기존 저장 날짜가 현재 데이터 범위를 벗어난 경우 안전하게 보정
     def _home_clamp_date(value, fallback):
         parsed = pd.to_datetime(value, errors="coerce")
         if pd.isna(parsed):
             return fallback
         parsed_date = parsed.date()
-        return min(max(parsed_date, home_calendar_min), home_calendar_max)
+        return min(max(parsed_date, home_data_min), home_data_max)
 
     draft["base_start"] = _home_clamp_date(draft.get("base_start"), home_data_min)
     draft["base_end"] = _home_clamp_date(draft.get("base_end"), home_data_max)
@@ -10554,8 +10539,8 @@ if menu == "홈":
         draft["base_start"] = st.date_input(
             "기본 시작일",
             value=draft.get("base_start", home_data_min),
-            min_value=home_calendar_min,
-            max_value=home_calendar_max,
+            min_value=home_data_min,
+            max_value=home_data_max,
             format="YYYY-MM-DD",
             key="home_analysis_base_start",
             label_visibility="collapsed",
@@ -10566,8 +10551,8 @@ if menu == "홈":
         draft["base_end"] = st.date_input(
             "기본 종료일",
             value=draft.get("base_end", home_data_max),
-            min_value=home_calendar_min,
-            max_value=home_calendar_max,
+            min_value=home_data_min,
+            max_value=home_data_max,
             format="YYYY-MM-DD",
             key="home_analysis_base_end",
             label_visibility="collapsed",
@@ -10589,14 +10574,14 @@ if menu == "홈":
                 row[0].markdown(f"**{idx}**")
                 item["start"] = row[1].date_input(
                     f"포함 시작일 {idx}", value=item["start"],
-                    min_value=home_calendar_min, max_value=home_calendar_max,
+                    min_value=home_data_min, max_value=home_data_max,
                     format="YYYY-MM-DD", key=f"home_inc_start_{item['id']}",
                     label_visibility="collapsed",
                 )
                 row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
                 item["end"] = row[3].date_input(
                     f"포함 종료일 {idx}", value=item["end"],
-                    min_value=home_calendar_min, max_value=home_calendar_max,
+                    min_value=home_data_min, max_value=home_data_max,
                     format="YYYY-MM-DD", key=f"home_inc_end_{item['id']}",
                     label_visibility="collapsed",
                 )
@@ -10633,14 +10618,14 @@ if menu == "홈":
                 row[0].markdown(f"**{idx}**")
                 item["start"] = row[1].date_input(
                     f"제외 시작일 {idx}", value=item["start"],
-                    min_value=home_calendar_min, max_value=home_calendar_max,
+                    min_value=home_data_min, max_value=home_data_max,
                     format="YYYY-MM-DD", key=f"home_exc_start_{item['id']}",
                     label_visibility="collapsed",
                 )
                 row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
                 item["end"] = row[3].date_input(
                     f"제외 종료일 {idx}", value=item["end"],
-                    min_value=home_calendar_min, max_value=home_calendar_max,
+                    min_value=home_data_min, max_value=home_data_max,
                     format="YYYY-MM-DD", key=f"home_exc_end_{item['id']}",
                     label_visibility="collapsed",
                 )
@@ -10798,47 +10783,6 @@ if menu == "홈":
                 f'<div class="metric-delta">직전 대비 {delta}</div></div>',
                 unsafe_allow_html=True,
             )
-
-    # Home 반응 분포는 분석 조건 적용 후 실제 집계 대상에 남은 발송일과 1:1로 동기화한다.
-    # 포함/제외가 비연속 구간이어도 소재연령/지역로우가 같은 날짜 집합만 사용하도록 보장한다.
-    home_filtered_sends = apply_home_analysis_date_filter(
-        sends,
-        applied["mode"],
-        applied["base_start"],
-        applied["base_end"],
-        applied["include_ranges"],
-        applied["exclude_ranges"],
-    )
-    if home_filtered_sends.empty:
-        home_analysis_dates = pd.DatetimeIndex([])
-    else:
-        home_analysis_dates = pd.DatetimeIndex(
-            pd.to_datetime(home_filtered_sends["_date"], errors="coerce")
-            .dt.normalize()
-            .dropna()
-            .unique()
-        )
-
-    def _home_response_by_applied_dates(raw: pd.DataFrame) -> pd.DataFrame:
-        if raw is None or raw.empty or "_date" not in raw.columns or len(home_analysis_dates) == 0:
-            return raw.iloc[0:0].copy() if isinstance(raw, pd.DataFrame) else pd.DataFrame()
-        raw_dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
-        return raw.loc[raw_dates.isin(home_analysis_dates)].copy()
-
-    home_response_age = _home_response_by_applied_dates(material_age_raw)
-    home_response_region = _home_response_by_applied_dates(material_region_raw)
-    st.markdown('<div class="section-title">반응 분포</div>', unsafe_allow_html=True)
-    if home_response_age.empty and home_response_region.empty:
-        st.info("적용된 Home 분석 기간에 소재연령로우/소재지역로우 데이터가 없습니다.")
-    else:
-        render_weekly_material_response_analysis(
-            applied["base_start"],
-            applied["base_end"],
-            home_response_age,
-            home_response_region,
-            key_prefix="home_applied_response",
-            context_label="기간",
-        )
 
     # 월간 그래프와 표
     st.markdown('<div class="section-title">월별 SPM / 발송대비매출</div>', unsafe_allow_html=True)
