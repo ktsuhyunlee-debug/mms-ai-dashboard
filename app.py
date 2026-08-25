@@ -9537,7 +9537,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=12),
+                    font=dict(color="#000000", size=11),
                     height=province_header_height,
                 ),
                 cells=dict(
@@ -9549,7 +9549,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    font=dict(color="#000000", size=12),
+                    font=dict(color="#000000", size=11),
                     height=province_cell_height,
                 ),
             ),
@@ -9557,7 +9557,7 @@ def _target_region_map(
         )
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
         # 우측 끝을 안쪽으로 넣어 테두리 잘림을 방지하고 지도와 같은 높이로 맞춥니다.
-        fig.data[-1].domain = dict(x=[0.66, 0.975], y=[0.0, 1.0])
+        fig.data[-1].domain = dict(x=[0.66, 0.965], y=[0.0, 1.0])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
