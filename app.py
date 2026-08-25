@@ -9409,39 +9409,166 @@ def _target_region_aggregate(region_df: pd.DataFrame, overall_uctr: float, min_s
     return eligible.reset_index(drop=True)
 
 
-def _target_region_map(region_stats: pd.DataFrame, overall_uctr: float) -> go.Figure:
-    fig = go.Figure()
+def _target_province_response_summary(region_df: pd.DataFrame) -> pd.DataFrame:
+    """선택 기간의 시도별 CTR(Uniq)과 클릭수(Uniq) 비중을 계산합니다.
+
+    CTR(Uniq) 비중은 각 시도의 클릭수(Uniq)가 전체 클릭수(Uniq)에서 차지하는 비중입니다.
+    """
+    columns = ["시도", "성공건수", "클릭수_Uniq", "CTR(Uniq)", "CTR(Uniq) 비중"]
+    if region_df is None or region_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    d = region_df.copy()
+    d["시도"] = d["시도"].fillna("").astype(str).str.strip()
+    d["시군구"] = d["시군구"].fillna("").astype(str).str.strip()
+    invalid_province = d["시도"].str.contains(r"값없음|^_$|^-$|^nan$|^none$|합계|총\s*합계", case=False, regex=True, na=False)
+    invalid_district = d["시군구"].str.contains(r"값없음|^_$|^-$|^nan$|^none$|합계|총\s*합계", case=False, regex=True, na=False)
+    d = d[~invalid_province & ~invalid_district & d["시도"].ne("")].copy()
+    if d.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = d.groupby("시도", as_index=False, dropna=False).agg(
+        성공건수=("성공건수", "sum"),
+        클릭수_Uniq=("클릭수(Uniq)", "sum"),
+    )
+    grouped = grouped[grouped["성공건수"] > 0].copy()
+    if grouped.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped["CTR(Uniq)"] = grouped["클릭수_Uniq"].div(
+        grouped["성공건수"].replace(0, pd.NA)
+    ).fillna(0)
+    total_clicks = float(grouped["클릭수_Uniq"].sum())
+    grouped["CTR(Uniq) 비중"] = (
+        grouped["클릭수_Uniq"] / total_clicks if total_clicks > 0 else 0.0
+    )
+    return grouped.sort_values(
+        ["CTR(Uniq)", "CTR(Uniq) 비중", "시도"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)[columns]
+
+
+def _target_region_map(
+    region_stats: pd.DataFrame,
+    overall_uctr: float,
+    *,
+    show_labels: bool = True,
+    province_summary: pd.DataFrame | None = None,
+) -> go.Figure:
+    show_province_table = province_summary is not None and isinstance(province_summary, pd.DataFrame) and not province_summary.empty
+    if show_province_table:
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{"type": "geo"}, {"type": "table"}]],
+            column_widths=[0.68, 0.32],
+            horizontal_spacing=0.025,
+        )
+    else:
+        fig = go.Figure()
+
     if region_stats is None or region_stats.empty:
         return fig
+
     color_map = {"높음": "#ef4444", "보통": "#f9a8d4", "낮음": "#60a5fa"}
     order = ["높음", "보통", "낮음"]
+    max_success = max(float(region_stats["성공건수"].max()), 1.0)
+
     for bucket in order:
         sub = region_stats[region_stats["구간"].eq(bucket)].copy()
         if sub.empty:
             continue
-        max_success = max(float(region_stats["성공건수"].max()), 1.0)
         sizes = 9 + 10 * (sub["성공건수"].astype(float) / max_success).pow(0.5)
-        fig.add_trace(go.Scattergeo(
-            lon=sub["경도"], lat=sub["위도"],
-            mode="markers+text",
-            text=sub["시군구"],
-            textposition="top center",
-            textfont=dict(size=9, color="#334155"),
+        trace_kwargs = dict(
+            lon=sub["경도"],
+            lat=sub["위도"],
+            mode="markers+text" if show_labels else "markers",
             name=bucket,
-            marker=dict(size=sizes, color=color_map[bucket], opacity=0.85, line=dict(color="#ffffff", width=1)),
-            customdata=list(zip(sub["지역"], sub["성공건수"], sub["CTR(Uniq)"] * 100, sub["전체 대비"] * 100)),
-            hovertemplate="%{customdata[0]}<br>성공건수 %{customdata[1]:,.0f}<br>CTR(Uniq) %{customdata[2]:.1f}%<br>전체 대비 %{customdata[3]:+.1f}%p<extra></extra>",
-        ))
+            marker=dict(
+                size=sizes, color=color_map[bucket], opacity=0.85,
+                line=dict(color="#ffffff", width=1),
+            ),
+            customdata=list(zip(
+                sub["지역"],
+                sub["성공건수"],
+                sub["클릭수_Uniq"],
+                sub["CTR(Uniq)"] * 100,
+                sub["전체 대비"] * 100,
+            )),
+            hovertemplate=(
+                "%{customdata[0]}<br>"
+                "성공건수 %{customdata[1]:,.0f}<br>"
+                "클릭수(Uniq) %{customdata[2]:,.0f}<br>"
+                "CTR(Uniq) %{customdata[3]:.1f}%<br>"
+                "전체 대비 %{customdata[4]:+.1f}%p<extra></extra>"
+            ),
+        )
+        if show_labels:
+            trace_kwargs.update(
+                text=sub["시군구"],
+                textposition="top center",
+                textfont=dict(size=9, color="#334155"),
+            )
+        trace = go.Scattergeo(**trace_kwargs)
+        if show_province_table:
+            fig.add_trace(trace, row=1, col=1)
+        else:
+            fig.add_trace(trace)
+
+    if show_province_table:
+        province_view = province_summary.copy().reset_index(drop=True)
+        province_view["시도표시"] = [f"{i+1}. {name}" for i, name in enumerate(province_view["시도"].astype(str))]
+        province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
+        province_view["비중표시"] = province_view["CTR(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
+        fig.add_trace(
+            go.Table(
+                columnwidth=[1.25, 1.0, 1.15],
+                header=dict(
+                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>CTR(Uniq)<br>비중</b>"],
+                    align=["left", "center", "center"],
+                    fill_color="#f5f8fc",
+                    line_color="#e4e8ef",
+                    font=dict(color="#000000", size=10),
+                    height=26,
+                ),
+                cells=dict(
+                    values=[
+                        province_view["시도표시"],
+                        province_view["CTR표시"],
+                        province_view["비중표시"],
+                    ],
+                    align=["left", "center", "center"],
+                    fill_color="#ffffff",
+                    line_color="#edf0f4",
+                    font=dict(color="#000000", size=10),
+                    height=21,
+                ),
+            ),
+            row=1, col=2,
+        )
+
     avg_pct = float(overall_uctr or 0) * 100
-    fig.update_geos(
-        projection_type="mercator",
-        showland=True, landcolor="#f8fafc",
-        showocean=True, oceancolor="#ffffff",
-        showcountries=True, countrycolor="#cbd5e1",
-        showcoastlines=True, coastlinecolor="#cbd5e1",
-        lonaxis_range=[124.3, 130.7], lataxis_range=[33.0, 39.2],
-        resolution=50,
-    )
+    if show_province_table:
+        fig.update_geos(
+            projection_type="mercator",
+            showland=True, landcolor="#f8fafc",
+            showocean=True, oceancolor="#ffffff",
+            showcountries=True, countrycolor="#cbd5e1",
+            showcoastlines=True, coastlinecolor="#cbd5e1",
+            lonaxis_range=[124.3, 130.7], lataxis_range=[33.0, 39.2],
+            resolution=50,
+            row=1, col=1,
+        )
+    else:
+        fig.update_geos(
+            projection_type="mercator",
+            showland=True, landcolor="#f8fafc",
+            showocean=True, oceancolor="#ffffff",
+            showcountries=True, countrycolor="#cbd5e1",
+            showcoastlines=True, coastlinecolor="#cbd5e1",
+            lonaxis_range=[124.3, 130.7], lataxis_range=[33.0, 39.2],
+            resolution=50,
+        )
+
     fig.update_layout(
         height=560,
         margin=dict(l=0, r=0, t=10, b=0),
@@ -9452,7 +9579,6 @@ def _target_region_map(region_stats: pd.DataFrame, overall_uctr: float) -> go.Fi
         ),
     )
     return fig
-
 
 def _target_rank_table(df: pd.DataFrame, top: bool = True, n: int = 5) -> pd.DataFrame:
     columns = ["순위", "지역", "성공건수", "클릭수(Uniq)", "CTR(Uniq)", "전체 대비", "구간"]
@@ -9649,6 +9775,7 @@ def render_weekly_material_response_analysis(
     summary = _target_response_summary(age_selected, region_selected)
     age_stats = _target_gender_age_aggregate(age_selected, summary["uctr"])
     region_stats = _target_region_aggregate(region_selected, summary["uctr"], min_success=500)
+    province_stats = _target_province_response_summary(region_selected)
 
     # 별도 '주간 소재 반응 분포' 제목 없이 분석 항목을 바로 노출
     age_col, region_map_col, region_rank_col = st.columns([1.15, 1.15, 1.0], gap="medium")
@@ -9676,7 +9803,12 @@ def render_weekly_material_response_analysis(
         elif region_stats.empty:
             st.info("분석 가능한 지역 데이터가 없습니다.")
         else:
-            region_fig = _target_region_map(region_stats, summary["uctr"])
+            region_fig = _target_region_map(
+                region_stats,
+                summary["uctr"],
+                show_labels=False,
+                province_summary=province_stats,
+            )
             region_fig = _weekly_black_plotly_text(region_fig)
             region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
             st.plotly_chart(
@@ -9685,7 +9817,7 @@ def render_weekly_material_response_analysis(
                 config={"displayModeBar": False},
                 key=f"{key_prefix}_weekly_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 주간 전체 대비 ±0.5%p 기준")
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 시도 비중=주간 전체 클릭수(Uniq) 중 비중")
 
     with region_rank_col:
         st.markdown("**지역 TOP5 · LOW5**")
