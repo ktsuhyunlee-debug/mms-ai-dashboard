@@ -50,6 +50,7 @@ import io
 import math
 import os
 import hashlib
+import html as _html
 from pathlib import Path
 import re
 from datetime import datetime
@@ -61,6 +62,7 @@ from plotly.subplots import make_subplots
 import requests
 import urllib3
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -3512,12 +3514,10 @@ def style_weekly_product_rows(
     formatted_df: pd.DataFrame,
     raw_amounts: list,
     group_end_rows: set[int] | None = None,
-    group_start_rows: set[int] | None = None,
 ):
-    """주간 상품실적: 성과 배경색을 유지하면서 발송 조건 그룹 경계선을 표시."""
+    """주간 상품실적: 성과 배경색을 유지하면서 발송 조건 그룹 끝에 굵은 구분선을 표시."""
     styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
     group_end_rows = set(group_end_rows or set())
-    group_start_rows = set(group_start_rows or set())
 
     for idx, amount in enumerate(raw_amounts):
         if idx >= len(formatted_df):
@@ -3541,17 +3541,153 @@ def style_weekly_product_rows(
             elif value < 1_000_000:
                 row_style += "background-color: #e7e6e6;"
 
-        # 그룹 경계가 한 줄로 보이도록 마지막 행 아래 + 다음 그룹 첫 행 위에 동일한 선을 적용
-        # (추가 행/칸 없이 기존 행 경계만 강조)
+        # 일자/요일/시간대/성별/연령/소재가 바뀌는 그룹의 마지막 행 아래를 굵게 표시
         if idx in group_end_rows:
-            row_style += "border-bottom: 2px solid #6b7280 !important; box-shadow: inset 0 -1px 0 #6b7280 !important;"
-        if idx in group_start_rows and idx > 0:
-            row_style += "border-top: 2px solid #6b7280 !important; box-shadow: inset 0 1px 0 #6b7280 !important;"
+            row_style += "border-bottom: 3px solid #6b7280 !important;"
 
         if row_style:
             styles.iloc[idx, :] = row_style
 
     return styles
+
+
+
+def render_weekly_product_grouped_table(
+    raw_df: pd.DataFrame,
+    formatted_df: pd.DataFrame,
+    group_end_rows: set[int] | None = None,
+    height: int = 680,
+):
+    # st.dataframe에서 border-*가 표시되지 않아 이 표만 실제 HTML table로 렌더링한다.
+    # 추가 행/칸 없이 그룹 마지막 행 아래선만 2px로 강조한다.
+    if formatted_df is None or formatted_df.empty:
+        st.info("상품 실적 데이터가 없습니다.")
+        return
+
+    group_end_rows = set(group_end_rows or set())
+    cols = list(formatted_df.columns)
+    numeric_cols = {
+        "전시순서", "멤버십혜택가", "주문건수", "주문수량", "주문금액", "주문비중"
+    }
+
+    def _txt(value):
+        if pd.isna(value):
+            return ""
+        return _html.escape(str(value), quote=True)
+
+    header_html = "".join(f"<th>{_txt(c)}</th>" for c in cols)
+    body_rows = []
+    for pos in range(len(formatted_df)):
+        frow = formatted_df.iloc[pos]
+        rrow = raw_df.iloc[pos] if pos < len(raw_df) else frow
+        row_texts = [_clean_text_value(v) for v in frow.tolist()]
+        is_total = any(v == "총합계" for v in row_texts)
+
+        classes = []
+        if pos in group_end_rows and not is_total:
+            classes.append("group-end")
+        if is_total:
+            classes.append("total-row")
+
+        amount = pd.to_numeric(pd.Series([rrow.get("주문금액", None)]), errors="coerce").iloc[0]
+        bg = ""
+        if not is_total and pd.notna(amount):
+            if float(amount) >= 3_000_000:
+                bg = "background:#fff2cc;"
+            elif float(amount) < 1_000_000:
+                bg = "background:#e7e6e6;"
+
+        cells = []
+        for col_idx, col in enumerate(cols):
+            display_value = frow.get(col, "")
+            raw_value = rrow.get(col, "")
+            data_num = ""
+            if col in numeric_cols:
+                n = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
+                if pd.notna(n):
+                    data_num = f' data-num="{float(n)}"'
+            cells.append(
+                f'<td data-row="{pos}" data-col="{col_idx}" data-colname="{_txt(col)}"{data_num}>{_txt(display_value)}</td>'
+            )
+        cls = f' class="{" ".join(classes)}"' if classes else ""
+        body_rows.append(f'<tr{cls} style="{bg}">{"".join(cells)}</tr>')
+
+    viewport_height = max(360, int(height) - 42)
+    html_doc = f"""<!doctype html>
+<html lang='ko'>
+<head>
+<meta charset='utf-8'>
+<style>
+* {{ box-sizing:border-box; }}
+html, body {{ margin:0; padding:0; background:#fff; font-family:'Pretendard','Noto Sans KR','Apple SD Gothic Neo',Arial,sans-serif; color:#111827; }}
+.table-shell {{ width:100%; height:{height}px; display:flex; flex-direction:column; }}
+.table-scroll {{ width:100%; height:{viewport_height}px; overflow:auto; border:1px solid #e4e8ef; border-radius:8px; background:#fff; }}
+table {{ border-collapse:separate; border-spacing:0; min-width:100%; width:max-content; font-size:12px; line-height:1.35; }}
+th, td {{ padding:8px 9px; white-space:nowrap; text-align:left; border-right:1px solid #e5e7eb; border-bottom:1px solid #e5e7eb; }}
+th {{ position:sticky; top:0; z-index:4; background:#f5f8fc; font-weight:750; color:#111827; border-bottom:1px solid #d9dee7; }}
+th:last-child, td:last-child {{ border-right:0; }}
+tr.group-end td {{ border-bottom:2px solid #7c8797 !important; }}
+tr.total-row td {{ font-weight:800; background:#fff !important; border-top:2px solid #7c8797; }}
+td.cell-selected {{ outline:2px solid rgba(47,111,236,.62); outline-offset:-2px; background-image:linear-gradient(rgba(47,111,236,.08),rgba(47,111,236,.08)); }}
+.summary {{ height:42px; display:flex; align-items:center; padding:0 10px; font-size:12px; color:#475569; overflow-x:auto; white-space:nowrap; }}
+.summary strong {{ color:#111827; }}
+</style>
+</head>
+<body>
+<div class='table-shell'>
+  <div class='table-scroll' id='tblwrap'>
+    <table id='weeklyProductTable'>
+      <thead><tr>{header_html}</tr></thead>
+      <tbody>{''.join(body_rows)}</tbody>
+    </table>
+  </div>
+  <div class='summary' id='summary'>셀을 드래그하면 선택한 숫자의 합계/평균을 볼 수 있습니다.</div>
+</div>
+<script>
+(() => {{
+  const table = document.getElementById('weeklyProductTable');
+  const summary = document.getElementById('summary');
+  let dragging = false, start = null, end = null;
+  const cells = () => Array.from(table.querySelectorAll('tbody td'));
+  function clearSel() {{ cells().forEach(c => c.classList.remove('cell-selected')); }}
+  function applySel() {{
+    clearSel();
+    if (!start || !end) return;
+    const r1=Math.min(start.r,end.r), r2=Math.max(start.r,end.r);
+    const c1=Math.min(start.c,end.c), c2=Math.max(start.c,end.c);
+    const selected=[];
+    cells().forEach(td => {{
+      const r=+td.dataset.row, c=+td.dataset.col;
+      if (r>=r1 && r<=r2 && c>=c1 && c<=c2) {{ td.classList.add('cell-selected'); selected.push(td); }}
+    }});
+    const groups={{}};
+    selected.forEach(td => {{
+      if (td.dataset.num === undefined) return;
+      const v=Number(td.dataset.num); if (!Number.isFinite(v)) return;
+      const name=td.dataset.colname || '';
+      (groups[name] ||= []).push(v);
+    }});
+    const parts=Object.entries(groups).map(([name, vals]) => {{
+      const sum=vals.reduce((a,b)=>a+b,0), avg=sum/vals.length;
+      const pct=name.includes('비중');
+      const fmt=(x)=>pct ? (x*100).toFixed(1)+'%' : new Intl.NumberFormat('ko-KR',{{maximumFractionDigits:1}}).format(x);
+      return `<strong>${{name}}</strong>&nbsp; ${{vals.length}}개 / 합계 ${{fmt(sum)}} / 평균 ${{fmt(avg)}}`;
+    }});
+    summary.innerHTML = parts.length ? parts.join('&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;') : `${{selected.length}}개 셀 선택`;
+  }}
+  table.addEventListener('mousedown', e => {{
+    const td=e.target.closest('td'); if(!td) return;
+    dragging=true; start={{r:+td.dataset.row,c:+td.dataset.col}}; end=start; e.preventDefault(); applySel();
+  }});
+  table.addEventListener('mouseover', e => {{
+    if(!dragging) return; const td=e.target.closest('td'); if(!td) return;
+    end={{r:+td.dataset.row,c:+td.dataset.col}}; applySel();
+  }});
+  window.addEventListener('mouseup', () => {{ dragging=false; }});
+}})();
+</script>
+</body></html>"""
+    components.html(html_doc, height=height, scrolling=False)
 
 
 def weekly_delta(cur: float, prev: float, pp: bool = False) -> str:
@@ -11721,7 +11857,6 @@ elif menu == "주간실적":
         # 각 그룹의 마지막 상품 행 아래에 굵은 구분선을 표시합니다.
         group_cols = [c for c in ["일자", "요일", "시간대", "성별", "연령", "소재"] if c in view.columns]
         group_end_rows: set[int] = set()
-        group_start_rows: set[int] = set()
         if group_cols and not view.empty:
             group_keys = (
                 view[group_cols]
@@ -11731,8 +11866,6 @@ elif menu == "주간실적":
                 .tolist()
             )
             for idx in range(len(group_keys)):
-                if idx == 0 or group_keys[idx] != group_keys[idx - 1]:
-                    group_start_rows.add(idx)
                 if idx == len(group_keys) - 1 or group_keys[idx] != group_keys[idx + 1]:
                     group_end_rows.add(idx)
 
@@ -11749,18 +11882,10 @@ elif menu == "주간실적":
             if "주문금액" in view.columns else []
         )
         formatted_view = clean_identifier_columns(weekly_display_format(view))
-        styled_view = formatted_view.style.apply(
-            lambda _: style_weekly_product_rows(
-                formatted_view, raw_amounts, group_end_rows, group_start_rows
-            ),
-            axis=None,
-        )
-        selectable_dataframe(
-            styled_view,
-            summary_df=formatted_view,
-            key=f"weekly_product_performance_{selected_year}_{week}",
-            use_container_width=True,
-            hide_index=True,
+        render_weekly_product_grouped_table(
+            view,
+            formatted_view,
+            group_end_rows,
             height=680,
         )
 
