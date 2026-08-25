@@ -9462,8 +9462,7 @@ def _target_region_map(
             specs=[[{"type": "geo"}, {"type": "table"}]],
             # 우측 표가 차트 오른쪽 경계에 붙어 테두리가 잘리지 않도록
             # 지도/표 영역을 약간 여유 있게 배분합니다.
-            # 우측 시도표 가로 폭을 조금 넓히고 지도와 한 박스처럼 끝선을 맞춥니다.
-            column_widths=[0.61, 0.37],
+            column_widths=[0.64, 0.34],
             horizontal_spacing=0.02,
         )
     else:
@@ -9535,7 +9534,7 @@ def _target_region_map(
 
         fig.add_trace(
             go.Table(
-                columnwidth=[1.00, 1.10, 1.72],
+                columnwidth=[1.00, 1.10, 1.62],
                 header=dict(
                     values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq)&nbsp;비중</b>"],
                     align=["center", "center", "center"],
@@ -9561,8 +9560,7 @@ def _target_region_map(
         )
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
         # 우측 끝을 안쪽으로 넣어 테두리 잘림을 방지하고 지도와 같은 높이로 맞춥니다.
-        # 표를 조금 넓히되 오른쪽 끝선은 분포도 차트 끝선과 자연스럽게 맞춥니다.
-        fig.data[-1].domain = dict(x=[0.62, 0.99], y=[0.0, 1.0])
+        fig.data[-1].domain = dict(x=[0.66, 0.965], y=[0.0, 1.0])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
