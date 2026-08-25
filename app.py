@@ -9527,7 +9527,7 @@ def _target_region_map(
         province_rows = max(len(province_view), 1)
         # 헤더는 낮추고, 마지막 행의 하단 테두리가 잘리지 않도록 전체 표 높이에 여유를 둡니다.
         province_header_height = 22
-        province_table_target_height = 408.0
+        province_table_target_height = 382.0
         province_cell_height = max(
             18.0,
             min(22.5, (province_table_target_height - province_header_height) / province_rows),
@@ -9553,17 +9553,17 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    font=dict(color="#000000", size=12.0),
+                    # 시도명은 12 유지, CTR/클릭 비중 숫자만 살짝 확대
+                    font=dict(color="#000000", size=[12.0, 12.6, 12.6]),
                     height=province_cell_height,
                 ),
             ),
             row=1, col=2,
         )
-        # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
-        # 가로 위치는 유지하고, 세로 domain을 지도와 동일한 전체 영역으로 사용해
-        # 표 상단/하단 끝선이 지도 플롯 끝선과 맞도록 합니다.
-        # 상·하단을 차트 경계에서 아주 조금 안쪽으로 넣어 마지막 행 테두리 clipping을 방지합니다.
-        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.025, 0.975])
+        # 지도/표 모두 바깥 경계선이 SVG 끝에 닿지 않도록 사방에 안전 여백을 둡니다.
+        # 표의 오른쪽/상하 테두리와 지도의 외곽이 잘리는 현상을 동시에 방지합니다.
+        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.025, 0.975])
+        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.025, 0.975])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9590,7 +9590,13 @@ def _target_region_map(
 
     fig.update_layout(
         height=560,
-        margin=dict(l=0, r=28 if show_province_table else 0, t=10, b=0),
+        # 주간 지역분포도 + 시도표의 바깥 테두리가 차트 컨테이너에 잘리지 않도록 여백 확보
+        margin=dict(
+            l=8 if show_province_table else 0,
+            r=36 if show_province_table else 0,
+            t=14 if show_province_table else 10,
+            b=8 if show_province_table else 0,
+        ),
         paper_bgcolor="#ffffff",
         # 지도 위 휠 스크롤로 확대/축소, 드래그는 이동용
         dragmode="pan",
@@ -9832,7 +9838,8 @@ def render_weekly_material_response_analysis(
                 province_summary=province_stats,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
-            region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
+            # 430px 안에서 지도/시도표의 외곽선이 상하좌우에 닿아 잘리지 않도록 안전 여백 확보
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=10, b=8))
             st.plotly_chart(
                 region_fig,
                 use_container_width=True,
