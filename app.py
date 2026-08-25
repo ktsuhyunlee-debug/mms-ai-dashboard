@@ -9580,12 +9580,12 @@ def _target_region_map(
         # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
         # 주간 430px 차트 안에서 제주 행과 마지막 하단 테두리까지 완전히 보이도록
-        # 헤더를 낮추고 본문 행도 아주 조금 압축합니다.
+        # 헤더만 낮추고 본문 행 높이는 기존 수준(18~22px)을 유지합니다.
         province_header_height = 18
-        province_table_target_height = 360.0
+        province_table_target_height = 388.0
         province_cell_height = max(
-            17.5,
-            min(20.0, (province_table_target_height - province_header_height) / province_rows),
+            18.0,
+            min(22.0, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
