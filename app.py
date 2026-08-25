@@ -9522,14 +9522,14 @@ def _target_region_map(
         province_view["시도표시"] = province_view["시도"].astype(str)
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
-        # 주간 지도 높이(430px)의 실제 플롯 영역 안에서 표가 스크롤 없이 한 번에 보이도록
-        # 헤더/행 간격을 더 촘촘하게 잡고, 행 수가 많아도 마지막 행까지 노출되도록 계산합니다.
+        # 주간 지도(430px) 안에서 표가 스크롤 없이 한 번에 보이되
+        # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 20
-        province_table_target_height = 380.0
+        province_header_height = 22
+        province_table_target_height = 399.0
         province_cell_height = max(
-            13.5,
-            min(21.0, (province_table_target_height - province_header_height) / province_rows),
+            18.0,
+            min(22.2, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9868,8 +9868,8 @@ def render_weekly_material_response_analysis(
                 key=f"{key_prefix}_weekly_region_top5",
                 use_container_width=True,
                 hide_index=True,
-                height=178,
-                row_height=24,
+                height=168,
+                row_height=26,
             )
             st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
             weekly_low5 = _target_rank_table(region_stats, top=False, n=5)
@@ -9878,8 +9878,8 @@ def render_weekly_material_response_analysis(
                 key=f"{key_prefix}_weekly_region_low5",
                 use_container_width=True,
                 hide_index=True,
-                height=178,
-                row_height=24,
+                height=168,
+                row_height=26,
             )
             st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
