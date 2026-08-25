@@ -9560,7 +9560,7 @@ def _target_region_map(
         )
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
         # 표를 조금 더 넓히고, 위/아래 여백이 균형 있게 보이도록 살짝 안쪽에 배치합니다.
-        fig.data[-1].domain = dict(x=[0.63, 0.985], y=[0.02, 0.98])
+        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.02, 0.98])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9587,7 +9587,7 @@ def _target_region_map(
 
     fig.update_layout(
         height=560,
-        margin=dict(l=0, r=14 if show_province_table else 0, t=10, b=0),
+        margin=dict(l=0, r=28 if show_province_table else 0, t=10, b=0),
         paper_bgcolor="#ffffff",
         # 지도 위 휠 스크롤로 확대/축소, 드래그는 이동용
         dragmode="pan",
