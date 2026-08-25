@@ -3509,49 +3509,6 @@ def selectable_dataframe(
     _render_selected_cell_summary(event, summary_df)
     return event
 
-
-def style_weekly_product_rows(
-    formatted_df: pd.DataFrame,
-    raw_amounts: list,
-    group_end_rows: set[int] | None = None,
-):
-    """주간 상품실적: 성과 배경색을 유지하면서 발송 조건 그룹 끝에 굵은 구분선을 표시."""
-    styles = pd.DataFrame("", index=formatted_df.index, columns=formatted_df.columns)
-    group_end_rows = set(group_end_rows or set())
-
-    for idx, amount in enumerate(raw_amounts):
-        if idx >= len(formatted_df):
-            break
-
-        row_values = [_clean_text_value(v) for v in formatted_df.iloc[idx].tolist()]
-        if any(v == "총합계" for v in row_values):
-            # 배경색 지정 금지: Streamlit 기본 흰 배경 유지
-            styles.iloc[idx, :] = "font-weight: 800 !important;"
-            continue
-
-        row_style = ""
-        try:
-            value = float(amount)
-        except (TypeError, ValueError):
-            value = None
-
-        if value is not None:
-            if value >= 3_000_000:
-                row_style += "background-color: #fff2cc;"
-            elif value < 1_000_000:
-                row_style += "background-color: #e7e6e6;"
-
-        # 일자/요일/시간대/성별/연령/소재가 바뀌는 그룹의 마지막 행 아래를 굵게 표시
-        if idx in group_end_rows:
-            row_style += "border-bottom: 3px solid #6b7280 !important;"
-
-        if row_style:
-            styles.iloc[idx, :] = row_style
-
-    return styles
-
-
-
 def render_weekly_product_grouped_table(
     raw_df: pd.DataFrame,
     formatted_df: pd.DataFrame,
@@ -5913,54 +5870,6 @@ def _weekly_operation_mix(df: pd.DataFrame) -> dict:
         classified = classified | mask
     result["미분류"] = int((~classified).sum())
     return result
-
-
-def _weekly_mms_mask(df: pd.DataFrame) -> pd.Series:
-    """발송 데이터에서 MMS 행을 판별합니다.
-
-    발송유형/채널 컬럼을 우선 사용하고, 구분 컬럼이 없으면 RCS·캐러셀 등
-    명시적인 비-MMS 표기가 있는 행만 제외합니다. 아무 구분 근거가 없으면
-    현재 MMS 대시보드의 기존 데이터 구조를 따라 전체 행을 MMS로 간주합니다.
-    """
-    if df is None or df.empty:
-        return pd.Series(False, index=getattr(df, "index", pd.Index([])), dtype=bool)
-
-    def _mask_from_values(values: pd.Series):
-        txt = values.fillna("").astype(str).str.strip()
-        explicit_mms = txt.str.contains(r"MMS|멀티미디어", case=False, regex=True, na=False)
-        explicit_other = txt.str.contains(
-            r"RCS|캐러셀|CAROUSEL|LMS|SMS|카카오|알림톡|친구톡",
-            case=False,
-            regex=True,
-            na=False,
-        )
-        if explicit_mms.any():
-            return explicit_mms
-        if explicit_other.any():
-            return ~explicit_other
-        return None
-
-    channel_cols = [
-        "발송유형", "발송 유형", "발송구분", "발송 구분",
-        "메시지유형", "메시지 유형", "메시지구분", "메시지 구분",
-        "발송채널", "발송 채널", "메시지채널", "메시지 채널", "채널",
-    ]
-    for col in channel_cols:
-        if col in df.columns:
-            mask = _mask_from_values(df[col])
-            if mask is not None:
-                return mask.reindex(df.index, fill_value=False)
-
-    # 별도 채널 컬럼이 없을 때는 소재/캠페인명에서 명시적인 비-MMS 표기만 탐지
-    for col in ["소재유형", "소재 유형", "캠페인명", "소재"]:
-        if col in df.columns:
-            txt = df[col].fillna("").astype(str)
-            non_mms = txt.str.contains(r"RCS|캐러셀|CAROUSEL", case=False, regex=True, na=False)
-            if non_mms.any():
-                return ~non_mms
-
-    return pd.Series(True, index=df.index, dtype=bool)
-
 
 def _weekly_period_bounds(year: int | None, week: str | None, df: pd.DataFrame):
     """주차 라벨(예: 0810주차)을 우선 사용해 7일 범위를 반환합니다."""
@@ -8372,13 +8281,6 @@ def find_daily_images(asset_key: str, campaign_name: str = "") -> list[Path]:
             return sorted(key_matches, key=_daily_image_natural_key)
 
     return []
-
-
-def find_daily_image(asset_key: str, campaign_name: str = ""):
-    """기존 단일 이미지 호출 호환용: 첫 번째 이미지만 반환합니다."""
-    images = find_daily_images(asset_key, campaign_name)
-    return images[0] if images else None
-
 
 def clean_mms_message(value) -> str:
     """앞뒤 큰따옴표만 제거하고 내부 줄바꿈은 그대로 유지합니다."""
