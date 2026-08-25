@@ -9576,14 +9576,16 @@ def _target_region_map(
         province_view["성공표시"] = province_view["성공건수"].map(lambda x: f"{int(round(float(x))):,}")
         province_view["클릭표시"] = province_view["클릭수_Uniq"].map(lambda x: f"{int(round(float(x))):,}")
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
-        # 우측 시도 표는 별도 스크롤 없이 전체 시도를 한 화면에 표시합니다.
-        # 헤더 높이를 줄이고 본문 행도 고정된 컴팩트 높이로 맞춰 표 전체가 domain 안에 들어오게 합니다.
+        # 주간 지도(430px) 안에서 표가 스크롤 없이 한 번에 보이되
+        # 행이 지나치게 눌리거나 아래쪽 빈 공간이 남지 않도록 실제 domain 높이에 맞춥니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 18
-        province_table_target_height = 360.0
+        province_header_height = 22
+        # 430px 주간 차트에서 마지막 행의 하단 테두리가 잘리지 않도록
+        # 표 내용 높이를 domain보다 약간 작게 잡아 하단 안전 여백을 확보합니다.
+        province_table_target_height = 388.0
         province_cell_height = max(
-            17.5,
-            min(19.5, (province_table_target_height - province_header_height) / province_rows),
+            18.0,
+            min(22.0, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9594,7 +9596,7 @@ def _target_region_map(
                     align=["center", "center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=11.4),
+                    font=dict(color="#000000", size=12.0),
                     height=province_header_height,
                 ),
                 cells=dict(
