@@ -9522,12 +9522,15 @@ def _target_region_map(
         province_view["시도표시"] = province_view["시도"].astype(str)
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
-        # 주간 지도 높이(430px)에 맞춰 시도 표가 위아래로 자연스럽게 채워지도록
-        # 헤더/셀 높이를 행 수에 따라 계산합니다. 글씨는 기존보다 크게 표시합니다.
+        # 주간 지도 높이(430px) 안에서 시도 표 전체가 한 번에 보이도록
+        # 폰트 12를 유지하되 헤더/행 높이를 행 수에 맞춰 압축해 내부 스크롤을 방지합니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 32
-        province_table_target_height = 420
-        province_cell_height = max(23, int((province_table_target_height - province_header_height) / province_rows))
+        province_header_height = 30
+        province_table_target_height = 404
+        province_cell_height = max(
+            20,
+            min(22, int((province_table_target_height - province_header_height) / province_rows)),
+        )
 
         fig.add_trace(
             go.Table(
@@ -9537,7 +9540,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
-                    font=dict(color="#000000", size=11),
+                    font=dict(color="#000000", size=12),
                     height=province_header_height,
                 ),
                 cells=dict(
@@ -9549,7 +9552,7 @@ def _target_region_map(
                     align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
-                    font=dict(color="#000000", size=11),
+                    font=dict(color="#000000", size=12),
                     height=province_cell_height,
                 ),
             ),
