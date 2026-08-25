@@ -9523,14 +9523,13 @@ def _target_region_map(
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
         # 주간 지도 높이(430px)의 실제 플롯 영역 안에서 표가 스크롤 없이 한 번에 보이도록
-        # 헤더/행 간격을 조금 촘촘하게 잡고, 표의 마지막 행이 지도 하단 끝선과 맞도록 계산합니다.
+        # 헤더/행 간격을 더 촘촘하게 잡고, 행 수가 많아도 마지막 행까지 노출되도록 계산합니다.
         province_rows = max(len(province_view), 1)
-        # 헤더는 낮추고, 마지막 행의 하단 테두리가 잘리지 않도록 전체 표 높이에 여유를 둡니다.
-        province_header_height = 22
-        province_table_target_height = 382.0
+        province_header_height = 20
+        province_table_target_height = 380.0
         province_cell_height = max(
-            18.0,
-            min(22.5, (province_table_target_height - province_header_height) / province_rows),
+            13.5,
+            min(21.0, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9562,8 +9561,8 @@ def _target_region_map(
         )
         # 지도/표 모두 바깥 경계선이 SVG 끝에 닿지 않도록 사방에 안전 여백을 둡니다.
         # 표의 오른쪽/상하 테두리와 지도의 외곽이 잘리는 현상을 동시에 방지합니다.
-        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.025, 0.975])
-        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.025, 0.975])
+        fig.data[-1].domain = dict(x=[0.625, 0.96], y=[0.018, 0.982])
+        fig.layout.geo.domain = dict(x=[0.012, 0.605], y=[0.018, 0.982])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9838,8 +9837,8 @@ def render_weekly_material_response_analysis(
                 province_summary=province_stats,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
-            # 430px 안에서 지도/시도표의 외곽선이 상하좌우에 닿아 잘리지 않도록 안전 여백 확보
-            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=10, b=8))
+            # 430px 안에서 지도/시도표가 끝까지 보이면서 외곽선도 잘리지 않도록 여백을 최소화합니다.
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
             st.plotly_chart(
                 region_fig,
                 use_container_width=True,
@@ -9869,7 +9868,8 @@ def render_weekly_material_response_analysis(
                 key=f"{key_prefix}_weekly_region_top5",
                 use_container_width=True,
                 hide_index=True,
-                height=185,
+                height=178,
+                row_height=24,
             )
             st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
             weekly_low5 = _target_rank_table(region_stats, top=False, n=5)
@@ -9878,7 +9878,8 @@ def render_weekly_material_response_analysis(
                 key=f"{key_prefix}_weekly_region_low5",
                 use_container_width=True,
                 hide_index=True,
-                height=185,
+                height=178,
+                row_height=24,
             )
             st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
