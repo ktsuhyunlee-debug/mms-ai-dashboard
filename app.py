@@ -9522,14 +9522,14 @@ def _target_region_map(
         province_view["시도표시"] = province_view["시도"].astype(str)
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
-        # 주간 지도 높이(430px) 안에서 시도 표 전체가 한 번에 보이도록 유지하면서
-        # 글씨는 12.3으로 키우고, 위/아래 여백이 비슷하게 보이도록 표 높이를 미세 조정합니다.
+        # 주간 지도 높이(430px)의 실제 플롯 영역 안에서 표가 스크롤 없이 한 번에 보이도록
+        # 헤더/행 간격을 조금 촘촘하게 잡고, 표의 마지막 행이 지도 하단 끝선과 맞도록 계산합니다.
         province_rows = max(len(province_view), 1)
-        province_header_height = 31
-        province_table_target_height = 408
+        province_header_height = 28
+        province_table_target_height = 419.0
         province_cell_height = max(
-            20,
-            min(24, int((province_table_target_height - province_header_height) / province_rows)),
+            19.5,
+            min(24.5, (province_table_target_height - province_header_height) / province_rows),
         )
 
         fig.add_trace(
@@ -9559,8 +9559,9 @@ def _target_region_map(
             row=1, col=2,
         )
         # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
-        # 표를 조금 더 넓히고, 위/아래 여백이 균형 있게 보이도록 살짝 안쪽에 배치합니다.
-        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.02, 0.98])
+        # 가로 위치는 유지하고, 세로 domain을 지도와 동일한 전체 영역으로 사용해
+        # 표 상단/하단 끝선이 지도 플롯 끝선과 맞도록 합니다.
+        fig.data[-1].domain = dict(x=[0.615, 0.965], y=[0.0, 1.0])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
