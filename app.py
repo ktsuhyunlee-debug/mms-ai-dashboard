@@ -9412,9 +9412,9 @@ def _target_region_aggregate(region_df: pd.DataFrame, overall_uctr: float, min_s
 def _target_province_response_summary(region_df: pd.DataFrame) -> pd.DataFrame:
     """선택 기간의 시도별 CTR(Uniq)과 클릭수(Uniq) 비중을 계산합니다.
 
-    CTR(Uniq) 비중은 각 시도의 클릭수(Uniq)가 전체 클릭수(Uniq)에서 차지하는 비중입니다.
+    클릭수(Uniq) 비중은 각 시도의 클릭수(Uniq)가 전체 클릭수(Uniq)에서 차지하는 비중입니다.
     """
-    columns = ["시도", "성공건수", "클릭수_Uniq", "CTR(Uniq)", "CTR(Uniq) 비중"]
+    columns = ["시도", "성공건수", "클릭수_Uniq", "CTR(Uniq)", "클릭수(Uniq) 비중"]
     if region_df is None or region_df.empty:
         return pd.DataFrame(columns=columns)
 
@@ -9439,11 +9439,11 @@ def _target_province_response_summary(region_df: pd.DataFrame) -> pd.DataFrame:
         grouped["성공건수"].replace(0, pd.NA)
     ).fillna(0)
     total_clicks = float(grouped["클릭수_Uniq"].sum())
-    grouped["CTR(Uniq) 비중"] = (
+    grouped["클릭수(Uniq) 비중"] = (
         grouped["클릭수_Uniq"] / total_clicks if total_clicks > 0 else 0.0
     )
     return grouped.sort_values(
-        ["CTR(Uniq)", "CTR(Uniq) 비중", "시도"],
+        ["CTR(Uniq)", "클릭수(Uniq) 비중", "시도"],
         ascending=[False, False, True],
     ).reset_index(drop=True)[columns]
 
@@ -9460,8 +9460,8 @@ def _target_region_map(
         fig = make_subplots(
             rows=1, cols=2,
             specs=[[{"type": "geo"}, {"type": "table"}]],
-            column_widths=[0.68, 0.32],
-            horizontal_spacing=0.025,
+            column_widths=[0.62, 0.38],
+            horizontal_spacing=0.015,
         )
     else:
         fig = go.Figure()
@@ -9516,15 +9516,16 @@ def _target_region_map(
 
     if show_province_table:
         province_view = province_summary.copy().reset_index(drop=True)
-        province_view["시도표시"] = [f"{i+1}. {name}" for i, name in enumerate(province_view["시도"].astype(str))]
+        # 순위 번호 없이 시도명만 표시
+        province_view["시도표시"] = province_view["시도"].astype(str)
         province_view["CTR표시"] = province_view["CTR(Uniq)"].map(lambda x: f"{float(x)*100:.1f}%")
-        province_view["비중표시"] = province_view["CTR(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
+        province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
         fig.add_trace(
             go.Table(
-                columnwidth=[1.25, 1.0, 1.15],
+                columnwidth=[1.05, 1.15, 1.70],
                 header=dict(
-                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>CTR(Uniq)<br>비중</b>"],
-                    align=["left", "center", "center"],
+                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq) 비중</b>"],
+                    align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
                     font=dict(color="#000000", size=10),
@@ -9536,7 +9537,7 @@ def _target_region_map(
                         province_view["CTR표시"],
                         province_view["비중표시"],
                     ],
-                    align=["left", "center", "center"],
+                    align=["center", "center", "center"],
                     fill_color="#ffffff",
                     line_color="#edf0f4",
                     font=dict(color="#000000", size=10),
@@ -9814,10 +9815,15 @@ def render_weekly_material_response_analysis(
             st.plotly_chart(
                 region_fig,
                 use_container_width=True,
-                config={"displayModeBar": False},
+                config={
+                    "displayModeBar": True,
+                    "scrollZoom": True,
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                },
                 key=f"{key_prefix}_weekly_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 시도 비중=주간 전체 클릭수(Uniq) 중 비중")
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 마우스 휠로 지도 확대/축소 · 클릭수(Uniq) 비중=주간 전체 클릭수(Uniq) 중 비중")
 
     with region_rank_col:
         st.markdown("**지역 TOP5 · LOW5**")
