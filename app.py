@@ -9460,8 +9460,10 @@ def _target_region_map(
         fig = make_subplots(
             rows=1, cols=2,
             specs=[[{"type": "geo"}, {"type": "table"}]],
-            column_widths=[0.62, 0.38],
-            horizontal_spacing=0.015,
+            # 우측 표가 차트 오른쪽 경계에 붙어 테두리가 잘리지 않도록
+            # 지도/표 영역을 약간 여유 있게 배분합니다.
+            column_widths=[0.64, 0.34],
+            horizontal_spacing=0.02,
         )
     else:
         fig = go.Figure()
@@ -9522,9 +9524,9 @@ def _target_region_map(
         province_view["비중표시"] = province_view["클릭수(Uniq) 비중"].map(lambda x: f"{float(x)*100:.1f}%")
         fig.add_trace(
             go.Table(
-                columnwidth=[1.05, 1.15, 1.70],
+                columnwidth=[1.00, 1.10, 1.62],
                 header=dict(
-                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq) 비중</b>"],
+                    values=["<b>시도</b>", "<b>CTR(Uniq)</b>", "<b>클릭수(Uniq)&nbsp;비중</b>"],
                     align=["center", "center", "center"],
                     fill_color="#f5f8fc",
                     line_color="#e4e8ef",
@@ -9546,6 +9548,9 @@ def _target_region_map(
             ),
             row=1, col=2,
         )
+        # make_subplots가 Table domain을 다시 지정하므로 add_trace 이후에
+        # 우측 끝을 안쪽으로 넣어 테두리 잘림을 방지하고 지도와 같은 높이로 맞춥니다.
+        fig.data[-1].domain = dict(x=[0.66, 0.975], y=[0.0, 1.0])
 
     avg_pct = float(overall_uctr or 0) * 100
     if show_province_table:
@@ -9572,8 +9577,11 @@ def _target_region_map(
 
     fig.update_layout(
         height=560,
-        margin=dict(l=0, r=0, t=10, b=0),
+        margin=dict(l=0, r=14 if show_province_table else 0, t=10, b=0),
         paper_bgcolor="#ffffff",
+        # 지도 위 휠 스크롤로 확대/축소, 드래그는 이동용
+        dragmode="pan",
+        uirevision="weekly_region_geo",
         legend=dict(
             orientation="h", x=0.02, y=0.02,
             title=f"전체 평균 {avg_pct:.1f}% · ±0.5%p 기준",
@@ -9816,14 +9824,16 @@ def render_weekly_material_response_analysis(
                 region_fig,
                 use_container_width=True,
                 config={
-                    "displayModeBar": True,
+                    # 지도 위에 마우스를 둔 채 휠 스크롤하면 확대/축소
                     "scrollZoom": True,
+                    "displayModeBar": False,
                     "displaylogo": False,
-                    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                    "responsive": True,
+                    "doubleClick": "reset",
                 },
                 key=f"{key_prefix}_weekly_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 마우스 휠로 지도 확대/축소 · 클릭수(Uniq) 비중=주간 전체 클릭수(Uniq) 중 비중")
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 클릭수(Uniq) 비중=주간 전체 클릭수(Uniq) 중 비중")
 
     with region_rank_col:
         st.markdown("**지역 TOP5 · LOW5**")
