@@ -3238,7 +3238,7 @@ def _weekly_black_plotly_text(fig: go.Figure) -> go.Figure:
 def _category_top_product_hover(
     pw: pd.DataFrame | None,
     category_col: str | None,
-    top_n: int = 3,
+    top_n: int = 5,
 ) -> dict[str, str]:
     """카테고리별 주문금액 상위 상품을 hover용 문자열로 생성합니다."""
     if (
@@ -3297,7 +3297,7 @@ def category_pie_chart(
     pw: pd.DataFrame | None = None,
     category_col: str | None = None,
 ) -> go.Figure:
-    """주문비중 큰 순서부터 시계방향으로 표시하고 카테고리별 TOP3 상품을 hover에 노출합니다."""
+    """주문비중 큰 순서부터 시계방향으로 표시하고 카테고리별 TOP5 상품을 hover에 노출합니다."""
     data = table[table["행 레이블"] != "총합계"].copy()
     data = data.sort_values(
         ["주문비중", "주문금액"],
@@ -3306,14 +3306,14 @@ def category_pie_chart(
 
     # 음수 주문금액은 파이에서 표현할 수 없어 0으로 처리하되 표에는 원값 유지
     values = pd.to_numeric(data["주문금액"], errors="coerce").fillna(0).clip(lower=0)
-    hover_map = _category_top_product_hover(pw, category_col, top_n=3)
-    hover_top3 = data["행 레이블"].astype(str).map(hover_map).fillna("-")
+    hover_map = _category_top_product_hover(pw, category_col, top_n=5)
+    hover_top5 = data["행 레이블"].astype(str).map(hover_map).fillna("-")
 
     fig = go.Figure(
         go.Pie(
             labels=data["행 레이블"],
             values=values,
-            customdata=hover_top3,
+            customdata=hover_top5,
             sort=False,
             direction="clockwise",
             rotation=0,
@@ -3323,7 +3323,7 @@ def category_pie_chart(
                 "<b>%{label}</b><br>"
                 "주문금액 %{value:,.0f}원<br>"
                 "비중 %{percent}<br><br>"
-                "<b>TOP 상품</b><br>%{customdata}"
+                "<b>TOP5 상품</b><br>%{customdata}"
                 "<extra></extra>"
             ),
         )
