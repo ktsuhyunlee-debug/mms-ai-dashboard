@@ -9582,6 +9582,7 @@ def _target_region_map(
     *,
     show_labels: bool = True,
     province_summary: pd.DataFrame | None = None,
+    show_overall_delta: bool = True,
 ) -> go.Figure:
     show_province_table = province_summary is not None and isinstance(province_summary, pd.DataFrame) and not province_summary.empty
     if show_province_table:
@@ -9628,8 +9629,9 @@ def _target_region_map(
                 "%{customdata[0]}<br>"
                 "성공건수 %{customdata[1]:,.0f}<br>"
                 "클릭수(Uniq) %{customdata[2]:,.0f}<br>"
-                "CTR(Uniq) %{customdata[3]:.1f}%<br>"
-                "전체 대비 %{customdata[4]:+.1f}%p<extra></extra>"
+                "CTR(Uniq) %{customdata[3]:.1f}%"
+                + ("<br>전체 대비 %{customdata[4]:+.1f}%p" if show_overall_delta else "")
+                + "<extra></extra>"
             ),
         )
         if show_labels:
@@ -9886,6 +9888,7 @@ def render_daily_material_response_analysis(
                 summary["uctr"],
                 show_labels=False,
                 province_summary=province_stats,
+                show_overall_delta=False,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
             region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
@@ -9981,6 +9984,7 @@ def render_weekly_material_response_analysis(
                 summary["uctr"],
                 show_labels=False,
                 province_summary=province_stats,
+                show_overall_delta=False,
             )
             region_fig = _weekly_black_plotly_text(region_fig)
             # 430px 안에서 지도/시도표가 끝까지 보이면서 외곽선도 잘리지 않도록 여백을 최소화합니다.
