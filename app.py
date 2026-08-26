@@ -9851,6 +9851,7 @@ def render_daily_material_response_analysis(
     region_selected = bundle["region_selected"]
     age_stats = bundle["age_stats"]
     region_stats = bundle["region_stats"]
+    province_stats = _target_province_response_summary(region_selected)
 
     st.markdown('<div class="subsection-title">성별·연령별 반응 분포</div>', unsafe_allow_html=True)
     if age_stats.empty:
@@ -9880,27 +9881,42 @@ def render_daily_material_response_analysis(
     else:
         map_col, rank_col = st.columns([1.3, 1.0], gap="medium")
         with map_col:
-            region_fig = _target_region_map(region_stats, summary["uctr"])
-            region_fig.update_layout(height=430, margin=dict(l=0, r=0, t=8, b=0))
+            region_fig = _target_region_map(
+                region_stats,
+                summary["uctr"],
+                show_labels=False,
+                province_summary=province_stats,
+            )
+            region_fig = _weekly_black_plotly_text(region_fig)
+            region_fig.update_layout(height=430, margin=dict(l=6, r=12, t=8, b=6))
             st.plotly_chart(
-                region_fig, use_container_width=True, config={"displayModeBar": False},
+                region_fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displayModeBar": False,
+                    "displaylogo": False,
+                    "responsive": True,
+                    "doubleClick": "reset",
+                },
                 key=f"{key_prefix}_region_map",
             )
-            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명 표시 · 전체 대비 ±0.5%p 기준")
+            st.caption("높음=빨강 / 보통=분홍 / 낮음=파랑 · 지역명은 마우스 오버 시 표시 · 지도 위에서 마우스 휠로 확대/축소 · 시도표는 CTR(Uniq) 높은 순")
         with rank_col:
+            st.markdown("**지역 TOP5 · LOW5**")
             st.markdown('<div class="daily-response-rank-title top">TOP5</div>', unsafe_allow_html=True)
             top5 = _target_rank_table(region_stats, top=True, n=5)
             selectable_dataframe(
                 top5, key=f"{key_prefix}_region_top5", use_container_width=True,
-                hide_index=True, height=185,
+                hide_index=True, height=168, row_height=26,
             )
             st.markdown('<div class="daily-response-rank-title low">LOW5</div>', unsafe_allow_html=True)
             low5 = _target_rank_table(region_stats, top=False, n=5)
             selectable_dataframe(
                 low5, key=f"{key_prefix}_region_low5", use_container_width=True,
-                hide_index=True, height=185,
+                hide_index=True, height=168, row_height=26,
             )
-        st.caption("지역 순위·지도는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
+            st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
 def render_weekly_material_response_analysis(
