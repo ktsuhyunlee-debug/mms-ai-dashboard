@@ -3274,15 +3274,13 @@ def _category_top_product_hover(
         top = group.head(max(int(top_n), 1))
         lines = []
         for rank, (_, row) in enumerate(top.iterrows(), start=1):
-            # 좌우 콜아웃 폭을 줄이기 위해 표시용 상품명만 축약하고 11자 단위로 줄바꿈
-            compact_name = _weekly_short_display_name(str(row["상품명"]), max_len=22)
-            name_parts = [compact_name[i:i + 11] for i in range(0, len(compact_name), 11)] or ["상품명 없음"]
-            indent = "&nbsp;&nbsp;&nbsp;"
-            product_name = ("<br>" + indent).join(_html.escape(part) for part in name_parts)
+            # hover 박스가 과도하게 넓어지지 않도록 표시용 상품명만 축약
+            compact_name = _weekly_short_display_name(str(row["상품명"]), max_len=24)
+            product_name = _html.escape(compact_name)
             send_count = int(row["발송횟수"])
             amount = float(row["주문금액"])
             lines.append(
-                f"{rank}. {product_name}<br>{indent}{send_count}회 · {amount:,.0f}원"
+                f"{rank}. {product_name} · {send_count}회 · {amount:,.0f}원"
             )
         hover_map[str(category)] = "<br>".join(lines)
     return hover_map
@@ -3294,7 +3292,7 @@ def category_pie_chart(
     pw: pd.DataFrame | None = None,
     category_col: str | None = None,
 ) -> go.Figure:
-    '''주문비중 큰 순서부터 시계방향으로 표시하고 TOP3 상품은 좌우 콜아웃으로 노출합니다.'''
+    """주문비중 큰 순서부터 시계방향으로 표시하고 카테고리별 TOP3 상품을 hover에 노출합니다."""
     data = table[table["행 레이블"] != "총합계"].copy()
     data = data.sort_values(
         ["주문비중", "주문금액"],
@@ -3316,126 +3314,24 @@ def category_pie_chart(
             rotation=0,
             textinfo="label+percent",
             textposition="inside",
-            # 기본 hover 박스는 숨기고, 아래 커스텀 콜아웃이 hover 이벤트를 사용합니다.
-            hoverinfo="none",
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "주문금액 %{value:,.0f}원<br>"
+                "비중 %{percent}<br><br>"
+                "<b>TOP 상품</b><br>%{customdata}"
+                "<extra></extra>"
+            ),
         )
     )
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center"),
         height=560,
-        # 좌우 콜아웃이 차트 바깥쪽으로 빠질 공간 확보
-        margin=dict(l=95, r=95, t=70, b=40),
+        margin=dict(l=40, r=40, t=70, b=40),
         uniformtext_minsize=8,
         uniformtext_mode="show",
     )
     return fig
 
-
-def render_category_pie_callout(fig: go.Figure, height: int = 560) -> None:
-    '''파이 hover 정보를 조각 좌/우 바깥쪽 화살표 콜아웃으로 표시합니다.
-
-    Plotly 기본 hover는 위치를 좌우로 강제할 수 없어, 카테고리 파이 3개에 한해
-    plotly_hover 이벤트로 annotation을 생성합니다. 조각이 오른쪽이면 오른쪽,
-    왼쪽이면 왼쪽으로 TOP3 박스를 띄우고 해당 조각을 화살표로 연결합니다.
-    '''
-    fig_json = fig.to_json().replace("</", "<" + chr(92) + "/")
-    html_doc = f'''<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<style>
-html, body {{ margin:0; padding:0; width:100%; height:100%; background:transparent; }}
-.chart-shell {{
-    width:100%; height:{int(height)}px; box-sizing:border-box;
-    background:#ffffff; border:1px solid #e4e8ef; border-radius:14px;
-    padding:8px; box-shadow:0 3px 12px rgba(25,42,70,.04); overflow:hidden;
-}}
-#category-pie {{ width:100%; height:100%; }}
-</style>
-</head>
-<body>
-<div class="chart-shell"><div id="category-pie"></div></div>
-<script>
-(function() {{
-    const fig = {fig_json};
-    const gd = document.getElementById('category-pie');
-    const config = {{displayModeBar:false, responsive:true}};
-
-    function esc(value) {{
-        return String(value ?? '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }}
-
-    function comma(value) {{
-        const n = Number(value) || 0;
-        return Math.round(n).toLocaleString('ko-KR');
-    }}
-
-    Plotly.newPlot(gd, fig.data, fig.layout, config).then(function() {{
-        gd.on('plotly_hover', function(ev) {{
-            if (!ev || !ev.points || !ev.points.length) return;
-            const pt = ev.points[0];
-            const trace = pt.data || {{}};
-            const values = (trace.values || []).map(v => Math.max(0, Number(v) || 0));
-            const total = values.reduce((a,b) => a+b, 0);
-            const idx = Number(pt.pointNumber) || 0;
-            const value = values[idx] || 0;
-
-            // rotation=0, direction=clockwise 기준: 12시 방향에서 시계방향으로 조각 중심 계산
-            let before = 0;
-            for (let i=0; i<idx; i++) before += values[i] || 0;
-            const mid = total > 0 ? ((before + value/2) / total) * Math.PI * 2 : 0;
-            const xDir = Math.sin(mid);
-            const yDir = Math.cos(mid);
-            const side = xDir >= 0 ? 1 : -1;
-
-            // 파이 조각 바깥쪽 가장자리 부근을 화살표 기준점으로 사용
-            const anchorX = 0.5 + 0.23 * xDir;
-            const anchorY = 0.5 + 0.23 * yDir;
-            const pct = total > 0 ? (value / total * 100) : 0;
-            const top3 = (pt.customdata === undefined || pt.customdata === null) ? '-' : String(pt.customdata);
-            const label = esc(pt.label);
-
-            const text =
-                '<b>' + label + '</b><br>' +
-                '주문금액 ' + comma(value) + '원<br>' +
-                '비중 ' + pct.toFixed(1) + '%<br><br>' +
-                '<b>TOP 상품</b><br>' + top3;
-
-            const ann = {{
-                xref:'paper', yref:'paper', x:anchorX, y:anchorY,
-                text:text, showarrow:true,
-                arrowhead:2, arrowsize:1, arrowwidth:1.2, arrowcolor:'#64748b',
-                ax:side * 24, ay:0,
-                xanchor:side > 0 ? 'left' : 'right',
-                yanchor:'middle', align:'left',
-                bgcolor:'rgba(255,255,255,0.98)',
-                bordercolor:'#cbd5e1', borderwidth:1, borderpad:6,
-                font:{{size:11, color:'#111827'}},
-                opacity:1
-            }};
-            Plotly.relayout(gd, {{annotations:[ann]}});
-        }});
-
-        gd.on('plotly_unhover', function() {{
-            Plotly.relayout(gd, {{annotations:[]}});
-        }});
-
-        if (window.ResizeObserver) {{
-            const ro = new ResizeObserver(function() {{ Plotly.Plots.resize(gd); }});
-            ro.observe(gd.parentElement);
-        }}
-    }});
-}})();
-</script>
-</body>
-</html>'''
-    components.html(html_doc, height=int(height), scrolling=False)
 
 def clean_identifier_value(x):
     if pd.isna(x) or str(x).strip() in ["", "nan", "None"]:
@@ -11812,13 +11708,15 @@ elif menu == "주간실적":
         if big_table.empty:
             st.info("대카테고리 데이터가 없습니다.")
         else:
-            render_category_pie_callout(
+            st.plotly_chart(
                 category_pie_chart(
                     big_table,
                     "대카테고리 주문비중",
                     pw=pw,
                     category_col=first_col(pw, ["대카", "대카테고리", "대분류"]),
-                )
+                ),
+                use_container_width=True,
+                config={"displayModeBar": False},
             )
             _weekly_table_title("대카테고리 편성 및 주문 비중")
             _big_table_display = clean_identifier_columns(weekly_display_format(big_table))
@@ -11836,13 +11734,15 @@ elif menu == "주간실적":
         if mid_table.empty:
             st.info("중카테고리 데이터가 없습니다.")
         else:
-            render_category_pie_callout(
+            st.plotly_chart(
                 category_pie_chart(
                     mid_table,
                     "중카테고리 주문비중",
                     pw=pw,
                     category_col=first_col(pw, ["중카", "중카테고리", "중분류"]),
-                )
+                ),
+                use_container_width=True,
+                config={"displayModeBar": False},
             )
             _weekly_table_title("중카테고리 편성 및 주문 비중")
             _mid_table_display = clean_identifier_columns(weekly_display_format(mid_table))
@@ -11860,13 +11760,15 @@ elif menu == "주간실적":
         if small_table.empty:
             st.info("소카테고리 데이터가 없습니다.")
         else:
-            render_category_pie_callout(
+            st.plotly_chart(
                 category_pie_chart(
                     small_table,
                     "소카테고리 주문비중",
                     pw=pw,
                     category_col=first_col(pw, ["소카", "소카테고리", "소분류", "세부카테고리"]),
-                )
+                ),
+                use_container_width=True,
+                config={"displayModeBar": False},
             )
             _weekly_table_title("소카테고리 편성 및 주문 비중")
             _small_table_display = clean_identifier_columns(weekly_display_format(small_table))
