@@ -3274,13 +3274,18 @@ def _category_top_product_hover(
         top = group.head(max(int(top_n), 1))
         lines = []
         for rank, (_, row) in enumerate(top.iterrows(), start=1):
-            # hover 박스가 과도하게 넓어지지 않도록 표시용 상품명만 축약
-            compact_name = _weekly_short_display_name(str(row["상품명"]), max_len=24)
-            product_name = _html.escape(compact_name)
+            # native Plotly hover가 파이 옆에 붙기 쉽도록 표시 폭만 줄입니다.
+            compact_name = _weekly_short_display_name(str(row["상품명"]), max_len=20)
+            # 상품명은 10자 단위로 최대 2줄까지만 노출
+            first_line = compact_name[:10]
+            second_line = compact_name[10:20]
+            product_name = _html.escape(first_line)
+            if second_line:
+                product_name += "<br>&nbsp;&nbsp;&nbsp;" + _html.escape(second_line)
             send_count = int(row["발송횟수"])
             amount = float(row["주문금액"])
             lines.append(
-                f"{rank}. {product_name} · {send_count}회 · {amount:,.0f}원"
+                f"{rank}. {product_name}<br>&nbsp;&nbsp;&nbsp;{send_count}회 · {amount:,.0f}원"
             )
         hover_map[str(category)] = "<br>".join(lines)
     return hover_map
@@ -3326,7 +3331,15 @@ def category_pie_chart(
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center"),
         height=560,
-        margin=dict(l=40, r=40, t=70, b=40),
+        # hover 박스가 파이 정중앙을 덮지 않고 좌/우 바깥쪽에 붙을 여유 확보
+        margin=dict(l=70, r=70, t=70, b=40),
+        hovermode="closest",
+        hoverlabel=dict(
+            align="left",
+            bgcolor="rgba(255,255,255,0.98)",
+            bordercolor="#cbd5e1",
+            font=dict(size=11, color="#111827"),
+        ),
         uniformtext_minsize=8,
         uniformtext_mode="show",
     )
