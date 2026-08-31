@@ -12935,6 +12935,14 @@ elif menu == "SEG 개선효과":
     else:
         _seg_min = _seg_dates.min().date()
         _seg_max = _seg_dates.max().date()
+
+        # SEG 개선효과 달력은 실제 데이터 범위와 별개로 2026년 전체를 항상 선택 가능하게 합니다.
+        # 데이터가 2025년 또는 다른 연도까지 이어져 있으면 해당 연도도 함께 유지합니다.
+        _seg_calendar_year_min = min(_seg_min.year, 2026, datetime.now().year)
+        _seg_calendar_year_max = max(_seg_max.year, 2026, datetime.now().year)
+        _seg_calendar_min = datetime(_seg_calendar_year_min, 1, 1).date()
+        _seg_calendar_max = datetime(_seg_calendar_year_max, 12, 31).date()
+
         _seg_min_ts, _seg_max_ts = pd.Timestamp(_seg_min), pd.Timestamp(_seg_max)
         _preferred_cut = pd.Timestamp("2026-07-08")
         if not (_seg_min_ts < _preferred_cut <= _seg_max_ts):
@@ -12954,14 +12962,14 @@ elif menu == "SEG 개선효과":
             asis_range = st.date_input(
                 "AS-IS · SEG V1",
                 [_asis_default_start.date(), _asis_default_end.date()],
-                min_value=_seg_min, max_value=_seg_max,
+                min_value=_seg_calendar_min, max_value=_seg_calendar_max,
                 key="seg_effect_asis_range",
             )
         with f2:
             tobe_range = st.date_input(
                 "TO-BE · SEG V2",
                 [_tobe_default_start.date(), _tobe_default_end.date()],
-                min_value=_seg_min, max_value=_seg_max,
+                min_value=_seg_calendar_min, max_value=_seg_calendar_max,
                 key="seg_effect_tobe_range",
             )
 
