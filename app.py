@@ -10936,15 +10936,15 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
       .segv-compare th, .segv-compare td {{ padding:5px 5px; height:30px; text-align:center; border-right:1px solid #e7eaf0; border-bottom:1px solid #e7eaf0; white-space:nowrap; line-height:1.15; }}
       .segv-compare thead th {{ font-weight:900; padding-top:6px; padding-bottom:6px; }}
       .segv-compare .segv-fixed-head {{ background:#f8fafc; color:#334155; width:72px; }}
-      .segv-compare .segv-asis-head {{ background:#5f6672; color:#fff; font-size:14px; letter-spacing:.1px; }}
-      .segv-compare .segv-tobe-head {{ background:#5b3fd4; color:#fff; font-size:14px; letter-spacing:.1px; border-left:3px solid #4431a8; }}
-      .segv-compare .segv-delta-head {{ background:#1f3a5f; color:#fff; font-size:14px; letter-spacing:.1px; border-left:3px solid #142941; }}
+      .segv-compare .segv-asis-head {{ background:#5f6672; color:#fff; font-size:15px; letter-spacing:.1px; }}
+      .segv-compare .segv-tobe-head {{ background:#5b3fd4; color:#fff; font-size:15px; letter-spacing:.1px; border-left:3px solid #4431a8; }}
+      .segv-compare .segv-delta-head {{ background:#1f3a5f; color:#fff; font-size:15px; letter-spacing:.1px; border-left:3px solid #142941; }}
       .segv-compare .segv-asis-sub {{ background:#e9edf2; color:#27313f; font-weight:900; }}
       .segv-compare .segv-tobe-sub {{ background:#e9e4ff; color:#3826b5; font-weight:900; }}
       .segv-compare .segv-delta-sub {{ background:#e5edf6; color:#173556; font-weight:900; }}
       .segv-compare .segv-sub-start {{ border-left:3px solid #bcc4cf !important; }}
-      .segv-compare .segv-target {{ background:#f7f9fc; font-weight:900; width:78px; border-right:2px solid #d8dee8; color:#111827; font-size:14px; }}
-      .segv-compare .segv-seg {{ font-weight:900; background:#fff; width:54px; }}
+      .segv-compare .segv-target {{ background:#f7f9fc; font-weight:900; width:68px; border-right:2px solid #d8dee8; color:#111827; font-size:15px; }}
+      .segv-compare .segv-seg {{ font-weight:900; background:#fff; width:46px; }}
       .segv-compare .segv-asis-cell {{ background:#f4f6f8; font-weight:700; }}
       .segv-compare .segv-tobe-cell {{ background:#f4f1ff; font-weight:800; }}
       .segv-compare .segv-delta-cell {{ background:#fff; font-weight:900; }}
@@ -11127,20 +11127,21 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         fig.add_vline(x=start_ts, line_dash="dot", line_color="#5b3fd4", line_width=1.4)
 
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.02, xanchor="left", font=dict(size=15 if compact else 17, color="#111827")),
-        height=260 if compact else 390,
-        margin=dict(l=42 if compact else 50, r=8 if compact else 20, t=48 if compact else 70, b=70 if compact else 65),
+        title=(None if compact else dict(text=f"<b>{title}</b>", x=0.02, xanchor="left", font=dict(size=17, color="#111827"))),
+        height=248 if compact else 390,
+        margin=dict(l=46 if compact else 50, r=12 if compact else 20, t=24 if compact else 70, b=64 if compact else 65),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         hovermode="closest",
+        showlegend=not compact,
         legend=dict(orientation="h", y=1.08, x=0, font=dict(size=10), itemwidth=45),
-        xaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=10, color="#334155"), automargin=True),
-        yaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=10, color="#334155"), automargin=True),
-        font=dict(color="#111827", size=11),
+        xaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
+        yaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
+        font=dict(color="#111827", size=12),
     )
     if not combined.empty:
         fig.update_xaxes(
             tickmode="array", tickvals=combined["주차시작"], ticktext=combined["주차"],
-            tickangle=-45, tickfont=dict(size=10, color="#334155"), automargin=True,
+            tickangle=-45, tickfont=dict(size=11, color="#1f2937"), automargin=True,
         )
     return fig
 
@@ -11211,7 +11212,7 @@ def _segv_position_compare_chart(
             ay = float(a.get("SPM", 0) or 0)
             fig.add_trace(go.Scatter(
                 x=[ax], y=[ay], mode="markers",
-                marker=dict(size=10, symbol="circle-open", color=color, line=dict(width=2.2, color=color)),
+                marker=dict(size=13, symbol="circle-open", color=color, line=dict(width=2.6, color=color)),
                 name=f"SEG{seg} AS-IS", showlegend=False,
                 customdata=[[float(a.get("발송모수", 0) or 0), float(a.get("주문금액", 0) or 0)]],
                 hovertemplate=(
@@ -11225,8 +11226,8 @@ def _segv_position_compare_chart(
             fig.add_trace(go.Scatter(
                 x=[bx], y=[by], mode="markers+text",
                 text=[f"<b>SEG{seg}</b><br><b>{bx:.2f}% · {by:,.0f}원</b>"],
-                textposition=text_pos[seg], textfont=dict(size=11, color="#111827"),
-                marker=dict(size=12, symbol="circle", color=color, line=dict(width=1.5, color="#ffffff")),
+                textposition=text_pos[seg], textfont=dict(size=13, color="#111827"),
+                marker=dict(size=15, symbol="circle", color=color, line=dict(width=1.8, color="#ffffff")),
                 name=f"SEG{seg} TO-BE", showlegend=False,
                 customdata=[[float(b.get("발송모수", 0) or 0), float(b.get("주문금액", 0) or 0)]],
                 hovertemplate=(
@@ -11244,7 +11245,7 @@ def _segv_position_compare_chart(
                     x=bx, y=by, ax=ax, ay=ay,
                     xref="x", yref="y", axref="x", ayref="y",
                     text="", showarrow=True, arrowhead=2, arrowsize=1.0,
-                    arrowwidth=2.0, arrowcolor=color, opacity=0.85,
+                    arrowwidth=2.4, arrowcolor=color, opacity=0.9,
                 )
 
     # TO-BE 전체 평균 기준 우상단을 연하게 강조
@@ -11257,13 +11258,13 @@ def _segv_position_compare_chart(
     fig.add_vline(x=float(overall_ctr or 0) * 100, line_dash="dot", line_color="#7c8798", line_width=1.2)
     fig.add_hline(y=float(overall_spm or 0), line_dash="dot", line_color="#7c8798", line_width=1.2)
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center", font=dict(size=15, color="#111827")),
-        height=285, margin=dict(l=42, r=22, t=48, b=48),
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(color="#111827", size=11),
-        xaxis=dict(title=dict(text="CTR (%)", font=dict(size=12, color="#111827")), gridcolor="#edf0f4", range=x_range,
-                   tickfont=dict(size=11, color="#111827"), automargin=True),
-        yaxis=dict(title=dict(text="SPM (원)", font=dict(size=12, color="#111827")), gridcolor="#edf0f4", range=y_range,
-                   tickfont=dict(size=11, color="#111827"), automargin=True),
+        title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center", font=dict(size=17, color="#111827")),
+        height=300, margin=dict(l=50, r=30, t=52, b=50),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(color="#111827", size=12),
+        xaxis=dict(title=dict(text="<b>CTR (%)</b>", font=dict(size=13, color="#111827")), gridcolor="#e8ecf2", range=x_range,
+                   tickfont=dict(size=12, color="#111827"), automargin=True, zeroline=False),
+        yaxis=dict(title=dict(text="<b>SPM (원)</b>", font=dict(size=13, color="#111827")), gridcolor="#e8ecf2", range=y_range,
+                   tickfont=dict(size=12, color="#111827"), automargin=True, zeroline=False),
         hovermode="closest",
     )
     return fig
@@ -13024,18 +13025,22 @@ elif menu == "상품구분":
 elif menu == "SEG 개선효과":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG 개선효과 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">SEG 개선효과 분석</div>', unsafe_allow_html=True)
-    st.caption("선택한 분석 기간을 SEG V2 적용일 기준으로 AS-IS(V1) / TO-BE(V2)로 나눠 CTR·SPM·만건당 성과를 비교합니다.")
+    st.caption("선택 기간을 SEG V2 적용일 기준으로 AS-IS(V1) / TO-BE(V2)로 나눠 CTR·SPM·만건당 성과를 비교합니다.")
 
-    # SEG 메뉴 전용 compact 스타일: 정보량은 유지하되 여백을 줄이고 글자는 더 선명하게 표시
+    # SEG 메뉴 전용 compact 스타일: 화면 밀도는 높이고 숫자/구분은 더 선명하게 표시
     st.markdown("""
     <style>
-      .segv-kpi-card {background:#fff;border:1px solid #dfe4ec;border-radius:11px;padding:10px 12px;min-height:78px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
-      .segv-kpi-label {font-size:13px;color:#5b6472;font-weight:800;margin-bottom:5px}
-      .segv-kpi-flow {font-size:18px;color:#111827;font-weight:900;line-height:1.25;white-space:nowrap}
+      .segv-kpi-card {background:#fff;border:1px solid #dfe4ec;border-radius:11px;padding:10px 12px;min-height:76px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+      .segv-kpi-label {font-size:13px;color:#5b6472;font-weight:850;margin-bottom:4px}
+      .segv-kpi-flow {font-size:19px;color:#111827;font-weight:900;line-height:1.22;white-space:nowrap}
       .segv-kpi-flow .asis {color:#59616d}.segv-kpi-flow .arrow {color:#9aa2ae;padding:0 4px}.segv-kpi-flow .tobe {color:#5b3fd4}
-      .segv-kpi-delta {font-size:13px;font-weight:900;margin-top:5px}.segv-kpi-delta.up{color:#d11f1f}.segv-kpi-delta.down{color:#1e5dcc}.segv-kpi-delta.flat{color:#111827}
-      .segv-mini-summary {text-align:center;margin:-6px 0 2px;font-size:13px;line-height:1.35;color:#334155;font-weight:700}
-      .segv-mini-summary b {color:#111827}
+      .segv-kpi-delta {font-size:13px;font-weight:900;margin-top:4px}.segv-kpi-delta.up{color:#d11f1f}.segv-kpi-delta.down{color:#1e5dcc}.segv-kpi-delta.flat{color:#111827}
+      .segv-section-note {font-size:12px;color:#64748b;font-weight:750;margin-left:7px;letter-spacing:-.1px}
+      .segv-trend-summary {display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:7px 10px 5px;margin:0 0 4px;border:1px solid #e2e6ed;border-radius:9px;background:#fff;box-shadow:0 1px 5px rgba(25,42,70,.025)}
+      .segv-trend-name {font-size:15px;font-weight:900;color:#111827;white-space:nowrap}
+      .segv-trend-values {font-size:14px;font-weight:850;text-align:right;white-space:nowrap}
+      .segv-trend-values .asis {color:#59616d}.segv-trend-values .arrow {color:#9aa2ae;padding:0 4px}.segv-trend-values .tobe {color:#5b3fd4}.segv-trend-values .up {color:#d11f1f;margin-left:7px}.segv-trend-values .down {color:#1e5dcc;margin-left:7px}.segv-trend-values .flat {color:#111827;margin-left:7px}
+      .segv-period-note {font-size:12px;color:#64748b;font-weight:700;margin:-2px 0 7px}
     </style>
     """, unsafe_allow_html=True)
 
@@ -13051,315 +13056,64 @@ elif menu == "SEG 개선효과":
         seg_calendar_min = datetime(seg_calendar_year_min, 1, 1).date()
         seg_calendar_max = datetime(seg_calendar_year_max, 12, 31).date()
 
-        # 기본 V2 적용일: 2026-07-08, 데이터 범위에 없으면 데이터 중간일로 보정
-        preferred_cut = pd.Timestamp("2026-07-08")
-        seg_min_ts, seg_max_ts = pd.Timestamp(seg_data_min), pd.Timestamp(seg_data_max)
-        if not (seg_min_ts < preferred_cut <= seg_max_ts):
-            if seg_min_ts < seg_max_ts:
-                preferred_cut = (seg_min_ts + pd.Timedelta(days=max(1, (seg_max_ts - seg_min_ts).days // 2))).normalize()
-            else:
-                preferred_cut = seg_min_ts
-        default_controls = []
-
-        default_draft, default_applied = _home_analysis_default_state(seg_data_min, seg_data_max)
-        default_draft["cutover_date"] = preferred_cut.date()
-        default_applied["cutover_date"] = preferred_cut.date()
-        default_draft["controls"] = list(default_controls)
-        default_applied["controls"] = list(default_controls)
-
-        if "seg_effect_analysis_draft" not in st.session_state:
-            st.session_state.seg_effect_analysis_draft = default_draft
-        if "seg_effect_analysis_applied" not in st.session_state:
-            st.session_state.seg_effect_analysis_applied = default_applied
-
-        draft = st.session_state.seg_effect_analysis_draft
-        applied = st.session_state.seg_effect_analysis_applied
-
-        def _seg_clamp_date(value, fallback):
-            parsed = pd.to_datetime(value, errors="coerce")
-            if pd.isna(parsed):
-                return fallback
-            parsed_date = parsed.date()
-            return min(max(parsed_date, seg_calendar_min), seg_calendar_max)
-
-        draft["base_start"] = _seg_clamp_date(draft.get("base_start"), seg_data_min)
-        draft["base_end"] = _seg_clamp_date(draft.get("base_end"), seg_data_max)
-        applied["base_start"] = _seg_clamp_date(applied.get("base_start"), seg_data_min)
-        applied["base_end"] = _seg_clamp_date(applied.get("base_end"), seg_data_max)
-        draft["cutover_date"] = _seg_clamp_date(draft.get("cutover_date"), preferred_cut.date())
-        applied["cutover_date"] = _seg_clamp_date(applied.get("cutover_date"), preferred_cut.date())
-
-        for state in (draft, applied):
-            state.setdefault("include_ranges", [{"id": 1, "start": seg_data_min, "end": seg_data_max}])
-            state.setdefault("exclude_ranges", [{
-                "id": 1, "start": seg_data_min, "end": seg_data_min,
-                "reason_type": "사유 없음", "reason_detail": "", "reason": "",
-            }])
-            state.setdefault("controls", list(default_controls))
-            state.setdefault("next_include_id", 2)
-            state.setdefault("next_exclude_id", 2)
-            for item in state["include_ranges"]:
-                item["start"] = _seg_clamp_date(item.get("start"), seg_data_min)
-                item["end"] = _seg_clamp_date(item.get("end"), seg_data_max)
-            for item in state["exclude_ranges"]:
-                item["start"] = _seg_clamp_date(item.get("start"), seg_data_min)
-                item["end"] = _seg_clamp_date(item.get("end"), seg_data_min)
-                existing_reason = str(item.get("reason", "") or "").strip()
-                existing_type = str(item.get("reason_type", "") or "").strip()
-                known_reasons = {"사유 없음", "보답프로그램", "기획전", "AI TEST", "시즌 제외", "데이터 이상", "기타"}
-                if existing_type not in known_reasons:
-                    if existing_reason in known_reasons - {"사유 없음", "기타"}:
-                        existing_type = existing_reason
-                    elif existing_reason:
-                        existing_type = "기타"
-                    else:
-                        existing_type = "사유 없음"
-                item["reason_type"] = existing_type
-                item.setdefault("reason_detail", existing_reason if existing_type == "기타" else "")
-                item["reason"] = item.get("reason_detail", "").strip() if existing_type == "기타" else ("" if existing_type == "사유 없음" else existing_type)
-
-        st.markdown('<div class="section-title">📊 분석 조건 설정</div>', unsafe_allow_html=True)
-        notice = st.session_state.pop("seg_effect_analysis_notice", None)
-        if notice:
-            st.success(notice)
-
-        applied_is_custom = (
-            applied.get("mode", "전체") != "전체"
-            or applied.get("base_start") != seg_data_min
-            or applied.get("base_end") != seg_data_max
-            or applied.get("cutover_date") != preferred_cut.date()
-            or bool(applied.get("controls"))
-        )
-        if applied_is_custom:
-            applied_parts = [str(applied.get("mode", "전체"))]
-            if applied.get("mode") in {"포함구간", "포함 + 제외"}:
-                applied_parts.append(f"포함 {len(applied.get('include_ranges', []))}개")
-            if applied.get("mode") in {"제외구간", "포함 + 제외"}:
-                applied_parts.append(f"제외 {len(applied.get('exclude_ranges', []))}개")
-            applied_parts.append(f"V2 {applied.get('cutover_date'):%Y-%m-%d}")
-            st.markdown(
-                "<div style='display:inline-block;padding:5px 10px;margin-bottom:8px;"
-                "border:1px solid #cfe0ff;border-radius:999px;background:#eef4ff;"
-                "font-size:0.86rem;color:#2f6fec;font-weight:700;'>"
-                f"📊 분석 조건 적용 중 · {' / '.join(applied_parts)}</div>",
-                unsafe_allow_html=True,
+        # 기간 + V2 적용일만 한 줄로 유지
+        period_col, cut_col = st.columns([2.1, 0.9], gap="small")
+        with period_col:
+            seg_period = st.date_input(
+                "기간 선택",
+                value=(seg_data_min, seg_data_max),
+                min_value=seg_calendar_min,
+                max_value=seg_calendar_max,
+                format="YYYY-MM-DD",
+                key="seg_effect_simple_period",
             )
 
-        analysis_modes = ["전체", "포함구간", "제외구간", "포함 + 제외"]
-        current_mode = draft.get("mode", "전체")
-        if current_mode not in analysis_modes:
-            current_mode = "전체"
-        draft["mode"] = st.radio(
-            "📌 분석 방식", analysis_modes, index=analysis_modes.index(current_mode),
-            horizontal=True, key="seg_effect_analysis_mode",
-        )
+        if isinstance(seg_period, (list, tuple)) and len(seg_period) == 2:
+            seg_start, seg_end = seg_period
+        else:
+            seg_start = seg_end = seg_period[0] if isinstance(seg_period, (list, tuple)) and seg_period else seg_data_max
+        if seg_start > seg_end:
+            seg_start, seg_end = seg_end, seg_start
 
-        st.markdown("**📅 기본 기간**")
-        base_col1, base_sep, base_col2 = st.columns([1, 0.08, 1])
-        with base_col1:
-            draft["base_start"] = st.date_input(
-                "기본 시작일", value=draft.get("base_start", seg_data_min),
-                min_value=seg_calendar_min, max_value=seg_calendar_max,
-                format="YYYY-MM-DD", key="seg_effect_analysis_base_start", label_visibility="collapsed",
+        preferred_cut = pd.Timestamp("2026-07-08").date()
+        if not (seg_start < preferred_cut <= seg_end):
+            span_days = max(0, (pd.Timestamp(seg_end) - pd.Timestamp(seg_start)).days)
+            preferred_cut = (pd.Timestamp(seg_start) + pd.Timedelta(days=max(1, span_days // 2))).date() if span_days else seg_start
+
+        # 이전 선택값이 새 기간 밖이면 date_input 상태를 초기화
+        existing_cut = st.session_state.get("seg_effect_simple_cutover")
+        if existing_cut is not None:
+            existing_cut_date = pd.to_datetime(existing_cut, errors="coerce")
+            if pd.isna(existing_cut_date) or existing_cut_date.date() < seg_start or existing_cut_date.date() > seg_end:
+                del st.session_state["seg_effect_simple_cutover"]
+
+        with cut_col:
+            cutover_date = st.date_input(
+                "SEG V2 적용일",
+                value=preferred_cut,
+                min_value=seg_start,
+                max_value=seg_end,
+                format="YYYY-MM-DD",
+                key="seg_effect_simple_cutover",
             )
-        with base_sep:
-            st.markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
-        with base_col2:
-            draft["base_end"] = st.date_input(
-                "기본 종료일", value=draft.get("base_end", seg_data_max),
-                min_value=seg_calendar_min, max_value=seg_calendar_max,
-                format="YYYY-MM-DD", key="seg_effect_analysis_base_end", label_visibility="collapsed",
-            )
 
-        base_invalid = draft["base_start"] > draft["base_end"]
-        if base_invalid:
-            st.warning("기본 기간의 시작일은 종료일보다 늦을 수 없습니다.")
-
-        include_ranges = draft["include_ranges"]
-        exclude_ranges = draft["exclude_ranges"]
-
-        if draft["mode"] in {"포함구간", "포함 + 제외"}:
-            include_summary = _home_analysis_range_summary(include_ranges)
-            with st.expander(f"📂 포함구간 ({len(include_ranges)}) · {include_summary}", expanded=False):
-                delete_include_id = None
-                for idx, item in enumerate(include_ranges, start=1):
-                    row = st.columns([0.14, 1, 0.08, 1, 0.34])
-                    row[0].markdown(f"**{idx}**")
-                    item["start"] = row[1].date_input(
-                        f"포함 시작일 {idx}", value=item["start"], min_value=seg_calendar_min, max_value=seg_calendar_max,
-                        format="YYYY-MM-DD", key=f"seg_effect_inc_start_{item['id']}", label_visibility="collapsed",
-                    )
-                    row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
-                    item["end"] = row[3].date_input(
-                        f"포함 종료일 {idx}", value=item["end"], min_value=seg_calendar_min, max_value=seg_calendar_max,
-                        format="YYYY-MM-DD", key=f"seg_effect_inc_end_{item['id']}", label_visibility="collapsed",
-                    )
-                    if row[4].button("삭제", key=f"seg_effect_inc_del_{item['id']}", use_container_width=True, disabled=len(include_ranges) <= 1):
-                        delete_include_id = item["id"]
-                if delete_include_id is not None:
-                    draft["include_ranges"] = [x for x in include_ranges if x["id"] != delete_include_id]
-                    st.rerun()
-                if st.button("＋ 포함구간 추가", key="seg_effect_inc_add", use_container_width=True):
-                    new_id = draft["next_include_id"]
-                    draft["next_include_id"] += 1
-                    draft["include_ranges"].append({"id": new_id, "start": draft["base_start"], "end": draft["base_start"]})
-                    st.rerun()
-                valid_include_count, invalid_include_count = _home_analysis_valid_range_count(draft["include_ranges"])
-                if valid_include_count == 0:
-                    st.warning("적용 가능한 포함구간이 없습니다.")
-                if invalid_include_count:
-                    st.warning(f"시작일이 종료일보다 늦은 포함구간 {invalid_include_count}개는 적용에서 제외됩니다.")
-
-        if draft["mode"] in {"제외구간", "포함 + 제외"}:
-            exclude_summary = _home_analysis_range_summary(exclude_ranges, include_reason=True)
-            reason_options = ["사유 없음", "보답프로그램", "기획전", "AI TEST", "시즌 제외", "데이터 이상", "기타"]
-            with st.expander(f"📂 제외구간 ({len(exclude_ranges)}) · {exclude_summary}", expanded=False):
-                delete_exclude_id = None
-                for idx, item in enumerate(exclude_ranges, start=1):
-                    row = st.columns([0.12, 0.84, 0.06, 0.84, 0.92, 0.92, 0.3])
-                    row[0].markdown(f"**{idx}**")
-                    item["start"] = row[1].date_input(
-                        f"제외 시작일 {idx}", value=item["start"], min_value=seg_calendar_min, max_value=seg_calendar_max,
-                        format="YYYY-MM-DD", key=f"seg_effect_exc_start_{item['id']}", label_visibility="collapsed",
-                    )
-                    row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
-                    item["end"] = row[3].date_input(
-                        f"제외 종료일 {idx}", value=item["end"], min_value=seg_calendar_min, max_value=seg_calendar_max,
-                        format="YYYY-MM-DD", key=f"seg_effect_exc_end_{item['id']}", label_visibility="collapsed",
-                    )
-                    current_reason_type = item.get("reason_type", "사유 없음")
-                    if current_reason_type not in reason_options:
-                        current_reason_type = "기타" if item.get("reason") else "사유 없음"
-                    item["reason_type"] = row[4].selectbox(
-                        f"제외 사유 {idx}", reason_options, index=reason_options.index(current_reason_type),
-                        key=f"seg_effect_exc_reason_type_{item['id']}", label_visibility="collapsed",
-                    )
-                    if item["reason_type"] == "기타":
-                        item["reason_detail"] = row[5].text_input(
-                            f"기타 사유 {idx}", value=item.get("reason_detail", ""), placeholder="직접 입력",
-                            key=f"seg_effect_exc_reason_detail_{item['id']}", label_visibility="collapsed",
-                        )
-                        item["reason"] = item["reason_detail"].strip()
-                    else:
-                        row[5].markdown("<div style='height:38px;'></div>", unsafe_allow_html=True)
-                        item["reason_detail"] = item.get("reason_detail", "")
-                        item["reason"] = "" if item["reason_type"] == "사유 없음" else item["reason_type"]
-                    if row[6].button("삭제", key=f"seg_effect_exc_del_{item['id']}", use_container_width=True, disabled=len(exclude_ranges) <= 1):
-                        delete_exclude_id = item["id"]
-                if delete_exclude_id is not None:
-                    draft["exclude_ranges"] = [x for x in exclude_ranges if x["id"] != delete_exclude_id]
-                    st.rerun()
-                if st.button("＋ 제외구간 추가", key="seg_effect_exc_add", use_container_width=True):
-                    new_id = draft["next_exclude_id"]
-                    draft["next_exclude_id"] += 1
-                    draft["exclude_ranges"].append({
-                        "id": new_id, "start": draft["base_start"], "end": draft["base_start"],
-                        "reason_type": "사유 없음", "reason_detail": "", "reason": "",
-                    })
-                    st.rerun()
-                _, invalid_exclude_count = _home_analysis_valid_range_count(draft["exclude_ranges"])
-                if invalid_exclude_count:
-                    st.warning(f"시작일이 종료일보다 늦은 제외구간 {invalid_exclude_count}개는 적용에서 제외됩니다.")
-
-        # 비교 설정은 접어서 화면 복잡도를 낮춤. 적용 버튼은 날짜 조건과 이 설정을 함께 저장합니다.
-        available_controls = ["공통 요일만 비교", "공통 시간대만 비교"]
-        if promotions is not None and not promotions.empty:
-            available_controls = ["프로모션 기간 제외"] + available_controls
-        with st.expander("⚙ 비교 조건 · SEG V2 적용일 / 통제 조건", expanded=False):
-            cc1, cc2 = st.columns([0.8, 2.2])
-            with cc1:
-                draft["cutover_date"] = st.date_input(
-                    "SEG V2 적용일", value=draft.get("cutover_date", preferred_cut.date()),
-                    min_value=seg_calendar_min, max_value=seg_calendar_max,
-                    format="YYYY-MM-DD", key="seg_effect_cutover_date",
-                )
-            with cc2:
-                current_controls = [x for x in draft.get("controls", []) if x in available_controls]
-                draft["controls"] = st.multiselect(
-                    "통제 조건", available_controls, default=current_controls,
-                    key="seg_effect_controls",
-                    help="프로모션 영향 제외 또는 AS-IS/TO-BE 양쪽에 공통으로 존재하는 요일·시간대만 남겨 비교합니다.",
-                )
-            st.caption("V2 적용일 이전 = AS-IS(V1), 적용일 포함 이후 = TO-BE(V2) · 통제 조건은 선택 사항")
-
-        base_preview_df = apply_home_analysis_date_filter(
-            sends, "전체", draft["base_start"], draft["base_end"], [], [],
-        ) if not base_invalid else sends.iloc[0:0].copy()
-        preview_df = apply_home_analysis_date_filter(
-            sends, draft["mode"], draft["base_start"], draft["base_end"], draft["include_ranges"], draft["exclude_ranges"],
-        ) if not base_invalid else sends.iloc[0:0].copy()
-        base_days = int(pd.to_datetime(base_preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not base_preview_df.empty else 0
-        preview_days = int(pd.to_datetime(preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not preview_df.empty else 0
-        preview_send_count = int(len(preview_df))
-        preview_dates = pd.to_datetime(preview_df.get("_date"), errors="coerce").dt.normalize() if not preview_df.empty else pd.Series(dtype="datetime64[ns]")
-        cut_ts = pd.Timestamp(draft["cutover_date"]).normalize()
-        preview_asis_days = int(preview_dates[preview_dates.lt(cut_ts)].nunique()) if not preview_dates.empty else 0
-        preview_tobe_days = int(preview_dates[preview_dates.ge(cut_ts)].nunique()) if not preview_dates.empty else 0
-
-        result_col, apply_col, reset_col = st.columns([3.2, 0.9, 0.9])
-        result_col.markdown(
-            f"**📋 분석 대상 : {preview_days:,}일 (발송 {preview_send_count:,}건) · AS-IS {preview_asis_days:,}일 / TO-BE {preview_tobe_days:,}일 · 기본 {base_days:,}일 → 적용 {preview_days:,}일**"
+        cutover_ts = pd.Timestamp(cutover_date).normalize()
+        asis_end = (cutover_ts - pd.Timedelta(days=1)).date()
+        st.markdown(
+            f'<div class="segv-period-note">AS-IS(V1) {seg_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d} &nbsp; / &nbsp; '
+            f'TO-BE(V2) {cutover_ts:%Y-%m-%d} ~ {seg_end:%Y-%m-%d}</div>',
+            unsafe_allow_html=True,
         )
-        apply_disabled = base_invalid or preview_days == 0 or preview_asis_days == 0 or preview_tobe_days == 0
-        apply_clicked = apply_col.button("✔ 적용", key="seg_effect_analysis_apply", use_container_width=True, disabled=apply_disabled)
-        reset_clicked = reset_col.button("↺ 초기화", key="seg_effect_analysis_reset", use_container_width=True)
 
-        if preview_days == 0 and not base_invalid:
-            st.warning("현재 조건에 해당하는 데이터가 없어 적용할 수 없습니다.")
-        elif preview_days > 0 and (preview_asis_days == 0 or preview_tobe_days == 0):
-            st.warning("선택 기간과 V2 적용일 기준으로 AS-IS와 TO-BE 양쪽 데이터가 모두 있어야 개선효과를 비교할 수 있습니다.")
-
-        if reset_clicked:
-            reset_draft, reset_applied = _home_analysis_default_state(seg_data_min, seg_data_max)
-            reset_draft["cutover_date"] = preferred_cut.date()
-            reset_applied["cutover_date"] = preferred_cut.date()
-            reset_draft["controls"] = list(default_controls)
-            reset_applied["controls"] = list(default_controls)
-            st.session_state.seg_effect_analysis_draft = reset_draft
-            st.session_state.seg_effect_analysis_applied = reset_applied
-            widget_keys = [
-                key for key in list(st.session_state.keys())
-                if key in {"seg_effect_analysis_mode", "seg_effect_analysis_base_start", "seg_effect_analysis_base_end", "seg_effect_cutover_date", "seg_effect_controls"}
-                or key.startswith("seg_effect_inc_") or key.startswith("seg_effect_exc_")
-            ]
-            for key in widget_keys:
-                del st.session_state[key]
-            st.session_state.seg_effect_analysis_notice = "SEG 개선효과 분석 조건을 초기화했습니다."
-            st.rerun()
-
-        if apply_clicked:
-            st.session_state.seg_effect_analysis_applied = {
-                "mode": draft["mode"], "base_start": draft["base_start"], "base_end": draft["base_end"],
-                "include_ranges": [dict(x) for x in draft["include_ranges"]],
-                "exclude_ranges": [dict(x) for x in draft["exclude_ranges"]],
-                "cutover_date": draft["cutover_date"], "controls": list(draft.get("controls", [])),
-            }
-            st.session_state.seg_effect_analysis_notice = "SEG 개선효과 분석 조건을 적용했습니다."
-            st.rerun()
-
-        applied = st.session_state.seg_effect_analysis_applied
-        seg_applied_sends = apply_home_analysis_date_filter(
-            sends, applied["mode"], applied["base_start"], applied["base_end"],
-            applied["include_ranges"], applied["exclude_ranges"],
-        )
-        controls = list(applied.get("controls", []))
-        cutover_ts = pd.Timestamp(applied.get("cutover_date", preferred_cut.date())).normalize()
-        exclude_promo = "프로모션 기간 제외" in controls
-
-        prepared = _segv_prepare_period(
-            seg_applied_sends,
-            applied["base_start"], applied["base_end"],
-            promotions, exclude_promo,
-        )
+        prepared = _segv_prepare_period(sends, seg_start, seg_end, promotions, False)
         asis_df = prepared[prepared["_date"].lt(cutover_ts)].copy() if not prepared.empty else prepared.copy()
         tobe_df = prepared[prepared["_date"].ge(cutover_ts)].copy() if not prepared.empty else prepared.copy()
-        asis_df, tobe_df, common_notes = _segv_apply_common_conditions(asis_df, tobe_df, controls)
 
         if asis_df.empty or tobe_df.empty:
             if asis_df.empty:
-                st.error("적용된 분석 조건의 AS-IS(V1) 데이터가 없습니다.")
+                st.error("선택 기간과 V2 적용일 기준의 AS-IS(V1) 데이터가 없습니다.")
             if tobe_df.empty:
-                st.error("적용된 분석 조건의 TO-BE(V2) 데이터가 없습니다.")
+                st.error("선택 기간과 V2 적용일 기준의 TO-BE(V2) 데이터가 없습니다.")
         else:
             a_sum = _segv_summary(asis_df)
             b_sum = _segv_summary(tobe_df)
@@ -13368,14 +13122,7 @@ elif menu == "SEG 개선효과":
             compare_df = _segv_compare_table(a_group, b_group)
             conclusion1, conclusion2, improved_seg_count, comparable_seg_count = _segv_top_conclusion(a_sum, b_sum, compare_df)
 
-            analysis_date_text = f"{applied['base_start']:%Y-%m-%d} ~ {applied['base_end']:%Y-%m-%d}"
-            control_text = " / ".join(common_notes) if common_notes else ""
-            st.caption(
-                f"분석기간 {analysis_date_text} · AS-IS < {cutover_ts:%Y-%m-%d} / TO-BE ≥ {cutover_ts:%Y-%m-%d}"
-                + (f" · {control_text}" if control_text else "")
-            )
-
-            # ① 상단 결론: AS-IS → TO-BE 자체를 카드에 직접 표시
+            # ① 개선효과 요약: 숫자는 한 줄 4개 유지
             st.markdown('<div class="subsection-title">① 개선 효과 요약</div>', unsafe_allow_html=True)
             metric_specs = [
                 ("CTR", a_sum["ctr"] * 100, b_sum["ctr"] * 100, "pct"),
@@ -13402,41 +13149,63 @@ elif menu == "SEG 개선효과":
                     f'<div class="segv-kpi-delta {delta_cls}">{dt}</div></div>', unsafe_allow_html=True,
                 )
             st.markdown(
-                '<div class="insight-box" style="padding:11px 15px;margin-top:7px;">'
-                f'<div style="font-weight:900;font-size:14px;margin-bottom:3px;">{_html.escape(conclusion1)}</div>'
+                '<div class="insight-box" style="padding:10px 14px;margin-top:6px;">'
+                f'<div style="font-weight:900;font-size:14px;margin-bottom:2px;">{_html.escape(conclusion1)}</div>'
                 f'<div style="color:#3f4b5b;font-size:13px;font-weight:700;">{_html.escape(conclusion2)}</div>'
                 '</div>', unsafe_allow_html=True,
             )
 
-            # ② 비교표: compact + 영역 구분 강화
-            st.markdown('<div class="subsection-title">② SEG별 전후 비교</div>', unsafe_allow_html=True)
-            st.caption("회색=AS-IS(V1) / 보라=TO-BE(V2) / 증감은 빨강=개선·파랑=감소 · 발송모수는 만 단위 축약")
+            # ② 비교표: 설명은 하단 caption 대신 제목 옆에 붙임
+            st.markdown(
+                '<div class="subsection-title">② SEG별 전후 비교 '
+                '<span class="segv-section-note">회색=AS-IS(V1) / 보라=TO-BE(V2) / 증감은 빨강=개선·파랑=감소 · 발송모수는 만 단위 축약</span></div>',
+                unsafe_allow_html=True,
+            )
             st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
 
-            # ③ 4개 지표를 탭 대신 한 줄 4카드로 동시 노출
-            st.markdown('<div class="subsection-title">③ 전체 성과 추이</div>', unsafe_allow_html=True)
+            # ③ 전체 성과 추이: 4개를 2×2로 확대하고 AS-IS→TO-BE 숫자를 그래프 위에 표시
+            st.markdown(
+                '<div class="subsection-title">③ 전체 성과 추이 '
+                '<span class="segv-section-note">회색 배경=AS-IS / 연보라 배경=TO-BE · 주차 라벨은 대각선 표시</span></div>',
+                unsafe_allow_html=True,
+            )
             a_week = _segv_weekly(asis_df)
             b_week = _segv_weekly(tobe_df)
             trend_specs = ["CTR", "SPM", "주문금액/만건", "주문건수/만건"]
-            trend_cols = st.columns(4, gap="small")
-            for idx, (col, metric) in enumerate(zip(trend_cols, trend_specs)):
+            trend_rows = [st.columns(2, gap="small"), st.columns(2, gap="small")]
+            metric_raw = {
+                "CTR": (a_sum["ctr"], b_sum["ctr"]),
+                "SPM": (a_sum["spm"], b_sum["spm"]),
+                "주문금액/만건": (a_sum["amount_10k"], b_sum["amount_10k"]),
+                "주문건수/만건": (a_sum["orders_10k"], b_sum["orders_10k"]),
+            }
+            for idx, metric in enumerate(trend_specs):
+                col = trend_rows[idx // 2][idx % 2]
                 with col:
-                    st.plotly_chart(
-                        _segv_metric_chart(a_week, b_week, metric, cutover_ts, compact=True),
-                        use_container_width=True, config={"displayModeBar": False, "responsive": True},
-                        key=f"seg_effect_trend_compact_{idx}",
-                    )
-                    av, bv, dv = _segv_metric_summary_values(a_sum, b_sum, metric)
+                    av_text, bv_text, dv_text = _segv_metric_summary_values(a_sum, b_sum, metric)
+                    raw_a, raw_b = metric_raw[metric]
+                    delta_cls = "up" if raw_b > raw_a else ("down" if raw_b < raw_a else "flat")
                     st.markdown(
-                        f'<div class="segv-mini-summary"><span style="color:#59616d">{av}</span> → '
-                        f'<span style="color:#5b3fd4"><b>{bv}</b></span><br><b>{dv}</b></div>',
+                        '<div class="segv-trend-summary">'
+                        f'<div class="segv-trend-name">{metric}</div>'
+                        f'<div class="segv-trend-values"><span class="asis">{av_text}</span><span class="arrow">→</span>'
+                        f'<span class="tobe">{bv_text}</span><span class="{delta_cls}">{dv_text}</span></div>'
+                        '</div>',
                         unsafe_allow_html=True,
                     )
-            st.caption("회색 배경=AS-IS / 연보라 배경=TO-BE · 주차 라벨은 대각선으로 표시해 겹침 최소화")
+                    st.plotly_chart(
+                        _segv_metric_chart(a_week, b_week, metric, cutover_ts, compact=True),
+                        use_container_width=True,
+                        config={"displayModeBar": False, "responsive": True},
+                        key=f"seg_effect_trend_2x2_{idx}",
+                    )
 
-            # ④ 포지셔닝: 4개를 한 줄로, AS-IS 빈 원 → TO-BE 채운 원 이동 표시
-            st.markdown('<div class="subsection-title">④ SEG 포지셔닝 · AS-IS → TO-BE</div>', unsafe_allow_html=True)
-            st.caption("빈 원=AS-IS / 채운 원=TO-BE / 화살표=이동 방향 · 우상단 이동일수록 CTR·SPM 동반 개선")
+            # ④ 포지셔닝: 4개를 2×2로 확대, 빈 원→채운 원 이동은 그대로 유지
+            st.markdown(
+                '<div class="subsection-title">④ SEG 포지셔닝 · AS-IS → TO-BE '
+                '<span class="segv-section-note">빈 원=AS-IS / 채운 원=TO-BE / 화살표=이동 방향 · 우상단 이동일수록 CTR·SPM 동반 개선</span></div>',
+                unsafe_allow_html=True,
+            )
             all_ctr = pd.concat([
                 pd.to_numeric(a_group.get("CTR"), errors="coerce").dropna() * 100,
                 pd.to_numeric(b_group.get("CTR"), errors="coerce").dropna() * 100,
@@ -13456,8 +13225,9 @@ elif menu == "SEG 개선효과":
                 x_range = y_range = None
 
             position_groups = [("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")]
-            pos_cols = st.columns(4, gap="small")
-            for col, (gender, age) in zip(pos_cols, position_groups):
+            pos_rows = [st.columns(2, gap="small"), st.columns(2, gap="small")]
+            for idx, (gender, age) in enumerate(position_groups):
+                col = pos_rows[idx // 2][idx % 2]
                 with col:
                     a_sub = a_group[(a_group["성별"] == gender) & (a_group["연령"] == age)].copy()
                     b_sub = b_group[(b_group["성별"] == gender) & (b_group["연령"] == age)].copy()
@@ -13465,15 +13235,11 @@ elif menu == "SEG 개선효과":
                         a_sub, b_sub, b_sum["ctr"], b_sum["spm"], f"{gender}{age}", x_range, y_range,
                     )
                     st.plotly_chart(
-                        fig, use_container_width=True,
+                        fig,
+                        use_container_width=True,
                         config={"displayModeBar": False, "responsive": True},
-                        key=f"seg_effect_pos_compare_{gender}_{age}",
+                        key=f"seg_effect_pos_2x2_{gender}_{age}",
                     )
-
-            st.caption(
-                "해석 기준 · CTR=Uniq 클릭수/발송성공건수 · SPM=주문금액/총 발송모수 · "
-                "주문금액/만건·주문건수/만건=총 발송모수 기준 · 상품 구성/가격 차이는 별도 영향 요인"
-            )
 
 
 elif menu == "타겟분석":
