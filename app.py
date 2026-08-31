@@ -10701,7 +10701,7 @@ def _segv_prepare_period(
 
     def _week_norm(value):
         raw = str(value or "").strip()
-        if not raw or raw.lower() in {"nan", "none"}:
+        if not raw or raw.lower() in {"nan", "none", "undefined", "null", "nat", "<na>"}:
             return ""
         if "주차" in raw:
             return raw
@@ -10870,13 +10870,13 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
         except Exception:
             return "-"
         if kind == "ctr":
-            return f"{v:.2f}%"
+            return f"{v:.1f}%"
         if kind == "spm":
             return f"{v:,.0f}"
         if kind == "sent":
             return f"{v/10000:.1f}만" if abs(v) >= 10000 else f"{v:,.0f}"
         if kind == "ctr_delta":
-            return f"{v:+.2f}"
+            return f"{v:+.1f}"
         if kind == "spm_delta":
             return f"{v:+,.0f}"
         return f"{v:,.0f}"
@@ -10964,9 +10964,9 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
           <tr>
             <th class="segv-fixed-head" rowspan="2">구분</th>
             <th class="segv-fixed-head" rowspan="2">SEG</th>
-            <th class="segv-asis-head" colspan="3">AS-IS · SEG V1</th>
-            <th class="segv-tobe-head" colspan="3">TO-BE · SEG V2</th>
-            <th class="segv-delta-head" colspan="2">증감 · V2 − V1</th>
+            <th class="segv-asis-head" colspan="3">AS-IS</th>
+            <th class="segv-tobe-head" colspan="3">TO-BE</th>
+            <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
           </tr>
           <tr>
             <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">발송모수</th>
@@ -10999,13 +10999,13 @@ def _segv_top_conclusion(asis_summary: dict, tobe_summary: dict, compare_df: pd.
     total_count = int(len(valid))
 
     if ctr_pp > 0 and spm_delta > 0:
-        lead = "V2 적용 후 CTR·SPM 동반 개선"
+        lead = "TO-BE에서 CTR·SPM 동반 개선"
     elif ctr_pp > 0 or spm_delta > 0:
-        lead = "V2 적용 후 핵심 효율지표가 혼조"
+        lead = "TO-BE에서 핵심 효율지표가 혼조"
     else:
-        lead = "V2 적용 후 CTR·SPM 모두 추가 점검 필요"
+        lead = "TO-BE에서 CTR·SPM 모두 추가 점검 필요"
     order_text = f" / 주문건수·만건 {order_delta*100:+.1f}%" if order_delta is not None else ""
-    line1 = f"{lead} · CTR {ctr_pp:+.2f}%p / SPM {spm_delta:+,.0f}원{order_text}"
+    line1 = f"{lead} · CTR {ctr_pp:+.1f}%p / SPM {spm_delta:+,.0f}원{order_text}"
 
     line2 = f"비교 가능 SEG {total_count}개 중 CTR·SPM 동반 개선 {both_count}개"
     if not valid.empty:
@@ -11032,8 +11032,8 @@ def _segv_metric_summary_values(asis_summary: dict, tobe_summary: dict, metric: 
     a, b, kind = meta[metric]
     rel = _segv_relative_delta(b, a)
     if kind == "pct":
-        a_text, b_text = f"{a:.2f}%", f"{b:.2f}%"
-        delta_text = f"{b-a:+.2f}%p" + (f" / {rel*100:+.1f}%" if rel is not None else "")
+        a_text, b_text = f"{a:.1f}%", f"{b:.1f}%"
+        delta_text = f"{b-a:+.1f}%p" + (f" / {rel*100:+.1f}%" if rel is not None else "")
     elif kind == "won":
         a_text, b_text = f"{a:,.0f}원", f"{b:,.0f}원"
         delta_text = f"{b-a:+,.0f}원" + (f" / {rel*100:+.1f}%" if rel is not None else "")
@@ -11060,9 +11060,9 @@ def _segv_weekly(d: pd.DataFrame) -> pd.DataFrame:
     has_source_week = "_week" in w.columns and w["_week"].fillna("").astype(str).str.strip().ne("").any()
     if has_source_week:
         w["_week_key"] = w["_week"].fillna("").astype(str).str.strip()
-        # 일부 행의 주차만 비어 있으면 달력 주차 시작일로 보완
-        missing = w["_week_key"].eq("")
-        w.loc[missing, "_week_key"] = w.loc[missing, "_calendar_week_start"].dt.strftime("%m/%d주")
+        # 빈값뿐 아니라 원본/브라우저 계열의 undefined/null 표기도 달력 주차로 안전하게 보완
+        invalid_week = w["_week_key"].str.lower().isin({"", "nan", "none", "undefined", "null", "nat", "<na>"})
+        w.loc[invalid_week, "_week_key"] = w.loc[invalid_week, "_calendar_week_start"].dt.strftime("%m/%d주")
     else:
         w["_week_key"] = w["_calendar_week_start"].dt.strftime("%m/%d주")
 
@@ -11082,9 +11082,9 @@ def _segv_weekly(d: pd.DataFrame) -> pd.DataFrame:
     return g.sort_values("주차시작").reset_index(drop=True)[cols]
 
 
-def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, tobe_start, compact: bool = False) -> go.Figure:
+def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, tobe_start=None, compact: bool = False) -> go.Figure:
     meta = {
-        "CTR": ("CTR", lambda s: s * 100, "%", ".2f"),
+        "CTR": ("CTR", lambda s: s * 100, "%", ".1f"),
         "SPM": ("SPM", lambda s: s, "원", ",.0f"),
         "주문금액/만건": ("주문금액/만건", lambda s: s, "원", ",.0f"),
         "주문건수/만건": ("주문건수/만건", lambda s: s, "건", ".1f"),
@@ -11092,7 +11092,20 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
     title, transform, suffix, fmt = meta[metric]
     fig = go.Figure()
 
-    # AS-IS / TO-BE 구간 배경을 아주 옅게 분리해 전후 영역을 한눈에 구분
+    def _point_text(v):
+        try:
+            v = float(v)
+        except Exception:
+            return ""
+        if metric == "CTR":
+            return f"{v:.1f}%"
+        if metric == "SPM":
+            return f"{v:,.0f}원"
+        if metric == "주문금액/만건":
+            return f"{v/10000:.1f}만원" if abs(v) >= 10000 else f"{v:,.0f}원"
+        return f"{v:.1f}건"
+
+    # AS-IS / TO-BE 기간 배경 분리
     if asis_w is not None and not asis_w.empty:
         a0 = pd.to_datetime(asis_w["주차시작"], errors="coerce").min()
         a1 = pd.to_datetime(asis_w["주차시작"], errors="coerce").max() + pd.Timedelta(days=6)
@@ -11108,11 +11121,16 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         if data is None or data.empty:
             continue
         y = transform(pd.to_numeric(data[metric], errors="coerce").fillna(0))
-        custom = [[str(v)] for v in data.get("주차", pd.Series([""] * len(data))).tolist()]
+        week_series = data.get("주차", pd.Series([""] * len(data), index=data.index)).fillna("").astype(str)
+        week_series = week_series.mask(week_series.str.lower().isin(["undefined", "null", "nan", "none", "nat", "<na>"]), "")
+        custom = [[str(v)] for v in week_series.tolist()]
+        texts = [_point_text(v) for v in y.tolist()]
         fig.add_trace(go.Scatter(
-            x=data["주차시작"], y=y, mode="lines+markers",
+            x=data["주차시작"], y=y, mode="lines+markers+text",
             name=label,
             line=dict(color=color, width=2.6), marker=dict(size=7 if compact else 8, color=color),
+            text=texts, textposition="top center", textfont=dict(size=11, color=color),
+            cliponaxis=False,
             customdata=custom,
             hovertemplate=f"<b>{label}</b><br>%{{customdata[0]}}<br>{metric}: <b>%{{y:{fmt}}}{suffix}</b><extra></extra>",
         ))
@@ -11121,6 +11139,10 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         asis_w[["주차시작", "주차"]] if asis_w is not None and not asis_w.empty else pd.DataFrame(columns=["주차시작", "주차"]),
         tobe_w[["주차시작", "주차"]] if tobe_w is not None and not tobe_w.empty else pd.DataFrame(columns=["주차시작", "주차"]),
     ], ignore_index=True).dropna(subset=["주차시작"]).sort_values("주차시작").drop_duplicates("주차시작")
+    if not combined.empty:
+        combined["주차"] = combined["주차"].fillna("").astype(str).str.strip()
+        bad = combined["주차"].str.lower().isin(["", "undefined", "null", "nan", "none", "nat", "<na>"])
+        combined.loc[bad, "주차"] = pd.to_datetime(combined.loc[bad, "주차시작"], errors="coerce").dt.strftime("%m/%d주")
 
     start_ts = pd.to_datetime(tobe_start, errors="coerce")
     if pd.notna(start_ts):
@@ -11128,12 +11150,10 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
 
     fig.update_layout(
         title=(None if compact else dict(text=f"<b>{title}</b>", x=0.02, xanchor="left", font=dict(size=17, color="#111827"))),
-        height=248 if compact else 390,
-        margin=dict(l=46 if compact else 50, r=12 if compact else 20, t=24 if compact else 70, b=64 if compact else 65),
+        height=285 if compact else 390,
+        margin=dict(l=48 if compact else 50, r=16 if compact else 20, t=34 if compact else 70, b=76 if compact else 65),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-        hovermode="closest",
-        showlegend=not compact,
-        legend=dict(orientation="h", y=1.08, x=0, font=dict(size=10), itemwidth=45),
+        hovermode="closest", showlegend=False,
         xaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
         yaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
         font=dict(color="#111827", size=12),
@@ -11144,7 +11164,6 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
             tickangle=-45, tickfont=dict(size=11, color="#1f2937"), automargin=True,
         )
     return fig
-
 
 def _segv_position_chart(group_df: pd.DataFrame, overall_ctr: float, overall_spm: float, title: str,
                          x_range=None, y_range=None) -> go.Figure:
@@ -11191,22 +11210,21 @@ def _segv_position_compare_chart(
     x_range=None,
     y_range=None,
 ) -> go.Figure:
-    """AS-IS의 빈 원에서 TO-BE의 채운 원으로 이동을 표시해 SEG 개선 방향을 한눈에 보여줍니다."""
+    """AS-IS 빈 원 → TO-BE 채운 원 이동과 양쪽 수치를 한 줄 라벨로 표시합니다."""
     colors = {"1": "#5b3fd4", "2": "#168a5b", "3": "#d97706"}
-    text_pos = {"1": "top right", "2": "bottom right", "3": "top left"}
+    # SEG별 세로 오프셋을 달리해 라벨끼리 겹침을 줄임
+    y_shift = {"1": 24, "2": 0, "3": -24}
     fig = go.Figure()
 
-    a_map = {}
-    b_map = {}
-    if asis_group is not None and not asis_group.empty:
-        a_map = {clean_identifier_value(r.get("SEG", "")): r for _, r in asis_group.iterrows()}
-    if tobe_group is not None and not tobe_group.empty:
-        b_map = {clean_identifier_value(r.get("SEG", "")): r for _, r in tobe_group.iterrows()}
+    a_map = {clean_identifier_value(r.get("SEG", "")): r for _, r in asis_group.iterrows()} if asis_group is not None and not asis_group.empty else {}
+    b_map = {clean_identifier_value(r.get("SEG", "")): r for _, r in tobe_group.iterrows()} if tobe_group is not None and not tobe_group.empty else {}
 
     for seg in ["1", "2", "3"]:
         a = a_map.get(seg)
         b = b_map.get(seg)
         color = colors[seg]
+        ax = ay = bx = by = None
+
         if a is not None:
             ax = float(a.get("CTR", 0) or 0) * 100
             ay = float(a.get("SPM", 0) or 0)
@@ -11216,39 +11234,43 @@ def _segv_position_compare_chart(
                 name=f"SEG{seg} AS-IS", showlegend=False,
                 customdata=[[float(a.get("발송모수", 0) or 0), float(a.get("주문금액", 0) or 0)]],
                 hovertemplate=(
-                    f"<b>SEG{seg} AS-IS</b><br>CTR: <b>%{{x:.2f}}%</b><br>SPM: <b>%{{y:,.0f}}원</b>"
+                    f"<b>SEG{seg} AS-IS</b><br>CTR: <b>%{{x:.1f}}%</b><br>SPM: <b>%{{y:,.0f}}원</b>"
                     "<br>발송모수: %{customdata[0]:,.0f}건<br>주문금액: %{customdata[1]:,.0f}원<extra></extra>"
                 ),
             ))
+            fig.add_annotation(
+                x=ax, y=ay, text=f"<b>SEG{seg} {ax:.1f}% · {ay:,.0f}원</b>",
+                showarrow=False, xshift=-10, yshift=y_shift[seg], xanchor="right",
+                font=dict(size=12, color=color), bgcolor="rgba(255,255,255,0.86)", borderpad=2,
+            )
+
         if b is not None:
             bx = float(b.get("CTR", 0) or 0) * 100
             by = float(b.get("SPM", 0) or 0)
             fig.add_trace(go.Scatter(
-                x=[bx], y=[by], mode="markers+text",
-                text=[f"<b>SEG{seg}</b><br><b>{bx:.2f}% · {by:,.0f}원</b>"],
-                textposition=text_pos[seg], textfont=dict(size=13, color="#111827"),
+                x=[bx], y=[by], mode="markers",
                 marker=dict(size=15, symbol="circle", color=color, line=dict(width=1.8, color="#ffffff")),
                 name=f"SEG{seg} TO-BE", showlegend=False,
                 customdata=[[float(b.get("발송모수", 0) or 0), float(b.get("주문금액", 0) or 0)]],
                 hovertemplate=(
-                    f"<b>SEG{seg} TO-BE</b><br>CTR: <b>%{{x:.2f}}%</b><br>SPM: <b>%{{y:,.0f}}원</b>"
+                    f"<b>SEG{seg} TO-BE</b><br>CTR: <b>%{{x:.1f}}%</b><br>SPM: <b>%{{y:,.0f}}원</b>"
                     "<br>발송모수: %{customdata[0]:,.0f}건<br>주문금액: %{customdata[1]:,.0f}원<extra></extra>"
                 ),
             ))
-        if a is not None and b is not None:
-            ax = float(a.get("CTR", 0) or 0) * 100
-            ay = float(a.get("SPM", 0) or 0)
-            bx = float(b.get("CTR", 0) or 0) * 100
-            by = float(b.get("SPM", 0) or 0)
-            if abs(ax - bx) > 1e-9 or abs(ay - by) > 1e-9:
-                fig.add_annotation(
-                    x=bx, y=by, ax=ax, ay=ay,
-                    xref="x", yref="y", axref="x", ayref="y",
-                    text="", showarrow=True, arrowhead=2, arrowsize=1.0,
-                    arrowwidth=2.4, arrowcolor=color, opacity=0.9,
-                )
+            fig.add_annotation(
+                x=bx, y=by, text=f"<b>SEG{seg} {bx:.1f}% · {by:,.0f}원</b>",
+                showarrow=False, xshift=10, yshift=y_shift[seg], xanchor="left",
+                font=dict(size=12, color="#111827"), bgcolor="rgba(255,255,255,0.90)", borderpad=2,
+            )
 
-    # TO-BE 전체 평균 기준 우상단을 연하게 강조
+        if a is not None and b is not None and (abs(ax - bx) > 1e-9 or abs(ay - by) > 1e-9):
+            fig.add_annotation(
+                x=bx, y=by, ax=ax, ay=ay,
+                xref="x", yref="y", axref="x", ayref="y",
+                text="", showarrow=True, arrowhead=2, arrowsize=1.0,
+                arrowwidth=2.2, arrowcolor=color, opacity=0.9,
+            )
+
     if x_range and y_range:
         fig.add_shape(
             type="rect", x0=float(overall_ctr or 0) * 100, x1=x_range[1],
@@ -11259,16 +11281,15 @@ def _segv_position_compare_chart(
     fig.add_hline(y=float(overall_spm or 0), line_dash="dot", line_color="#7c8798", line_width=1.2)
     fig.update_layout(
         title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center", font=dict(size=17, color="#111827")),
-        height=300, margin=dict(l=50, r=30, t=52, b=50),
+        height=325, margin=dict(l=54, r=54, t=54, b=52),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(color="#111827", size=12),
         xaxis=dict(title=dict(text="<b>CTR (%)</b>", font=dict(size=13, color="#111827")), gridcolor="#e8ecf2", range=x_range,
-                   tickfont=dict(size=12, color="#111827"), automargin=True, zeroline=False),
+                   tickfont=dict(size=12, color="#111827"), tickformat=".1f", automargin=True, zeroline=False),
         yaxis=dict(title=dict(text="<b>SPM (원)</b>", font=dict(size=13, color="#111827")), gridcolor="#e8ecf2", range=y_range,
                    tickfont=dict(size=12, color="#111827"), automargin=True, zeroline=False),
         hovermode="closest",
     )
     return fig
-
 
 def _segv_relative_delta(cur: float, prev: float):
     if not prev:
@@ -13025,22 +13046,21 @@ elif menu == "상품구분":
 elif menu == "SEG 개선효과":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG 개선효과 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">SEG 개선효과 분석</div>', unsafe_allow_html=True)
-    st.caption("선택 기간을 SEG V2 적용일 기준으로 AS-IS(V1) / TO-BE(V2)로 나눠 CTR·SPM·만건당 성과를 비교합니다.")
+    st.caption("AS-IS와 TO-BE 기간을 각각 지정해 CTR·SPM·만건당 성과와 SEG별 이동을 비교합니다.")
 
-    # SEG 메뉴 전용 compact 스타일: 화면 밀도는 높이고 숫자/구분은 더 선명하게 표시
     st.markdown("""
     <style>
-      .segv-kpi-card {background:#fff;border:1px solid #dfe4ec;border-radius:11px;padding:10px 12px;min-height:76px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
-      .segv-kpi-label {font-size:13px;color:#5b6472;font-weight:850;margin-bottom:4px}
-      .segv-kpi-flow {font-size:19px;color:#111827;font-weight:900;line-height:1.22;white-space:nowrap}
-      .segv-kpi-flow .asis {color:#59616d}.segv-kpi-flow .arrow {color:#9aa2ae;padding:0 4px}.segv-kpi-flow .tobe {color:#5b3fd4}
-      .segv-kpi-delta {font-size:13px;font-weight:900;margin-top:4px}.segv-kpi-delta.up{color:#d11f1f}.segv-kpi-delta.down{color:#1e5dcc}.segv-kpi-delta.flat{color:#111827}
+      .segv-kpi-card {background:#fff;border:1px solid #dfe4ec;border-radius:11px;padding:11px 14px;min-height:78px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+      .segv-kpi-label {font-size:14px;color:#5b6472;font-weight:850;margin-bottom:4px}
+      .segv-kpi-flow {font-size:21px;color:#111827;font-weight:900;line-height:1.22;white-space:nowrap}
+      .segv-kpi-flow .asis {color:#59616d}.segv-kpi-flow .arrow {color:#9aa2ae;padding:0 5px}.segv-kpi-flow .tobe {color:#5b3fd4}
+      .segv-kpi-delta {font-size:14px;font-weight:900;margin-top:4px}.segv-kpi-delta.up{color:#d11f1f}.segv-kpi-delta.down{color:#1e5dcc}.segv-kpi-delta.flat{color:#111827}
       .segv-section-note {font-size:12px;color:#64748b;font-weight:750;margin-left:7px;letter-spacing:-.1px}
-      .segv-trend-summary {display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:7px 10px 5px;margin:0 0 4px;border:1px solid #e2e6ed;border-radius:9px;background:#fff;box-shadow:0 1px 5px rgba(25,42,70,.025)}
-      .segv-trend-name {font-size:15px;font-weight:900;color:#111827;white-space:nowrap}
-      .segv-trend-values {font-size:14px;font-weight:850;text-align:right;white-space:nowrap}
+      .segv-trend-summary {display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 11px 6px;margin:0 0 4px;border:1px solid #e2e6ed;border-radius:9px;background:#fff;box-shadow:0 1px 5px rgba(25,42,70,.025)}
+      .segv-trend-name {font-size:16px;font-weight:900;color:#111827;white-space:nowrap}
+      .segv-trend-values {font-size:15px;font-weight:900;text-align:right;white-space:nowrap}
       .segv-trend-values .asis {color:#59616d}.segv-trend-values .arrow {color:#9aa2ae;padding:0 4px}.segv-trend-values .tobe {color:#5b3fd4}.segv-trend-values .up {color:#d11f1f;margin-left:7px}.segv-trend-values .down {color:#1e5dcc;margin-left:7px}.segv-trend-values .flat {color:#111827;margin-left:7px}
-      .segv-period-note {font-size:12px;color:#64748b;font-weight:700;margin:-2px 0 7px}
+      .segv-period-note {font-size:13px;color:#475569;font-weight:800;margin:-2px 0 7px}
     </style>
     """, unsafe_allow_html=True)
 
@@ -13056,64 +13076,66 @@ elif menu == "SEG 개선효과":
         seg_calendar_min = datetime(seg_calendar_year_min, 1, 1).date()
         seg_calendar_max = datetime(seg_calendar_year_max, 12, 31).date()
 
-        # 기간 + V2 적용일만 한 줄로 유지
-        period_col, cut_col = st.columns([2.1, 0.9], gap="small")
-        with period_col:
-            seg_period = st.date_input(
-                "기간 선택",
-                value=(seg_data_min, seg_data_max),
+        preferred_tobe_start = pd.Timestamp("2026-07-08").date()
+        if seg_data_min < preferred_tobe_start <= seg_data_max:
+            default_asis = (seg_data_min, preferred_tobe_start - pd.Timedelta(days=1))
+            default_tobe = (preferred_tobe_start, seg_data_max)
+            default_asis = (default_asis[0], pd.Timestamp(default_asis[1]).date())
+        else:
+            span_days = max(1, (pd.Timestamp(seg_data_max) - pd.Timestamp(seg_data_min)).days)
+            split = (pd.Timestamp(seg_data_min) + pd.Timedelta(days=max(1, span_days // 2))).date()
+            default_asis = (seg_data_min, max(seg_data_min, (pd.Timestamp(split) - pd.Timedelta(days=1)).date()))
+            default_tobe = (split, seg_data_max)
+
+        p1, p2 = st.columns(2, gap="small")
+        with p1:
+            asis_period = st.date_input(
+                "AS-IS 기간",
+                value=default_asis,
                 min_value=seg_calendar_min,
                 max_value=seg_calendar_max,
                 format="YYYY-MM-DD",
-                key="seg_effect_simple_period",
+                key="seg_effect_asis_period",
             )
-
-        if isinstance(seg_period, (list, tuple)) and len(seg_period) == 2:
-            seg_start, seg_end = seg_period
-        else:
-            seg_start = seg_end = seg_period[0] if isinstance(seg_period, (list, tuple)) and seg_period else seg_data_max
-        if seg_start > seg_end:
-            seg_start, seg_end = seg_end, seg_start
-
-        preferred_cut = pd.Timestamp("2026-07-08").date()
-        if not (seg_start < preferred_cut <= seg_end):
-            span_days = max(0, (pd.Timestamp(seg_end) - pd.Timestamp(seg_start)).days)
-            preferred_cut = (pd.Timestamp(seg_start) + pd.Timedelta(days=max(1, span_days // 2))).date() if span_days else seg_start
-
-        # 이전 선택값이 새 기간 밖이면 date_input 상태를 초기화
-        existing_cut = st.session_state.get("seg_effect_simple_cutover")
-        if existing_cut is not None:
-            existing_cut_date = pd.to_datetime(existing_cut, errors="coerce")
-            if pd.isna(existing_cut_date) or existing_cut_date.date() < seg_start or existing_cut_date.date() > seg_end:
-                del st.session_state["seg_effect_simple_cutover"]
-
-        with cut_col:
-            cutover_date = st.date_input(
-                "SEG V2 적용일",
-                value=preferred_cut,
-                min_value=seg_start,
-                max_value=seg_end,
+        with p2:
+            tobe_period = st.date_input(
+                "TO-BE 기간",
+                value=default_tobe,
+                min_value=seg_calendar_min,
+                max_value=seg_calendar_max,
                 format="YYYY-MM-DD",
-                key="seg_effect_simple_cutover",
+                key="seg_effect_tobe_period",
             )
 
-        cutover_ts = pd.Timestamp(cutover_date).normalize()
-        asis_end = (cutover_ts - pd.Timedelta(days=1)).date()
+        def _segv_range(value, fallback):
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                a, b = value
+            elif isinstance(value, (list, tuple)) and len(value) == 1:
+                a = b = value[0]
+            elif value:
+                a = b = value
+            else:
+                a, b = fallback
+            if a > b:
+                a, b = b, a
+            return a, b
+
+        asis_start, asis_end = _segv_range(asis_period, default_asis)
+        tobe_start, tobe_end = _segv_range(tobe_period, default_tobe)
         st.markdown(
-            f'<div class="segv-period-note">AS-IS(V1) {seg_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d} &nbsp; / &nbsp; '
-            f'TO-BE(V2) {cutover_ts:%Y-%m-%d} ~ {seg_end:%Y-%m-%d}</div>',
+            f'<div class="segv-period-note">AS-IS {asis_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d} &nbsp; / &nbsp; '
+            f'TO-BE {tobe_start:%Y-%m-%d} ~ {tobe_end:%Y-%m-%d}</div>',
             unsafe_allow_html=True,
         )
 
-        prepared = _segv_prepare_period(sends, seg_start, seg_end, promotions, False)
-        asis_df = prepared[prepared["_date"].lt(cutover_ts)].copy() if not prepared.empty else prepared.copy()
-        tobe_df = prepared[prepared["_date"].ge(cutover_ts)].copy() if not prepared.empty else prepared.copy()
+        asis_df = _segv_prepare_period(sends, asis_start, asis_end, promotions, False)
+        tobe_df = _segv_prepare_period(sends, tobe_start, tobe_end, promotions, False)
 
         if asis_df.empty or tobe_df.empty:
             if asis_df.empty:
-                st.error("선택 기간과 V2 적용일 기준의 AS-IS(V1) 데이터가 없습니다.")
+                st.error("선택한 AS-IS 기간에 분석 가능한 데이터가 없습니다.")
             if tobe_df.empty:
-                st.error("선택 기간과 V2 적용일 기준의 TO-BE(V2) 데이터가 없습니다.")
+                st.error("선택한 TO-BE 기간에 분석 가능한 데이터가 없습니다.")
         else:
             a_sum = _segv_summary(asis_df)
             b_sum = _segv_summary(tobe_df)
@@ -13122,7 +13144,7 @@ elif menu == "SEG 개선효과":
             compare_df = _segv_compare_table(a_group, b_group)
             conclusion1, conclusion2, improved_seg_count, comparable_seg_count = _segv_top_conclusion(a_sum, b_sum, compare_df)
 
-            # ① 개선효과 요약: 숫자는 한 줄 4개 유지
+            # ① 개선 효과 요약: 2개씩 2줄
             st.markdown('<div class="subsection-title">① 개선 효과 요약</div>', unsafe_allow_html=True)
             metric_specs = [
                 ("CTR", a_sum["ctr"] * 100, b_sum["ctr"] * 100, "pct"),
@@ -13130,11 +13152,12 @@ elif menu == "SEG 개선효과":
                 ("주문금액/만건", a_sum["amount_10k"], b_sum["amount_10k"], "won"),
                 ("주문건수/만건", a_sum["orders_10k"], b_sum["orders_10k"], "count"),
             ]
-            kcols = st.columns(4, gap="small")
-            for col, (label, av, bv, kind) in zip(kcols, metric_specs):
+            krows = [st.columns(2, gap="small"), st.columns(2, gap="small")]
+            for idx, (label, av, bv, kind) in enumerate(metric_specs):
+                col = krows[idx // 2][idx % 2]
                 rel = _segv_relative_delta(bv, av)
                 if kind == "pct":
-                    at, bt, dt = f"{av:.2f}%", f"{bv:.2f}%", f"{bv-av:+.2f}%p"
+                    at, bt, dt = f"{av:.1f}%", f"{bv:.1f}%", f"{bv-av:+.1f}%p"
                 elif kind == "count":
                     at, bt, dt = f"{av:.1f}건", f"{bv:.1f}건", f"{bv-av:+.1f}건"
                 else:
@@ -13155,15 +13178,13 @@ elif menu == "SEG 개선효과":
                 '</div>', unsafe_allow_html=True,
             )
 
-            # ② 비교표: 설명은 하단 caption 대신 제목 옆에 붙임
             st.markdown(
                 '<div class="subsection-title">② SEG별 전후 비교 '
-                '<span class="segv-section-note">회색=AS-IS(V1) / 보라=TO-BE(V2) / 증감은 빨강=개선·파랑=감소 · 발송모수는 만 단위 축약</span></div>',
+                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 발송모수는 만 단위 축약</span></div>',
                 unsafe_allow_html=True,
             )
             st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
 
-            # ③ 전체 성과 추이: 4개를 2×2로 확대하고 AS-IS→TO-BE 숫자를 그래프 위에 표시
             st.markdown(
                 '<div class="subsection-title">③ 전체 성과 추이 '
                 '<span class="segv-section-note">회색 배경=AS-IS / 연보라 배경=TO-BE · 주차 라벨은 대각선 표시</span></div>',
@@ -13190,17 +13211,15 @@ elif menu == "SEG 개선효과":
                         f'<div class="segv-trend-name">{metric}</div>'
                         f'<div class="segv-trend-values"><span class="asis">{av_text}</span><span class="arrow">→</span>'
                         f'<span class="tobe">{bv_text}</span><span class="{delta_cls}">{dv_text}</span></div>'
-                        '</div>',
-                        unsafe_allow_html=True,
+                        '</div>', unsafe_allow_html=True,
                     )
                     st.plotly_chart(
-                        _segv_metric_chart(a_week, b_week, metric, cutover_ts, compact=True),
+                        _segv_metric_chart(a_week, b_week, metric, pd.Timestamp(tobe_start), compact=True),
                         use_container_width=True,
                         config={"displayModeBar": False, "responsive": True},
                         key=f"seg_effect_trend_2x2_{idx}",
                     )
 
-            # ④ 포지셔닝: 4개를 2×2로 확대, 빈 원→채운 원 이동은 그대로 유지
             st.markdown(
                 '<div class="subsection-title">④ SEG 포지셔닝 · AS-IS → TO-BE '
                 '<span class="segv-section-note">빈 원=AS-IS / 채운 원=TO-BE / 화살표=이동 방향 · 우상단 이동일수록 CTR·SPM 동반 개선</span></div>',
@@ -13215,11 +13234,11 @@ elif menu == "SEG 개선효과":
                 pd.to_numeric(b_group.get("SPM"), errors="coerce").dropna(),
             ], ignore_index=True)
             if len(all_ctr):
-                xmin = max(0.0, min(float(all_ctr.min()), b_sum["ctr"] * 100) - 0.35)
-                xmax = max(float(all_ctr.max()), b_sum["ctr"] * 100) + 0.45
-                ypad = max(6.0, float(all_spm.max()) * 0.10 if len(all_spm) else 6.0)
+                xmin = max(0.0, min(float(all_ctr.min()), b_sum["ctr"] * 100) - 0.55)
+                xmax = max(float(all_ctr.max()), b_sum["ctr"] * 100) + 0.75
+                ypad = max(8.0, float(all_spm.max()) * 0.13 if len(all_spm) else 8.0)
                 ymin = max(0.0, min(float(all_spm.min()), b_sum["spm"]) - ypad)
-                ymax = max(float(all_spm.max()), b_sum["spm"]) + ypad * 1.25
+                ymax = max(float(all_spm.max()), b_sum["spm"]) + ypad * 1.45
                 x_range, y_range = [xmin, xmax], [ymin, ymax]
             else:
                 x_range = y_range = None
@@ -13231,16 +13250,13 @@ elif menu == "SEG 개선효과":
                 with col:
                     a_sub = a_group[(a_group["성별"] == gender) & (a_group["연령"] == age)].copy()
                     b_sub = b_group[(b_group["성별"] == gender) & (b_group["연령"] == age)].copy()
-                    fig = _segv_position_compare_chart(
-                        a_sub, b_sub, b_sum["ctr"], b_sum["spm"], f"{gender}{age}", x_range, y_range,
-                    )
+                    fig = _segv_position_compare_chart(a_sub, b_sub, b_sum["ctr"], b_sum["spm"], f"{gender}{age}", x_range, y_range)
                     st.plotly_chart(
                         fig,
                         use_container_width=True,
                         config={"displayModeBar": False, "responsive": True},
                         key=f"seg_effect_pos_2x2_{gender}_{age}",
                     )
-
 
 elif menu == "타겟분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟분석 화면으로 바로 연결됩니다.")
