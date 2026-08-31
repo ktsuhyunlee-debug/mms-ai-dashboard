@@ -11172,10 +11172,13 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         combined["주차"] = combined["주차"].fillna("").astype(str).str.strip()
         bad = combined["주차"].str.lower().str.contains(r"undefined|null|nan|none|nat|<na>", regex=True, na=False) | combined["주차"].eq("")
         combined.loc[bad, "주차"] = combined.loc[bad, "주차시작"].dt.strftime("%m/%d주")
-        # AS-IS/TO-BE 기간이 같은 달력 주차를 공유해도 x축 라벨은 주차당 한 번만 표시
+        # AS-IS/TO-BE가 같은 달력 주차를 공유해도 x축 tick은 딱 한 번만 생성합니다.
+        # 두 기간의 실제 성과 포인트는 모두 유지하고, 축 라벨만 중복 제거합니다.
         combined = (
-            combined.sort_values("주차시작")
-            .groupby("주차시작", as_index=False, sort=True)["주차"].first()
+            combined.sort_values(["주차시작", "주차"], kind="stable")
+            .drop_duplicates(subset=["주차시작"], keep="first")
+            .sort_values("주차시작")
+            .reset_index(drop=True)
         )
 
     start_ts = pd.to_datetime(tobe_start, errors="coerce")
@@ -11183,7 +11186,12 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         fig.add_vline(x=start_ts, line_dash="dot", line_color="#5b3fd4", line_width=1.4)
 
     fig.update_layout(
-        title=(None if compact else dict(text=f"<b>{title}</b>", x=0.02, xanchor="left", font=dict(size=17, color="#111827"))),
+        # compact 모드에서는 title을 None으로 넘기지 않고 빈 문자열로 고정해
+        # 브라우저에서 `undefined`가 제목처럼 표시되는 현상을 방지합니다.
+        title=dict(
+            text="" if compact else f"<b>{title}</b>",
+            x=0.02, xanchor="left", font=dict(size=17, color="#111827"),
+        ),
         height=285 if compact else 390,
         margin=dict(l=48 if compact else 50, r=16 if compact else 20, t=34 if compact else 70, b=76 if compact else 65),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
@@ -11373,14 +11381,14 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
 
 
 
-_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "SEG 개선효과", "편성 프로그램"]
+_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "SEG분석", "편성 프로그램"]
 _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
     "weekly": "주간실적",
     "product": "상품구분",
     "target": "타겟분석",
-    "seg-effect": "SEG 개선효과",
+    "seg-effect": "SEG분석",
     "planning": "편성 프로그램",
 }
 _menu_name_to_slug = {v: k for k, v in _menu_slug_to_name.items()}
@@ -13077,9 +13085,9 @@ elif menu == "상품구분":
 
 
 
-elif menu == "SEG 개선효과":
-    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG 개선효과 화면으로 바로 연결됩니다.")
-    st.markdown('<div class="section-title">SEG 개선효과 분석</div>', unsafe_allow_html=True)
+elif menu == "SEG분석":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG분석 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">SEG분석</div>', unsafe_allow_html=True)
     st.caption("AS-IS와 TO-BE 기간을 각각 지정해 CTR·SPM·만건당 성과와 SEG별 이동을 비교합니다.")
 
     st.markdown("""
@@ -13101,7 +13109,7 @@ elif menu == "SEG 개선효과":
     seg_date_series = sends["_date"] if "_date" in sends.columns else pd.Series(dtype="datetime64[ns]")
     seg_valid_dates = pd.to_datetime(seg_date_series, errors="coerce").dropna()
     if seg_valid_dates.empty:
-        st.info("SEG 개선효과를 분석할 발송일 데이터가 없습니다.")
+        st.info("SEG분석에 사용할 발송일 데이터가 없습니다.")
     else:
         seg_data_min = seg_valid_dates.min().date()
         seg_data_max = seg_valid_dates.max().date()
