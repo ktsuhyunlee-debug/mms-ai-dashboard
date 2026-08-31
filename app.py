@@ -10603,13 +10603,346 @@ overall_performance = st.session_state.get(
 material_age_raw = st.session_state.get("material_age_raw", pd.DataFrame())
 material_region_raw = st.session_state.get("material_region_raw", pd.DataFrame())
 
-_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "편성 프로그램"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEG V1 → V2 개선효과 분석
+# - 기간 기반 AS-IS / TO-BE 비교
+# - CTR / SPM / 주문금액·만건 / 주문건수·만건 모수 보정 지표
+# - 프로모션·요일·시간대 통제 옵션
+# ─────────────────────────────────────────────────────────────────────────────
+def _segv_prepare_period(
+    source: pd.DataFrame,
+    start_date,
+    end_date,
+    promotions_df: pd.DataFrame | None = None,
+    exclude_promotion: bool = False,
+) -> pd.DataFrame:
+    """SEG 효과분석에 필요한 발송 데이터를 표준 컬럼으로 변환합니다."""
+    cols = [
+        "_date", "_gender", "_age", "_seg", "_sent", "_click", "_orders", "_amount",
+        "_weekday", "_time",
+    ]
+    if source is None or source.empty:
+        return pd.DataFrame(columns=cols)
+
+    d = source.copy()
+    if "_date" not in d.columns:
+        return pd.DataFrame(columns=cols)
+    d["_date"] = pd.to_datetime(d["_date"], errors="coerce").dt.normalize()
+    start_ts = pd.to_datetime(start_date, errors="coerce")
+    end_ts = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        return pd.DataFrame(columns=cols)
+    start_ts, end_ts = start_ts.normalize(), end_ts.normalize()
+    d = d[d["_date"].notna() & d["_date"].between(start_ts, end_ts, inclusive="both")].copy()
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+
+    gender_col = first_col(d, ["성별", "Gender", "gender"])
+    age_col = first_col(d, ["연령", "연령대", "Age", "age"])
+    seg_col = first_col(d, ["SEG", "Seg", "seg", "세그", "세그먼트"])
+    sent_col = first_col(d, ["발송 성공 건수", "성공건수", "총 발송 건수", "발송건수"])
+    click_col = first_col(d, ["클릭 수(uniq)", "클릭수(Uniq)", "클릭 수", "클릭수"])
+    order_col = first_col(d, ["주문건수", "주문 건수"])
+    amount_col = first_col(d, ["주문금액", "주문 금액", "매출", "매출액"])
+    time_col = first_col(d, ["시간대", "발송시간", "시간"])
+    weekday_col = first_col(d, ["요일"])
+
+    if not all([gender_col, age_col, seg_col, sent_col, click_col, order_col, amount_col]):
+        return pd.DataFrame(columns=cols)
+
+    out = pd.DataFrame(index=d.index)
+    out["_date"] = d["_date"]
+    out["_gender"] = (
+        d[gender_col].fillna("").astype(str).str.strip()
+        .replace({"남": "남성", "남자": "남성", "M": "남성", "male": "남성",
+                  "여": "여성", "여자": "여성", "F": "여성", "female": "여성"})
+    )
+
+    def _age_norm(value):
+        s = clean_identifier_value(value)
+        raw = str(value or "").strip()
+        if "3040" in s or ("30" in raw and "40" in raw):
+            return "3040"
+        if "5060" in s or ("50" in raw and "60" in raw):
+            return "5060"
+        return s
+
+    def _seg_norm(value):
+        s = clean_identifier_value(value)
+        m = re.search(r"([123])", s)
+        return m.group(1) if m else ""
+
+    out["_age"] = d[age_col].map(_age_norm)
+    out["_seg"] = d[seg_col].map(_seg_norm)
+    out["_sent"] = num(d[sent_col]).astype(float)
+    out["_click"] = num(d[click_col]).astype(float)
+    out["_orders"] = num(d[order_col]).astype(float)
+    out["_amount"] = num(d[amount_col]).astype(float)
+    if weekday_col:
+        out["_weekday"] = d[weekday_col].fillna("").astype(str).str.strip()
+    else:
+        weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+        out["_weekday"] = out["_date"].dt.dayofweek.map(weekday_map)
+    out["_time"] = d[time_col].fillna("").astype(str).str.strip() if time_col else ""
+
+    out = out[
+        out["_gender"].isin(["남성", "여성"])
+        & out["_age"].isin(["3040", "5060"])
+        & out["_seg"].isin(["1", "2", "3"])
+        & out["_sent"].gt(0)
+    ].copy()
+
+    if exclude_promotion and promotions_df is not None and not promotions_df.empty and not out.empty:
+        promo_mask = pd.Series(False, index=out.index)
+        for _, prow in promotions_df.iterrows():
+            ps = pd.to_datetime(prow.get("_start_date"), errors="coerce")
+            pe = pd.to_datetime(prow.get("_end_date"), errors="coerce")
+            if pd.isna(ps):
+                continue
+            ps = ps.normalize()
+            pe = pe.normalize() if pd.notna(pe) else ps
+            promo_mask |= out["_date"].between(ps, pe, inclusive="both")
+        out = out[~promo_mask].copy()
+
+    return out.reset_index(drop=True)
+
+
+def _segv_apply_common_conditions(asis: pd.DataFrame, tobe: pd.DataFrame, controls: list[str]):
+    """요일/시간대 믹스 차이를 줄이기 위한 공통 조건 필터."""
+    a, b = asis.copy(), tobe.copy()
+    notes = []
+    if "공통 요일만 비교" in controls and not a.empty and not b.empty:
+        common = set(a["_weekday"].dropna().astype(str)) & set(b["_weekday"].dropna().astype(str))
+        if common:
+            a = a[a["_weekday"].isin(common)].copy()
+            b = b[b["_weekday"].isin(common)].copy()
+            notes.append("공통 요일 " + ", ".join(sorted(common)))
+    if "공통 시간대만 비교" in controls and not a.empty and not b.empty:
+        common = set(a["_time"].dropna().astype(str)) & set(b["_time"].dropna().astype(str))
+        common.discard("")
+        if common:
+            a = a[a["_time"].isin(common)].copy()
+            b = b[b["_time"].isin(common)].copy()
+            notes.append("공통 시간대 " + ", ".join(sorted(common)))
+    return a.reset_index(drop=True), b.reset_index(drop=True), notes
+
+
+def _segv_summary(d: pd.DataFrame) -> dict:
+    if d is None or d.empty:
+        return {"sent": 0.0, "click": 0.0, "orders": 0.0, "amount": 0.0,
+                "ctr": 0.0, "spm": 0.0, "amount_10k": 0.0, "orders_10k": 0.0}
+    sent = float(pd.to_numeric(d["_sent"], errors="coerce").fillna(0).sum())
+    click = float(pd.to_numeric(d["_click"], errors="coerce").fillna(0).sum())
+    orders = float(pd.to_numeric(d["_orders"], errors="coerce").fillna(0).sum())
+    amount = float(pd.to_numeric(d["_amount"], errors="coerce").fillna(0).sum())
+    return {
+        "sent": sent,
+        "click": click,
+        "orders": orders,
+        "amount": amount,
+        "ctr": click / sent if sent else 0.0,
+        "spm": amount / sent if sent else 0.0,
+        "amount_10k": amount / sent * 10_000 if sent else 0.0,
+        "orders_10k": orders / sent * 10_000 if sent else 0.0,
+    }
+
+
+def _segv_group_summary(d: pd.DataFrame) -> pd.DataFrame:
+    cols = ["성별", "연령", "SEG", "발송모수", "클릭수", "주문건수", "주문금액", "CTR", "SPM", "주문금액/만건", "주문건수/만건"]
+    if d is None or d.empty:
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(["_gender", "_age", "_seg"], as_index=False, dropna=False).agg(
+        발송모수=("_sent", "sum"),
+        클릭수=("_click", "sum"),
+        주문건수=("_orders", "sum"),
+        주문금액=("_amount", "sum"),
+    )
+    g["CTR"] = g["클릭수"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
+    g["SPM"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
+    g["주문금액/만건"] = g["SPM"] * 10_000
+    g["주문건수/만건"] = g["주문건수"].div(g["발송모수"].replace(0, pd.NA)).fillna(0) * 10_000
+    g = g.rename(columns={"_gender": "성별", "_age": "연령", "_seg": "SEG"})
+    gender_order = pd.Categorical(g["성별"], categories=["남성", "여성"], ordered=True)
+    age_order = pd.Categorical(g["연령"], categories=["3040", "5060"], ordered=True)
+    g = g.assign(_g=gender_order, _a=age_order, _s=pd.to_numeric(g["SEG"], errors="coerce"))
+    g = g.sort_values(["_a", "_g", "_s"]).drop(columns=["_g", "_a", "_s"]).reset_index(drop=True)
+    # 원하는 화면 순서: 남3040 → 여3040 → 남5060 → 여5060
+    order = {("남성", "3040"): 0, ("여성", "3040"): 1, ("남성", "5060"): 2, ("여성", "5060"): 3}
+    g["_order"] = [order.get((x, y), 9) for x, y in zip(g["성별"], g["연령"])]
+    return g.sort_values(["_order", "SEG"]).drop(columns="_order").reset_index(drop=True)[cols]
+
+
+def _segv_compare_table(asis_g: pd.DataFrame, tobe_g: pd.DataFrame) -> pd.DataFrame:
+    base = pd.DataFrame(
+        [(gender, age, str(seg))
+         for gender, age in [("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")]
+         for seg in [1, 2, 3]],
+        columns=["성별", "연령", "SEG"],
+    )
+    a = asis_g.rename(columns={c: f"A_{c}" for c in asis_g.columns if c not in ["성별", "연령", "SEG"]})
+    b = tobe_g.rename(columns={c: f"B_{c}" for c in tobe_g.columns if c not in ["성별", "연령", "SEG"]})
+    m = base.merge(a, on=["성별", "연령", "SEG"], how="left").merge(b, on=["성별", "연령", "SEG"], how="left").fillna(0)
+    out = pd.DataFrame({
+        "구분": m["성별"] + " " + m["연령"],
+        "SEG": "SEG" + m["SEG"].astype(str),
+        "AS-IS CTR(%)": m.get("A_CTR", 0) * 100,
+        "AS-IS SPM(원)": m.get("A_SPM", 0),
+        "AS-IS 주문금액(원)": m.get("A_주문금액", 0),
+        "AS-IS 발송모수": m.get("A_발송모수", 0),
+        "TO-BE CTR(%)": m.get("B_CTR", 0) * 100,
+        "TO-BE SPM(원)": m.get("B_SPM", 0),
+        "TO-BE 주문금액(원)": m.get("B_주문금액", 0),
+        "TO-BE 발송모수": m.get("B_발송모수", 0),
+    })
+    out["CTR 증감(p)"] = out["TO-BE CTR(%)"] - out["AS-IS CTR(%)"]
+    out["SPM 증감(원)"] = out["TO-BE SPM(원)"] - out["AS-IS SPM(원)"]
+    out["주문금액/만건 증감(원)"] = m.get("B_주문금액/만건", 0) - m.get("A_주문금액/만건", 0)
+    out["주문건수/만건 증감(건)"] = m.get("B_주문건수/만건", 0) - m.get("A_주문건수/만건", 0)
+    return out
+
+
+def _segv_weekly(d: pd.DataFrame) -> pd.DataFrame:
+    if d is None or d.empty:
+        return pd.DataFrame(columns=["주차시작", "CTR", "SPM", "주문금액/만건", "주문건수/만건", "발송모수"])
+    w = d.copy()
+    # 월요일 기준 주차. 기간이 주중에 시작돼도 실제 선택된 행만 합산합니다.
+    w["주차시작"] = w["_date"] - pd.to_timedelta(w["_date"].dt.dayofweek, unit="D")
+    g = w.groupby("주차시작", as_index=False).agg(
+        발송모수=("_sent", "sum"), 클릭수=("_click", "sum"), 주문건수=("_orders", "sum"), 주문금액=("_amount", "sum")
+    )
+    g["CTR"] = g["클릭수"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
+    g["SPM"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
+    g["주문금액/만건"] = g["SPM"] * 10_000
+    g["주문건수/만건"] = g["주문건수"].div(g["발송모수"].replace(0, pd.NA)).fillna(0) * 10_000
+    return g.sort_values("주차시작").reset_index(drop=True)
+
+
+def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, tobe_start) -> go.Figure:
+    meta = {
+        "CTR": ("CTR 추이 (%)", lambda s: s * 100, "%", ".2f"),
+        "SPM": ("SPM 추이 (원)", lambda s: s, "원", ",.0f"),
+        "주문금액/만건": ("주문금액/만건 추이 (원)", lambda s: s, "원", ",.0f"),
+        "주문건수/만건": ("주문건수/만건 추이 (건)", lambda s: s, "건", ".1f"),
+    }
+    title, transform, suffix, fmt = meta[metric]
+    fig = go.Figure()
+    for label, data, color in [("AS-IS", asis_w, "#9ca3af"), ("TO-BE", tobe_w, "#5b3fd4")]:
+        if data is None or data.empty:
+            continue
+        y = transform(pd.to_numeric(data[metric], errors="coerce").fillna(0))
+        text = None
+        if len(data) <= 10:
+            if metric == "CTR":
+                text = [f"{v:.2f}%" for v in y]
+            elif metric == "주문건수/만건":
+                text = [f"{v:.1f}" for v in y]
+            else:
+                text = [f"{v:,.0f}" for v in y]
+        fig.add_trace(go.Scatter(
+            x=data["주차시작"], y=y, mode="lines+markers+text" if text else "lines+markers",
+            text=text, textposition="top center", name=label,
+            line=dict(color=color, width=2.5), marker=dict(size=8, color=color),
+            hovertemplate=f"{label}<br>%{{x|%Y-%m-%d}}<br>{metric}: %{{y:{fmt}}}{suffix}<extra></extra>",
+        ))
+    start_ts = pd.to_datetime(tobe_start, errors="coerce")
+    if pd.notna(start_ts):
+        fig.add_vline(x=start_ts, line_dash="dot", line_color="#6d5bd0", line_width=1.5)
+        fig.add_annotation(x=start_ts, y=1.08, yref="paper", text="TO-BE 시작", showarrow=False,
+                           font=dict(size=11, color="#5b3fd4"), bgcolor="#f3f0ff")
+    fig.update_layout(
+        title=dict(text=title, x=0.01, xanchor="left", font=dict(size=17)),
+        height=390, margin=dict(l=50, r=20, t=70, b=45),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.12, x=0),
+        xaxis=dict(title=None, tickformat="%m/%d", gridcolor="#eef1f5"),
+        yaxis=dict(title=None, gridcolor="#eef1f5"),
+        font=dict(color="#111827"),
+    )
+    return fig
+
+
+def _segv_position_chart(group_df: pd.DataFrame, overall_ctr: float, overall_spm: float, title: str,
+                         x_range=None, y_range=None) -> go.Figure:
+    colors = {"1": "#5b3fd4", "2": "#22a06b", "3": "#9ca3af"}
+    fig = go.Figure()
+    if group_df is not None and not group_df.empty:
+        for _, row in group_df.iterrows():
+            seg = clean_identifier_value(row.get("SEG", ""))
+            fig.add_trace(go.Scatter(
+                x=[float(row.get("CTR", 0)) * 100],
+                y=[float(row.get("SPM", 0))],
+                mode="markers+text",
+                text=[f"SEG{seg}"], textposition="middle right",
+                marker=dict(size=11, color=colors.get(seg, "#64748b"), line=dict(width=1, color="#ffffff")),
+                name=f"SEG{seg}", showlegend=False,
+                customdata=[[float(row.get("발송모수", 0)), float(row.get("주문건수", 0)), float(row.get("주문금액", 0))]],
+                hovertemplate=(
+                    f"SEG{seg}<br>CTR: %{{x:.2f}}%<br>SPM: %{{y:,.0f}}원"
+                    "<br>발송모수: %{customdata[0]:,.0f}건"
+                    "<br>주문건수: %{customdata[1]:,.0f}건"
+                    "<br>주문금액: %{customdata[2]:,.0f}원<extra></extra>"
+                ),
+            ))
+    fig.add_vline(x=float(overall_ctr or 0) * 100, line_dash="dot", line_color="#9ca3af", line_width=1)
+    fig.add_hline(y=float(overall_spm or 0), line_dash="dot", line_color="#9ca3af", line_width=1)
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center", font=dict(size=15)),
+        height=315, margin=dict(l=42, r=20, t=46, b=42),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(color="#111827"),
+        xaxis=dict(title="CTR (%)", gridcolor="#f0f2f5", range=x_range),
+        yaxis=dict(title="SPM (원)", gridcolor="#f0f2f5", range=y_range),
+        hovermode="closest",
+    )
+    return fig
+
+
+def _segv_relative_delta(cur: float, prev: float):
+    if not prev:
+        return None
+    return (cur - prev) / abs(prev)
+
+
+def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFrame, controls: list[str]) -> list[str]:
+    lines = []
+    ctr_pp = (tobe_summary["ctr"] - asis_summary["ctr"]) * 100
+    spm_delta = tobe_summary["spm"] - asis_summary["spm"]
+    a10 = _segv_relative_delta(tobe_summary["amount_10k"], asis_summary["amount_10k"])
+    o10 = _segv_relative_delta(tobe_summary["orders_10k"], asis_summary["orders_10k"])
+    lines.append(
+        f"• 전체 효과 : CTR {ctr_pp:+.2f}%p / SPM {spm_delta:+,.0f}원 / "
+        f"주문금액·만건 {(a10*100):+.1f}% / 주문건수·만건 {(o10*100):+.1f}%"
+        if a10 is not None and o10 is not None else
+        f"• 전체 효과 : CTR {ctr_pp:+.2f}%p / SPM {spm_delta:+,.0f}원"
+    )
+    valid = compare_df[(compare_df["AS-IS 발송모수"] > 0) & (compare_df["TO-BE 발송모수"] > 0)].copy()
+    if not valid.empty:
+        valid["_score"] = valid["CTR 증감(p)"] + valid["SPM 증감(원)"].div(valid["AS-IS SPM(원)"].replace(0, pd.NA)).fillna(0) * 2
+        best = valid.sort_values("_score", ascending=False).iloc[0]
+        worst = valid.sort_values("_score", ascending=True).iloc[0]
+        lines.append(
+            f"• 개선 우수 : {best['구분']} {best['SEG']} → CTR {best['CTR 증감(p)']:+.2f}%p / SPM {best['SPM 증감(원)']:+,.0f}원"
+        )
+        if float(worst["_score"]) < 0:
+            lines.append(
+                f"• 추가 점검 : {worst['구분']} {worst['SEG']} → CTR {worst['CTR 증감(p)']:+.2f}%p / SPM {worst['SPM 증감(원)']:+,.0f}원"
+            )
+        else:
+            both = int(((valid["CTR 증감(p)"] > 0) & (valid["SPM 증감(원)"] > 0)).sum())
+            lines.append(f"• 동반 개선 : 비교 가능한 12개 SEG 중 CTR·SPM이 함께 개선된 SEG {both}개")
+    if controls:
+        lines.append("• 비교 통제 : " + " / ".join(controls))
+    return lines[:4]
+
+_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "SEG 개선효과", "편성 프로그램"]
 _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
     "weekly": "주간실적",
     "product": "상품구분",
     "target": "타겟분석",
+    "seg-effect": "SEG 개선효과",
     "planning": "편성 프로그램",
 }
 _menu_name_to_slug = {v: k for k, v in _menu_slug_to_name.items()}
@@ -12304,6 +12637,212 @@ elif menu == "상품구분":
                 height=min(420, 42 + len(history_view) * 35),
             )
 
+
+
+elif menu == "SEG 개선효과":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG 개선효과 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">SEG 개선효과 분석</div>', unsafe_allow_html=True)
+    st.caption(
+        "SEG V1(AS-IS)과 V2(TO-BE)를 기간 기준으로 비교합니다. "
+        "CTR·SPM뿐 아니라 발송모수 차이를 보정한 주문금액/만건·주문건수/만건을 함께 확인합니다."
+    )
+
+    _seg_dates = pd.to_datetime(sends.get("_date"), errors="coerce").dropna().dt.normalize()
+    if _seg_dates.empty:
+        st.info("SEG 개선효과를 분석할 발송일 데이터가 없습니다.")
+    else:
+        _seg_min = _seg_dates.min().date()
+        _seg_max = _seg_dates.max().date()
+        _preferred_cut = pd.Timestamp("2026-07-08")
+        if not (pd.Timestamp(_seg_min) <= _preferred_cut <= pd.Timestamp(_seg_max)):
+            _preferred_cut = pd.Timestamp(_seg_min) + (pd.Timestamp(_seg_max) - pd.Timestamp(_seg_min)) / 2
+        _preferred_cut = _preferred_cut.normalize()
+
+        _asis_default_end = min(pd.Timestamp(_seg_max), _preferred_cut - pd.Timedelta(days=1))
+        _asis_default_start = max(pd.Timestamp(_seg_min), _asis_default_end - pd.Timedelta(days=27))
+        _tobe_default_start = max(pd.Timestamp(_seg_min), _preferred_cut)
+        _tobe_default_end = min(pd.Timestamp(_seg_max), _tobe_default_start + pd.Timedelta(days=27))
+
+        st.markdown('<div class="subsection-title">① 분석 조건 설정</div>', unsafe_allow_html=True)
+        f1, f2 = st.columns(2)
+        with f1:
+            asis_range = st.date_input(
+                "AS-IS · SEG V1 기간",
+                [_asis_default_start.date(), _asis_default_end.date()],
+                min_value=_seg_min, max_value=_seg_max,
+                key="seg_effect_asis_range",
+            )
+        with f2:
+            tobe_range = st.date_input(
+                "TO-BE · SEG V2 기간",
+                [_tobe_default_start.date(), _tobe_default_end.date()],
+                min_value=_seg_min, max_value=_seg_max,
+                key="seg_effect_tobe_range",
+            )
+
+        if len(asis_range) == 2:
+            asis_start, asis_end = asis_range
+        else:
+            asis_start, asis_end = _asis_default_start.date(), _asis_default_end.date()
+        if len(tobe_range) == 2:
+            tobe_start, tobe_end = tobe_range
+        else:
+            tobe_start, tobe_end = _tobe_default_start.date(), _tobe_default_end.date()
+
+        available_controls = ["공통 요일만 비교", "공통 시간대만 비교"]
+        default_controls = []
+        if promotions is not None and not promotions.empty:
+            available_controls = ["프로모션 기간 제외"] + available_controls
+            default_controls = ["프로모션 기간 제외"]
+        controls = st.multiselect(
+            "비교 통제 조건",
+            available_controls,
+            default=default_controls,
+            key="seg_effect_controls",
+            help="SEG 변경 외 프로모션·요일·시간대 믹스 차이의 영향을 줄이기 위한 옵션입니다.",
+        )
+
+        if pd.Timestamp(asis_end) >= pd.Timestamp(tobe_start):
+            st.warning("AS-IS와 TO-BE 기간이 겹칩니다. 개선 전·후 효과를 명확히 보려면 서로 겹치지 않는 기간을 권장합니다.")
+        asis_days = (pd.Timestamp(asis_end) - pd.Timestamp(asis_start)).days + 1
+        tobe_days = (pd.Timestamp(tobe_end) - pd.Timestamp(tobe_start)).days + 1
+        if abs(asis_days - tobe_days) >= 7:
+            st.caption(f"ℹ️ 비교 기간 길이 차이 · AS-IS {asis_days}일 / TO-BE {tobe_days}일 → 총액보다 만건당 지표를 우선 해석하세요.")
+
+        exclude_promo = "프로모션 기간 제외" in controls
+        asis_df = _segv_prepare_period(sends, asis_start, asis_end, promotions, exclude_promo)
+        tobe_df = _segv_prepare_period(sends, tobe_start, tobe_end, promotions, exclude_promo)
+        asis_df, tobe_df, common_notes = _segv_apply_common_conditions(asis_df, tobe_df, controls)
+
+        if asis_df.empty or tobe_df.empty:
+            if asis_df.empty:
+                st.error("AS-IS 기간에 분석 가능한 성별·연령·SEG 발송 데이터가 없습니다.")
+            if tobe_df.empty:
+                st.error("TO-BE 기간에 분석 가능한 성별·연령·SEG 발송 데이터가 없습니다.")
+        else:
+            a_sum = _segv_summary(asis_df)
+            b_sum = _segv_summary(tobe_df)
+            a_group = _segv_group_summary(asis_df)
+            b_group = _segv_group_summary(tobe_df)
+            compare_df = _segv_compare_table(a_group, b_group)
+
+            if common_notes:
+                st.caption("적용된 공통 조건 · " + " / ".join(common_notes))
+            st.caption(
+                f"집계 기준 · AS-IS {asis_start:%Y-%m-%d}~{asis_end:%Y-%m-%d} / "
+                f"TO-BE {tobe_start:%Y-%m-%d}~{tobe_end:%Y-%m-%d} · "
+                "CTR=Uniq 클릭/발송성공건수 · SPM=주문금액/발송성공건수"
+            )
+
+            st.markdown('<div class="subsection-title">② 전체 개선 효과</div>', unsafe_allow_html=True)
+            k1, k2, k3, k4 = st.columns(4)
+            ctr_delta_pp = (b_sum["ctr"] - a_sum["ctr"]) * 100
+            spm_delta = b_sum["spm"] - a_sum["spm"]
+            amount10_delta = _segv_relative_delta(b_sum["amount_10k"], a_sum["amount_10k"])
+            order10_delta = _segv_relative_delta(b_sum["orders_10k"], a_sum["orders_10k"])
+            k1.metric("TO-BE CTR", f"{b_sum['ctr']*100:.2f}%", f"{ctr_delta_pp:+.2f}%p")
+            k2.metric("TO-BE SPM", f"{b_sum['spm']:,.0f}원", f"{spm_delta:+,.0f}원")
+            k3.metric("TO-BE 주문금액/만건", f"{b_sum['amount_10k']:,.0f}원",
+                      f"{amount10_delta*100:+.1f}%" if amount10_delta is not None else "-")
+            k4.metric("TO-BE 주문건수/만건", f"{b_sum['orders_10k']:,.1f}건",
+                      f"{order10_delta*100:+.1f}%" if order10_delta is not None else "-")
+
+            st.markdown('<div class="subsection-title">③ SEG별 AS-IS / TO-BE 비교</div>', unsafe_allow_html=True)
+            display_compare = compare_df.copy()
+            format_map = {
+                "AS-IS CTR(%)": "{:.2f}", "TO-BE CTR(%)": "{:.2f}", "CTR 증감(p)": "{:+.2f}",
+                "AS-IS SPM(원)": "{:,.0f}", "TO-BE SPM(원)": "{:,.0f}", "SPM 증감(원)": "{:+,.0f}",
+                "AS-IS 주문금액(원)": "{:,.0f}", "TO-BE 주문금액(원)": "{:,.0f}",
+                "AS-IS 발송모수": "{:,.0f}", "TO-BE 발송모수": "{:,.0f}",
+                "주문금액/만건 증감(원)": "{:+,.0f}", "주문건수/만건 증감(건)": "{:+.1f}",
+            }
+            delta_cols = ["CTR 증감(p)", "SPM 증감(원)", "주문금액/만건 증감(원)", "주문건수/만건 증감(건)"]
+            def _segv_delta_style(value):
+                try:
+                    v = float(value)
+                    if v > 0:
+                        return "color:#dc2626;font-weight:700;"
+                    if v < 0:
+                        return "color:#2563eb;font-weight:700;"
+                except Exception:
+                    pass
+                return "color:#111827;"
+            styled_compare = display_compare.style.format(format_map).map(_segv_delta_style, subset=delta_cols)
+            st.dataframe(styled_compare, use_container_width=True, hide_index=True, height=455)
+            st.caption("증감은 빨강=개선 / 파랑=감소 · 주문금액/만건·주문건수/만건은 발송모수 차이를 보정한 값")
+
+            st.markdown('<div class="subsection-title">④ 전체 성과 추이 · 주차별</div>', unsafe_allow_html=True)
+            a_week = _segv_weekly(asis_df)
+            b_week = _segv_weekly(tobe_df)
+            tab_ctr, tab_spm, tab_amt10, tab_ord10 = st.tabs(["CTR", "SPM", "주문금액/만건", "주문건수/만건"])
+            with tab_ctr:
+                st.plotly_chart(_segv_metric_chart(a_week, b_week, "CTR", tobe_start), use_container_width=True,
+                                config={"displayModeBar": False}, key="seg_effect_trend_ctr")
+            with tab_spm:
+                st.plotly_chart(_segv_metric_chart(a_week, b_week, "SPM", tobe_start), use_container_width=True,
+                                config={"displayModeBar": False}, key="seg_effect_trend_spm")
+            with tab_amt10:
+                st.plotly_chart(_segv_metric_chart(a_week, b_week, "주문금액/만건", tobe_start), use_container_width=True,
+                                config={"displayModeBar": False}, key="seg_effect_trend_amt10")
+            with tab_ord10:
+                st.plotly_chart(_segv_metric_chart(a_week, b_week, "주문건수/만건", tobe_start), use_container_width=True,
+                                config={"displayModeBar": False}, key="seg_effect_trend_ord10")
+
+            trend_summary = pd.DataFrame([
+                {
+                    "구분": "AS-IS 평균",
+                    "CTR(%)": f"{a_sum['ctr']*100:.2f}",
+                    "SPM(원)": f"{a_sum['spm']:,.0f}",
+                    "주문금액/만건(원)": f"{a_sum['amount_10k']:,.0f}",
+                    "주문건수/만건(건)": f"{a_sum['orders_10k']:.1f}",
+                },
+                {
+                    "구분": "TO-BE 평균",
+                    "CTR(%)": f"{b_sum['ctr']*100:.2f}",
+                    "SPM(원)": f"{b_sum['spm']:,.0f}",
+                    "주문금액/만건(원)": f"{b_sum['amount_10k']:,.0f}",
+                    "주문건수/만건(건)": f"{b_sum['orders_10k']:.1f}",
+                },
+                {
+                    "구분": "증감",
+                    "CTR(%)": f"{(b_sum['ctr'] - a_sum['ctr']) * 100:+.2f}",
+                    "SPM(원)": f"{b_sum['spm'] - a_sum['spm']:+,.0f}",
+                    "주문금액/만건(원)": f"{b_sum['amount_10k'] - a_sum['amount_10k']:+,.0f}",
+                    "주문건수/만건(건)": f"{b_sum['orders_10k'] - a_sum['orders_10k']:+.1f}",
+                },
+            ])
+            st.dataframe(trend_summary, use_container_width=True, hide_index=True, height=145)
+
+            st.markdown('<div class="subsection-title">⑤ SEG별 SPM / CTR 포지셔닝 · TO-BE 누적</div>', unsafe_allow_html=True)
+            st.caption("점선은 TO-BE 전체 평균 · 우상단일수록 CTR과 SPM이 모두 높은 SEG")
+            bx = pd.to_numeric(b_group["CTR"], errors="coerce").fillna(0) * 100
+            by = pd.to_numeric(b_group["SPM"], errors="coerce").fillna(0)
+            if len(bx):
+                xmin = max(0.0, min(float(bx.min()), b_sum["ctr"] * 100) - 0.35)
+                xmax = max(float(bx.max()), b_sum["ctr"] * 100) + 0.35
+                ymin = max(0.0, min(float(by.min()), b_sum["spm"]) - max(5.0, float(by.max()) * 0.08 if len(by) else 5.0))
+                ymax = max(float(by.max()), b_sum["spm"]) + max(5.0, float(by.max()) * 0.12 if len(by) else 5.0)
+                x_range, y_range = [xmin, xmax], [ymin, ymax]
+            else:
+                x_range = y_range = None
+            pos_cols = st.columns(4)
+            for col, (gender, age) in zip(pos_cols, [("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")]):
+                with col:
+                    sub = b_group[(b_group["성별"] == gender) & (b_group["연령"] == age)].copy()
+                    fig = _segv_position_chart(sub, b_sum["ctr"], b_sum["spm"], f"{gender} {age}", x_range, y_range)
+                    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
+                                    key=f"seg_effect_pos_{gender}_{age}")
+
+            st.markdown('<div class="subsection-title">⑥ 분석 요약</div>', unsafe_allow_html=True)
+            insight_lines = _segv_insights(a_sum, b_sum, compare_df, controls)
+            st.markdown(
+                '<div class="insight-box">' + '<br>'.join(_html.escape(line) for line in insight_lines) + '</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "SEG 개선효과는 상품 구성·가격·프로모션·요일·시간대 영향이 함께 섞일 수 있으므로 "
+                "CTR·SPM과 만건당 지표를 함께 보고, 필요 시 비교 통제 조건을 적용해 해석하세요."
+            )
 
 elif menu == "타겟분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟분석 화면으로 바로 연결됩니다.")
