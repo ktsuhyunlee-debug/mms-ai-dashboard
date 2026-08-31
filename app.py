@@ -10701,7 +10701,14 @@ def _segv_prepare_period(
 
     def _week_norm(value):
         raw = str(value or "").strip()
-        if not raw or raw.lower() in {"nan", "none", "undefined", "null", "nat", "<na>"}:
+        low = raw.lower()
+        # 원본/브라우저 계열 결측 표기(예: undefined, undefined주차, NaN 주차)를
+        # 그대로 축 라벨로 내보내지 않고 빈값으로 정규화합니다.
+        if (
+            not raw
+            or re.search(r"(?:^|\s)(?:undefined|null|nan|none|nat|<na>)(?:\s*주차)?(?:$|\s)", low)
+            or any(token in low for token in ["undefined", "null", "<na>"])
+        ):
             return ""
         if "주차" in raw:
             return raw
@@ -11056,30 +11063,49 @@ def _segv_weekly(d: pd.DataFrame) -> pd.DataFrame:
     if d is None or d.empty:
         return pd.DataFrame(columns=cols)
     w = d.copy()
-    w["_calendar_week_start"] = w["_date"] - pd.to_timedelta(w["_date"].dt.dayofweek, unit="D")
-    has_source_week = "_week" in w.columns and w["_week"].fillna("").astype(str).str.strip().ne("").any()
-    if has_source_week:
-        w["_week_key"] = w["_week"].fillna("").astype(str).str.strip()
-        # 빈값뿐 아니라 원본/브라우저 계열의 undefined/null 표기도 달력 주차로 안전하게 보완
-        invalid_week = w["_week_key"].str.lower().isin({"", "nan", "none", "undefined", "null", "nat", "<na>"})
-        w.loc[invalid_week, "_week_key"] = w.loc[invalid_week, "_calendar_week_start"].dt.strftime("%m/%d주")
-    else:
-        w["_week_key"] = w["_calendar_week_start"].dt.strftime("%m/%d주")
-
-    g = w.groupby("_week_key", as_index=False).agg(
-        주차시작=("_date", "min"),
-        발송모수=("_sent", "sum"),
-        발송성공건수=("_success", "sum"),
-        클릭수=("_click", "sum"),
-        주문건수=("_orders", "sum"),
-        주문금액=("_amount", "sum"),
+    # 선택기간이 한 주 중간에서 AS-IS/TO-BE로 나뉘어도 같은 주차는 같은 x좌표를 쓰도록
+    # 실제 데이터의 최소일이 아니라 '월요일 기준 달력 주차 시작일'로 고정합니다.
+    w["_calendar_week_start"] = (
+        pd.to_datetime(w["_date"], errors="coerce").dt.normalize()
+        - pd.to_timedelta(pd.to_datetime(w["_date"], errors="coerce").dt.dayofweek, unit="D")
     )
-    g["CTR"] = g["클릭수"].div(g["발송성공건수"].replace(0, pd.NA)).fillna(0)
-    g["SPM"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
-    g["주문금액/만건"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0) * 10_000
-    g["주문건수/만건"] = g["주문건수"].div(g["발송모수"].replace(0, pd.NA)).fillna(0) * 10_000
-    g = g.rename(columns={"_week_key": "주차"})
-    return g.sort_values("주차시작").reset_index(drop=True)[cols]
+
+    def _valid_week_label(value):
+        s = str(value or "").strip()
+        low = s.lower()
+        if not s:
+            return ""
+        if re.search(r"undefined|null|nan|none|nat|<na>", low):
+            return ""
+        return s
+
+    w["_week_label"] = w["_week"].map(_valid_week_label) if "_week" in w.columns else ""
+
+    def _pick_week_label(series: pd.Series, week_start) -> str:
+        labels = [str(v).strip() for v in series.tolist() if _valid_week_label(v)]
+        if labels:
+            # 같은 주차 안에서 중복 라벨이 있어도 첫 유효값 하나만 사용
+            return labels[0]
+        ts = pd.to_datetime(week_start, errors="coerce")
+        return ts.strftime("%m/%d주") if pd.notna(ts) else ""
+
+    grouped_rows = []
+    for week_start, sub in w.groupby("_calendar_week_start", sort=True, dropna=True):
+        sent = float(pd.to_numeric(sub["_sent"], errors="coerce").fillna(0).sum())
+        success = float(pd.to_numeric(sub["_success"], errors="coerce").fillna(0).sum())
+        clicks = float(pd.to_numeric(sub["_click"], errors="coerce").fillna(0).sum())
+        orders = float(pd.to_numeric(sub["_orders"], errors="coerce").fillna(0).sum())
+        amount = float(pd.to_numeric(sub["_amount"], errors="coerce").fillna(0).sum())
+        grouped_rows.append({
+            "주차시작": pd.to_datetime(week_start).normalize(),
+            "주차": _pick_week_label(sub["_week_label"], week_start),
+            "CTR": clicks / success if success else 0.0,
+            "SPM": amount / sent if sent else 0.0,
+            "주문금액/만건": amount / sent * 10_000 if sent else 0.0,
+            "주문건수/만건": orders / sent * 10_000 if sent else 0.0,
+            "발송모수": sent,
+        })
+    return pd.DataFrame(grouped_rows, columns=cols).sort_values("주차시작").reset_index(drop=True)
 
 
 def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, tobe_start=None, compact: bool = False) -> go.Figure:
@@ -11121,8 +11147,10 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         if data is None or data.empty:
             continue
         y = transform(pd.to_numeric(data[metric], errors="coerce").fillna(0))
-        week_series = data.get("주차", pd.Series([""] * len(data), index=data.index)).fillna("").astype(str)
-        week_series = week_series.mask(week_series.str.lower().isin(["undefined", "null", "nan", "none", "nat", "<na>"]), "")
+        week_series = data.get("주차", pd.Series([""] * len(data), index=data.index)).fillna("").astype(str).str.strip()
+        bad_week = week_series.str.lower().str.contains(r"undefined|null|nan|none|nat|<na>", regex=True, na=False) | week_series.eq("")
+        fallback_week = pd.to_datetime(data["주차시작"], errors="coerce").dt.strftime("%m/%d주")
+        week_series = week_series.mask(bad_week, fallback_week)
         custom = [[str(v)] for v in week_series.tolist()]
         texts = [_point_text(v) for v in y.tolist()]
         fig.add_trace(go.Scatter(
@@ -11138,11 +11166,17 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
     combined = pd.concat([
         asis_w[["주차시작", "주차"]] if asis_w is not None and not asis_w.empty else pd.DataFrame(columns=["주차시작", "주차"]),
         tobe_w[["주차시작", "주차"]] if tobe_w is not None and not tobe_w.empty else pd.DataFrame(columns=["주차시작", "주차"]),
-    ], ignore_index=True).dropna(subset=["주차시작"]).sort_values("주차시작").drop_duplicates("주차시작")
+    ], ignore_index=True).dropna(subset=["주차시작"]).copy()
     if not combined.empty:
+        combined["주차시작"] = pd.to_datetime(combined["주차시작"], errors="coerce").dt.normalize()
         combined["주차"] = combined["주차"].fillna("").astype(str).str.strip()
-        bad = combined["주차"].str.lower().isin(["", "undefined", "null", "nan", "none", "nat", "<na>"])
-        combined.loc[bad, "주차"] = pd.to_datetime(combined.loc[bad, "주차시작"], errors="coerce").dt.strftime("%m/%d주")
+        bad = combined["주차"].str.lower().str.contains(r"undefined|null|nan|none|nat|<na>", regex=True, na=False) | combined["주차"].eq("")
+        combined.loc[bad, "주차"] = combined.loc[bad, "주차시작"].dt.strftime("%m/%d주")
+        # AS-IS/TO-BE 기간이 같은 달력 주차를 공유해도 x축 라벨은 주차당 한 번만 표시
+        combined = (
+            combined.sort_values("주차시작")
+            .groupby("주차시작", as_index=False, sort=True)["주차"].first()
+        )
 
     start_ts = pd.to_datetime(tobe_start, errors="coerce")
     if pd.notna(start_ts):
