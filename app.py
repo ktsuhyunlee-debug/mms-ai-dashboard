@@ -8614,8 +8614,60 @@ def is_candidate_gender_compatible(
     return not ("전체" in excluded or target_gender in excluded)
 
 
-def match_candidate_history(candidate: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
-    """쇼라코드 → 알파코드 → 상품명 순으로 과거 이력을 찾습니다."""
+def _build_schedule_history_index(history: pd.DataFrame) -> dict:
+    """편성용 과거이력을 쇼라코드·알파코드·상품명별로 한 번만 인덱싱합니다.
+
+    대량 주력상품 입력 시 상품마다 전체 history를 다시 순회하지 않도록
+    값별 행 위치를 미리 저장해 이후 조회를 O(1)에 가깝게 처리합니다.
+    """
+    index = {"쇼라코드": {}, "알파코드": {}, "상품명": {}}
+    if history is None or history.empty:
+        return index
+
+    def _append_positions(bucket: dict, values: pd.Series):
+        for pos, value in enumerate(values.tolist()):
+            if value:
+                bucket.setdefault(value, []).append(pos)
+
+    for key in ["쇼라코드", "알파코드"]:
+        if key in history.columns:
+            normalized = history[key].map(clean_identifier_value)
+            _append_positions(index[key], normalized)
+
+    if "상품명" in history.columns:
+        normalized_names = history["상품명"].fillna("").astype(str).str.strip()
+        _append_positions(index["상품명"], normalized_names)
+
+    return index
+
+
+def match_candidate_history(
+    candidate: pd.Series,
+    history: pd.DataFrame,
+    history_index: dict | None = None,
+) -> pd.DataFrame:
+    """쇼라코드 → 알파코드 → 상품명 순으로 과거 이력을 찾습니다.
+
+    history_index가 전달되면 전체 이력을 매번 필터링하지 않고 미리 만든
+    위치 인덱스를 이용합니다. 기존 호출 호환성을 위해 인덱스가 없으면
+    기존 방식으로도 동작합니다.
+    """
+    if history is None or history.empty:
+        return pd.DataFrame(columns=getattr(history, "columns", None))
+
+    if history_index is not None:
+        for key in ["쇼라코드", "알파코드"]:
+            value = clean_identifier_value(candidate.get(key, ""))
+            positions = history_index.get(key, {}).get(value, []) if value else []
+            if positions:
+                return history.iloc[positions].sort_values("_date")
+
+        name = str(candidate.get("상품명", "")).strip()
+        positions = history_index.get("상품명", {}).get(name, []) if name else []
+        if positions:
+            return history.iloc[positions].sort_values("_date")
+        return history.iloc[0:0].copy()
+
     for key in ["쇼라코드", "알파코드"]:
         value = clean_identifier_value(candidate.get(key, ""))
         if value and key in history.columns:
@@ -8630,8 +8682,13 @@ def match_candidate_history(candidate: pd.Series, history: pd.DataFrame) -> pd.D
     return history.iloc[0:0].copy()
 
 
-def candidate_slot_metrics(candidate: pd.Series, target_text: str, history: pd.DataFrame) -> dict:
-    hist = match_candidate_history(candidate, history)
+def candidate_slot_metrics(
+    candidate: pd.Series,
+    target_text: str,
+    history: pd.DataFrame,
+    history_index: dict | None = None,
+) -> dict:
+    hist = match_candidate_history(candidate, history, history_index)
     target = parse_target_text(target_text)
 
     if hist.empty:
@@ -8738,6 +8795,9 @@ def build_schedule_recommendations(
     weekly_counts = {}
     day_products = {}
 
+    # 대량 후보에서도 과거이력 전체를 후보마다 다시 훑지 않도록 한 번만 인덱싱합니다.
+    history_index = _build_schedule_history_index(history)
+
     for slot_idx, slot in slots.iterrows():
         target = str(slot.get("타겟", "")).strip()
         product_count = int(float(slot.get("상품수", 0) or 0))
@@ -8768,7 +8828,7 @@ def build_schedule_recommendations(
             if weekly_counts.get(product_key, 0) >= max_weekly_count:
                 continue
 
-            metrics = candidate_slot_metrics(candidate, target, history)
+            metrics = candidate_slot_metrics(candidate, target, history, history_index)
             latest_date = metrics.get("최근발송일")
             # 재편성 제한일은 전체 편성안의 최초 날짜가 아니라
             # 현재 처리 중인 슬롯의 실제 발송일을 기준으로 개별 판단합니다.
@@ -10357,7 +10417,11 @@ def _load_schedule_candidate_upload_cached(file_bytes: bytes, file_name: str) ->
     return pd.read_excel(io.BytesIO(file_bytes))
 
 
-def _build_schedule_history_status_fast(candidates: pd.DataFrame, products: pd.DataFrame) -> pd.DataFrame:
+def _build_schedule_history_status_fast(
+    candidates: pd.DataFrame,
+    products: pd.DataFrame,
+    history_index: dict | None = None,
+) -> pd.DataFrame:
     history_columns = [
         "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
         "발송이력", "운영횟수", "최근발송일", "평균주문금액",
@@ -10365,9 +10429,11 @@ def _build_schedule_history_status_fast(candidates: pd.DataFrame, products: pd.D
     if candidates is None or candidates.empty:
         return pd.DataFrame(columns=history_columns)
     valid = candidates[candidates["상품명"].astype(str).str.strip().ne("")].copy()
+    if history_index is None:
+        history_index = _build_schedule_history_index(products)
     rows = []
     for _, candidate in valid.iterrows():
-        hist = match_candidate_history(candidate, products)
+        hist = match_candidate_history(candidate, products, history_index)
         rows.append({
             "알파코드": clean_identifier_value(candidate.get("알파코드", "")),
             "쇼라코드": clean_identifier_value(candidate.get("쇼라코드", "")),
@@ -13668,36 +13734,60 @@ elif menu == "편성 프로그램":
         if candidates_calc.empty:
             st.info("먼저 '① 편성 조건 입력'에서 주력 상품을 입력해주세요.")
         else:
-            candidate_signature = _small_dataframe_signature(
-                candidates_calc,
-                ["알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"],
-            )
-            history_status = _menu_cache_get(
-                "schedule_history_status",
-                (candidate_signature,),
-                lambda: _build_schedule_history_status_fast(candidates_calc, products),
-                max_entries=12,
-            ).copy()
             history_columns = [
                 "알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율",
                 "발송이력", "운영횟수", "최근발송일", "평균주문금액",
             ]
-            hist_tab, new_tab = st.tabs(["발송 이력 있는 상품", "발송 이력 없는 상품"])
-            for target_tab, status in [(hist_tab, "있음"), (new_tab, "없음")]:
-                with target_tab:
-                    if history_status.empty:
-                        view = pd.DataFrame(columns=history_columns)
-                    else:
+            st.caption(
+                "상품이 많을 때 화면 진입만으로 전체 과거이력을 계산하지 않습니다. "
+                "아래 버튼을 눌렀을 때만 발송 이력을 조회합니다."
+            )
+
+            if st.button(
+                "🔎 입력 상품 발송 이력 조회",
+                key="schedule_history_lookup_button",
+                use_container_width=True,
+            ):
+                candidate_signature = _small_dataframe_signature(
+                    candidates_calc,
+                    ["알파코드", "쇼라코드", "상품명", "정상가", "행사가", "할인율"],
+                )
+                with st.spinner("입력 상품의 발송 이력을 조회하고 있습니다..."):
+                    history_index = _menu_cache_get(
+                        "schedule_history_index",
+                        ("products", len(products)),
+                        lambda: _build_schedule_history_index(products),
+                        max_entries=2,
+                    )
+                    history_status = _menu_cache_get(
+                        "schedule_history_status",
+                        (candidate_signature,),
+                        lambda: _build_schedule_history_status_fast(
+                            candidates_calc, products, history_index
+                        ),
+                        max_entries=12,
+                    ).copy()
+                st.session_state.schedule_history_status_result = history_status
+                st.session_state.schedule_history_status_signature = candidate_signature
+
+            history_status = st.session_state.get("schedule_history_status_result", pd.DataFrame())
+            if history_status is None or history_status.empty:
+                st.info("발송 이력 조회 버튼을 누르면 입력 상품을 '이력 있음 / 없음'으로 구분해 표시합니다.")
+            else:
+                hist_tab, new_tab = st.tabs(["발송 이력 있는 상품", "발송 이력 없는 상품"])
+                stored_signature = st.session_state.get("schedule_history_status_signature", "history")
+                for target_tab, status in [(hist_tab, "있음"), (new_tab, "없음")]:
+                    with target_tab:
                         view = history_status[history_status["발송이력"].fillna("").eq(status)].copy()
-                    if view.empty:
-                        st.info(f"발송 이력 {status} 상품이 없습니다.")
-                    else:
-                        for c in ["정상가", "행사가", "평균주문금액"]:
-                            view[c] = view[c].map(format_integer_price)
-                        selectable_dataframe(
-                            view,
-                            key=f"schedule_history_status_{candidate_signature}_{status}",
-                            use_container_width=True, hide_index=True,
-                        )
+                        if view.empty:
+                            st.info(f"발송 이력 {status} 상품이 없습니다.")
+                        else:
+                            for c in ["정상가", "행사가", "평균주문금액"]:
+                                view[c] = view[c].map(format_integer_price)
+                            selectable_dataframe(
+                                view,
+                                key=f"schedule_history_status_{stored_signature}_{status}",
+                                use_container_width=True, hide_index=True,
+                            )
 
 
