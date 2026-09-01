@@ -10807,16 +10807,20 @@ def _segv_summary(d: pd.DataFrame) -> dict:
 
 
 def _segv_group_summary(d: pd.DataFrame) -> pd.DataFrame:
-    cols = ["성별", "연령", "SEG", "발송모수", "발송성공건수", "클릭수", "주문건수", "주문금액", "CTR", "SPM", "주문금액/만건", "주문건수/만건"]
+    # SEG 비교표의 발송모수는 기간 누적합보다 회차당 평균이 운영 차이를 보기 적합합니다.
+    # 단, SPM/만건당 지표는 기존과 동일하게 누적 발송모수를 분모로 계산합니다.
+    cols = ["성별", "연령", "SEG", "발송횟수", "발송모수", "평균 발송모수", "발송성공건수", "클릭수", "주문건수", "주문금액", "CTR", "SPM", "주문금액/만건", "주문건수/만건"]
     if d is None or d.empty:
         return pd.DataFrame(columns=cols)
     g = d.groupby(["_gender", "_age", "_seg"], as_index=False, dropna=False).agg(
+        발송횟수=("_sent", "size"),
         발송모수=("_sent", "sum"),
         발송성공건수=("_success", "sum"),
         클릭수=("_click", "sum"),
         주문건수=("_orders", "sum"),
         주문금액=("_amount", "sum"),
     )
+    g["평균 발송모수"] = g["발송모수"].div(g["발송횟수"].replace(0, pd.NA)).fillna(0)
     g["CTR"] = g["클릭수"].div(g["발송성공건수"].replace(0, pd.NA)).fillna(0)
     g["SPM"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0)
     g["주문금액/만건"] = g["주문금액"].div(g["발송모수"].replace(0, pd.NA)).fillna(0) * 10_000
@@ -10848,11 +10852,11 @@ def _segv_compare_table(asis_g: pd.DataFrame, tobe_g: pd.DataFrame) -> pd.DataFr
         "AS-IS CTR(%)": pd.to_numeric(m.get("A_CTR"), errors="coerce") * 100,
         "AS-IS SPM(원)": pd.to_numeric(m.get("A_SPM"), errors="coerce"),
         "AS-IS 주문금액(원)": pd.to_numeric(m.get("A_주문금액"), errors="coerce"),
-        "AS-IS 발송모수": pd.to_numeric(m.get("A_발송모수"), errors="coerce"),
+        "AS-IS 평균 발송모수": pd.to_numeric(m.get("A_평균 발송모수"), errors="coerce"),
         "TO-BE CTR(%)": pd.to_numeric(m.get("B_CTR"), errors="coerce") * 100,
         "TO-BE SPM(원)": pd.to_numeric(m.get("B_SPM"), errors="coerce"),
         "TO-BE 주문금액(원)": pd.to_numeric(m.get("B_주문금액"), errors="coerce"),
-        "TO-BE 발송모수": pd.to_numeric(m.get("B_발송모수"), errors="coerce"),
+        "TO-BE 평균 발송모수": pd.to_numeric(m.get("B_평균 발송모수"), errors="coerce"),
     })
     out["CTR 증감(p)"] = (out["TO-BE CTR(%)"] - out["AS-IS CTR(%)"]).where(both)
     out["SPM 증감(원)"] = (out["TO-BE SPM(원)"] - out["AS-IS SPM(원)"]).where(both)
@@ -10924,10 +10928,10 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
                 + f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
                 + f'<td class="segv-asis-cell segv-group-start">{_fmt(row.get("AS-IS CTR(%)"), "ctr")}</td>'
                 + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS SPM(원)"), "spm")}</td>'
-                + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 발송모수"), "sent")}</td>'
+                + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 평균 발송모수"), "sent")}</td>'
                 + f'<td class="segv-tobe-cell segv-group-start">{_fmt(row.get("TO-BE CTR(%)"), "ctr")}</td>'
                 + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE SPM(원)"), "spm")}</td>'
-                + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE 발송모수"), "sent")}</td>'
+                + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE 평균 발송모수"), "sent")}</td>'
                 + f'<td class="segv-delta-cell segv-group-start {_delta_class(ctr_delta)}">{_fmt(ctr_delta, "ctr_delta")}</td>'
                 + f'<td class="segv-delta-cell {_delta_class(spm_delta)}">{_fmt(spm_delta, "spm_delta")}</td>'
                 + "</tr>"
@@ -10976,8 +10980,8 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
             <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
           </tr>
           <tr>
-            <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">발송모수</th>
-            <th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">발송모수</th>
+            <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">평균 발송모수</th>
+            <th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">평균 발송모수</th>
             <th class="segv-delta-sub segv-sub-start">CTR (%p)</th><th class="segv-delta-sub">SPM (원)</th>
           </tr>
         </thead>
@@ -10991,8 +10995,8 @@ def _segv_comparable_rows(compare_df: pd.DataFrame) -> pd.DataFrame:
     if compare_df is None or compare_df.empty:
         return pd.DataFrame()
     return compare_df[
-        pd.to_numeric(compare_df["AS-IS 발송모수"], errors="coerce").fillna(0).gt(0)
-        & pd.to_numeric(compare_df["TO-BE 발송모수"], errors="coerce").fillna(0).gt(0)
+        pd.to_numeric(compare_df["AS-IS 평균 발송모수"], errors="coerce").fillna(0).gt(0)
+        & pd.to_numeric(compare_df["TO-BE 평균 발송모수"], errors="coerce").fillna(0).gt(0)
     ].copy()
 
 
@@ -11352,8 +11356,8 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
         f"• 전체 효과 : CTR {ctr_pp:+.2f}%p / SPM {spm_delta:+,.0f}원"
     )
     valid = compare_df[
-        pd.to_numeric(compare_df["AS-IS 발송모수"], errors="coerce").fillna(0).gt(0)
-        & pd.to_numeric(compare_df["TO-BE 발송모수"], errors="coerce").fillna(0).gt(0)
+        pd.to_numeric(compare_df["AS-IS 평균 발송모수"], errors="coerce").fillna(0).gt(0)
+        & pd.to_numeric(compare_df["TO-BE 평균 발송모수"], errors="coerce").fillna(0).gt(0)
     ].copy()
     if not valid.empty:
         # 서로 단위가 다른 CTR %p와 SPM 원값을 직접 더하지 않고, 각 AS-IS 대비 상대 개선률로 점수화
@@ -13222,7 +13226,7 @@ elif menu == "SEG분석":
 
             st.markdown(
                 '<div class="subsection-title">② SEG별 전후 비교 '
-                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 발송모수는 만 단위 축약</span></div>',
+                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 평균 발송모수는 회차당 평균·만 단위 축약</span></div>',
                 unsafe_allow_html=True,
             )
             st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
