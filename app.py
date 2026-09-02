@@ -10376,6 +10376,88 @@ def _build_target_history_view_fast(
     return view
 
 
+
+def _build_target_best_product_views(
+    products: pd.DataFrame,
+    start_date,
+    end_date,
+) -> dict[tuple[str, str], pd.DataFrame]:
+    """선택 기간의 성별·연령별 상품 실적을 주문금액 높은 순으로 반환합니다."""
+    target_groups = [
+        ("남성", "3040"),
+        ("남성", "5060"),
+        ("여성", "3040"),
+        ("여성", "5060"),
+    ]
+    result = {key: pd.DataFrame() for key in target_groups}
+    if products is None or products.empty or "_date" not in products.columns:
+        return result
+
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    dates = pd.to_datetime(products["_date"], errors="coerce").dt.normalize()
+    period = products.loc[dates.between(start_ts, end_ts, inclusive="both")].copy()
+    if period.empty:
+        return result
+
+    period["_target_gender"] = (
+        period["성별"].fillna("").astype(str).str.strip()
+        if "성별" in period.columns else ""
+    )
+    period["_target_age"] = (
+        period["연령"].map(clean_identifier_value)
+        if "연령" in period.columns else ""
+    )
+    period["발송일"] = pd.to_datetime(period["_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    display_cols = [
+        "발송일", "알파코드", "쇼라코드", "상품명",
+        "정상가", "멤버십혜택가", "할인율", "추가노출",
+        "주문건수", "주문수량", "주문금액",
+    ]
+
+    for gender, age in target_groups:
+        sub = period[
+            period["_target_gender"].eq(gender)
+            & period["_target_age"].eq(age)
+        ].copy()
+        if sub.empty:
+            result[(gender, age)] = pd.DataFrame(columns=display_cols)
+            continue
+
+        # '베스트상품' 메뉴는 선택 기간 내 실제 발송 상품을 주문금액 높은 순으로 보여줍니다.
+        sub["_order_amount_sort"] = pd.to_numeric(sub.get("주문금액", 0), errors="coerce").fillna(0)
+        sub["_date_sort"] = pd.to_datetime(sub["_date"], errors="coerce")
+        sub = sub.sort_values(
+            ["_order_amount_sort", "_date_sort"],
+            ascending=[False, False],
+            kind="stable",
+        )
+        for col in display_cols:
+            if col not in sub.columns:
+                sub[col] = ""
+        view = sub[display_cols].copy()
+
+        for code_col in ["알파코드", "쇼라코드"]:
+            if code_col in view.columns:
+                view[code_col] = view[code_col].map(clean_identifier_value)
+        if "할인율" in view.columns:
+            view["할인율"] = view["할인율"].map(format_discount_percent)
+        if "추가노출" in view.columns:
+            view["추가노출"] = view["추가노출"].fillna("").astype(str).replace({"nan": "", "None": ""})
+        for money_col in ["정상가", "멤버십혜택가", "주문금액"]:
+            if money_col in view.columns:
+                view[money_col] = view[money_col].map(format_integer_price)
+        for count_col in ["주문건수", "주문수량"]:
+            if count_col in view.columns:
+                view[count_col] = view[count_col].map(
+                    lambda value: format_integer_price(value)
+                    if str(value).strip() not in ["", "nan", "None"] else ""
+                )
+        result[(gender, age)] = view.reset_index(drop=True)
+
+    return result
+
 def _build_product_history_view_fast(products: pd.DataFrame, group_keys: list[str], selected_values: tuple) -> pd.DataFrame:
     history_mask = pd.Series(True, index=products.index)
     for key, value in zip(group_keys, selected_values):
@@ -11451,13 +11533,14 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
 
 
 
-_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "SEG분석", "편성 프로그램"]
+_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "타겟별베스트상품", "SEG분석", "편성 프로그램"]
 _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
     "weekly": "주간실적",
     "product": "상품구분",
     "target": "타겟분석",
+    "target-best": "타겟별베스트상품",
     "seg-effect": "SEG분석",
     "planning": "편성 프로그램",
 }
@@ -13154,6 +13237,81 @@ elif menu == "상품구분":
             )
 
 
+
+
+elif menu == "타겟별베스트상품":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟별베스트상품 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">타겟별베스트상품</div>', unsafe_allow_html=True)
+    st.caption("선택 기간의 실제 발송 상품을 남성3040 / 남성5060 / 여성3040 / 여성5060별로 구분해 주문금액 높은 순으로 보여줍니다.")
+
+    product_dates = pd.to_datetime(products.get("_date"), errors="coerce").dropna()
+    if product_dates.empty:
+        st.info("상품 데이터에 조회 가능한 발송일이 없습니다.")
+    else:
+        target_best_min = product_dates.min().date()
+        target_best_max = product_dates.max().date()
+        target_best_range = st.date_input(
+            "기간 선택",
+            [target_best_min, target_best_max],
+            min_value=target_best_min,
+            max_value=target_best_max,
+            key="target_best_date_range",
+        )
+        if len(target_best_range) == 2:
+            target_best_start, target_best_end = target_best_range
+        else:
+            target_best_start, target_best_end = target_best_min, target_best_max
+
+        target_best_views = _menu_cache_get(
+            "target_best_product_views",
+            (str(target_best_start), str(target_best_end)),
+            lambda: _build_target_best_product_views(products, target_best_start, target_best_end),
+            max_entries=12,
+        )
+
+        target_best_groups = [
+            ("남성", "3040"),
+            ("남성", "5060"),
+            ("여성", "3040"),
+            ("여성", "5060"),
+        ]
+        st.caption(
+            f"조회기간 {pd.Timestamp(target_best_start).strftime('%Y-%m-%d')} ~ "
+            f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · 각 타겟 내 주문금액 높은 순"
+        )
+
+        for gender, age in target_best_groups:
+            view = target_best_views.get((gender, age), pd.DataFrame())
+            raw_period_dates = pd.to_datetime(products.get("_date"), errors="coerce").dt.normalize()
+            raw_gender = products.get("성별", pd.Series("", index=products.index)).fillna("").astype(str).str.strip()
+            raw_age = products.get("연령", pd.Series("", index=products.index)).map(clean_identifier_value)
+            raw_target = products.loc[
+                raw_period_dates.between(
+                    pd.Timestamp(target_best_start).normalize(),
+                    pd.Timestamp(target_best_end).normalize(),
+                    inclusive="both",
+                )
+                & raw_gender.eq(gender)
+                & raw_age.eq(age)
+            ].copy()
+            total_amount = pd.to_numeric(raw_target.get("주문금액", 0), errors="coerce").fillna(0).sum() if not raw_target.empty else 0
+
+            st.markdown(
+                f'<div class="subsection-title">{gender} {age} '
+                f'<span style="font-size:13px;color:#6b7280;font-weight:600;">'
+                f'· {len(view):,}건 · 주문금액 {format_integer_price(total_amount)}원</span></div>',
+                unsafe_allow_html=True,
+            )
+            if view.empty:
+                st.info(f"선택 기간의 {gender} {age} 상품 실적이 없습니다.")
+            else:
+                selectable_dataframe(
+                    view,
+                    key=f"target_best_{gender}_{age}_{target_best_start}_{target_best_end}",
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(900, 42 + len(view) * 35),
+                )
 
 elif menu == "SEG분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG분석 화면으로 바로 연결됩니다.")
