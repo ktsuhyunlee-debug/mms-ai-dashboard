@@ -13370,6 +13370,19 @@ elif menu == "SEG분석":
             default_asis = (seg_data_min, max(seg_data_min, (pd.Timestamp(split) - pd.Timedelta(days=1)).date()))
             default_tobe = (split, seg_data_max)
 
+        def _segv_range(value, fallback):
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                a, b = value
+            elif isinstance(value, (list, tuple)) and len(value) == 1:
+                a = b = value[0]
+            elif value:
+                a = b = value
+            else:
+                a, b = fallback
+            if a > b:
+                a, b = b, a
+            return a, b
+
         p1, p2 = st.columns(2, gap="small")
         with p1:
             asis_period = st.date_input(
@@ -13390,29 +13403,81 @@ elif menu == "SEG분석":
                 key="seg_effect_tobe_period",
             )
 
-        def _segv_range(value, fallback):
-            if isinstance(value, (list, tuple)) and len(value) == 2:
-                a, b = value
-            elif isinstance(value, (list, tuple)) and len(value) == 1:
-                a = b = value[0]
-            elif value:
-                a = b = value
-            else:
-                a, b = fallback
-            if a > b:
-                a, b = b, a
-            return a, b
-
         asis_start, asis_end = _segv_range(asis_period, default_asis)
         tobe_start, tobe_end = _segv_range(tobe_period, default_tobe)
+
+        # AS-IS / TO-BE 각각 특정 기간을 분석에서 제외할 수 있습니다.
+        # 제외 범위가 본 분석기간 밖까지 지정돼도 실제 겹치는 날짜만 제거합니다.
+        ex1, ex2 = st.columns(2, gap="small")
+        with ex1:
+            asis_exclude_enabled = st.checkbox(
+                "AS-IS 제외 기간 사용",
+                value=False,
+                key="seg_effect_asis_exclude_enabled",
+            )
+            asis_exclude_period = None
+            if asis_exclude_enabled:
+                asis_exclude_period = st.date_input(
+                    "AS-IS 제외 기간",
+                    value=(asis_start, asis_start),
+                    min_value=seg_calendar_min,
+                    max_value=seg_calendar_max,
+                    format="YYYY-MM-DD",
+                    key="seg_effect_asis_exclude_period",
+                )
+        with ex2:
+            tobe_exclude_enabled = st.checkbox(
+                "TO-BE 제외 기간 사용",
+                value=False,
+                key="seg_effect_tobe_exclude_enabled",
+            )
+            tobe_exclude_period = None
+            if tobe_exclude_enabled:
+                tobe_exclude_period = st.date_input(
+                    "TO-BE 제외 기간",
+                    value=(tobe_start, tobe_start),
+                    min_value=seg_calendar_min,
+                    max_value=seg_calendar_max,
+                    format="YYYY-MM-DD",
+                    key="seg_effect_tobe_exclude_period",
+                )
+
+        def _segv_exclusion(value, base_start, base_end):
+            if value is None:
+                return None
+            start, end = _segv_range(value, (base_start, base_start))
+            # 분석기간과 겹치는 부분만 실제 제외 범위로 사용
+            clipped_start = max(pd.Timestamp(start), pd.Timestamp(base_start))
+            clipped_end = min(pd.Timestamp(end), pd.Timestamp(base_end))
+            if clipped_start > clipped_end:
+                return None
+            return clipped_start.normalize(), clipped_end.normalize()
+
+        asis_exclusion = _segv_exclusion(asis_exclude_period, asis_start, asis_end) if asis_exclude_enabled else None
+        tobe_exclusion = _segv_exclusion(tobe_exclude_period, tobe_start, tobe_end) if tobe_exclude_enabled else None
+
+        period_parts = [
+            f"AS-IS {asis_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d}",
+            f"TO-BE {tobe_start:%Y-%m-%d} ~ {tobe_end:%Y-%m-%d}",
+        ]
+        if asis_exclusion is not None:
+            period_parts[0] += f" · 제외 {asis_exclusion[0]:%Y-%m-%d} ~ {asis_exclusion[1]:%Y-%m-%d}"
+        if tobe_exclusion is not None:
+            period_parts[1] += f" · 제외 {tobe_exclusion[0]:%Y-%m-%d} ~ {tobe_exclusion[1]:%Y-%m-%d}"
         st.markdown(
-            f'<div class="segv-period-note">AS-IS {asis_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d} &nbsp; / &nbsp; '
-            f'TO-BE {tobe_start:%Y-%m-%d} ~ {tobe_end:%Y-%m-%d}</div>',
+            f'<div class="segv-period-note">{period_parts[0]} &nbsp; / &nbsp; {period_parts[1]}</div>',
             unsafe_allow_html=True,
         )
 
         asis_df = _segv_prepare_period(sends, asis_start, asis_end, promotions, False)
         tobe_df = _segv_prepare_period(sends, tobe_start, tobe_end, promotions, False)
+
+        if asis_exclusion is not None and not asis_df.empty:
+            asis_dates = pd.to_datetime(asis_df["_date"], errors="coerce").dt.normalize()
+            asis_df = asis_df[~asis_dates.between(asis_exclusion[0], asis_exclusion[1])].copy()
+        if tobe_exclusion is not None and not tobe_df.empty:
+            tobe_dates = pd.to_datetime(tobe_df["_date"], errors="coerce").dt.normalize()
+            tobe_df = tobe_df[~tobe_dates.between(tobe_exclusion[0], tobe_exclusion[1])].copy()
 
         if asis_df.empty or tobe_df.empty:
             if asis_df.empty:
