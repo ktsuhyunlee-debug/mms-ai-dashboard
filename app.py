@@ -13406,8 +13406,90 @@ elif menu == "SEG분석":
         asis_start, asis_end = _segv_range(asis_period, default_asis)
         tobe_start, tobe_end = _segv_range(tobe_period, default_tobe)
 
-        # AS-IS / TO-BE 각각 특정 기간을 분석에서 제외할 수 있습니다.
-        # 제외 범위가 본 분석기간 밖까지 지정돼도 실제 겹치는 날짜만 제거합니다.
+        # AS-IS / TO-BE 각각 여러 개의 제외 기간을 등록할 수 있습니다.
+        # 제외 범위가 서로 겹치면 합집합으로 한 번만 제외하며, 분석기간 밖 날짜는 자동으로 무시합니다.
+        for _side, _base_start in [("asis", asis_start), ("tobe", tobe_start)]:
+            _ranges_key = f"seg_effect_{_side}_exclude_ranges"
+            _next_key = f"seg_effect_{_side}_exclude_next_id"
+            if _ranges_key not in st.session_state:
+                st.session_state[_ranges_key] = [{"id": 1, "start": _base_start, "end": _base_start}]
+            if _next_key not in st.session_state:
+                st.session_state[_next_key] = 2
+
+        def _segv_safe_date(value, fallback):
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return fallback
+            return parsed.date()
+
+        def _segv_render_exclusion_editor(side_label, side_key, enabled, base_start):
+            ranges_key = f"seg_effect_{side_key}_exclude_ranges"
+            next_key = f"seg_effect_{side_key}_exclude_next_id"
+            ranges = st.session_state.get(ranges_key, [])
+            if not ranges:
+                ranges = [{"id": 1, "start": base_start, "end": base_start}]
+                st.session_state[ranges_key] = ranges
+                st.session_state[next_key] = max(2, int(st.session_state.get(next_key, 2)))
+
+            for item in ranges:
+                item["start"] = _segv_safe_date(item.get("start"), base_start)
+                item["end"] = _segv_safe_date(item.get("end"), base_start)
+
+            if not enabled:
+                return ranges
+
+            with st.expander(f"{side_label} 제외 기간 ({len(ranges)}개)", expanded=True):
+                delete_id = None
+                for idx, item in enumerate(ranges, start=1):
+                    row = st.columns([0.12, 1, 0.08, 1, 0.32])
+                    row[0].markdown(f"**{idx}**")
+                    item["start"] = row[1].date_input(
+                        f"{side_label} 제외 시작일 {idx}",
+                        value=item["start"],
+                        min_value=seg_calendar_min,
+                        max_value=seg_calendar_max,
+                        format="YYYY-MM-DD",
+                        key=f"seg_effect_{side_key}_exc_start_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    row[2].markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
+                    item["end"] = row[3].date_input(
+                        f"{side_label} 제외 종료일 {idx}",
+                        value=item["end"],
+                        min_value=seg_calendar_min,
+                        max_value=seg_calendar_max,
+                        format="YYYY-MM-DD",
+                        key=f"seg_effect_{side_key}_exc_end_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    if row[4].button(
+                        "삭제",
+                        key=f"seg_effect_{side_key}_exc_del_{item['id']}",
+                        use_container_width=True,
+                        disabled=len(ranges) <= 1,
+                    ):
+                        delete_id = item["id"]
+
+                if delete_id is not None:
+                    st.session_state[ranges_key] = [x for x in ranges if x["id"] != delete_id]
+                    st.rerun()
+
+                if st.button(
+                    f"＋ {side_label} 제외 기간 추가",
+                    key=f"seg_effect_{side_key}_exc_add",
+                    use_container_width=True,
+                ):
+                    new_id = int(st.session_state.get(next_key, 2))
+                    st.session_state[next_key] = new_id + 1
+                    st.session_state[ranges_key].append({
+                        "id": new_id,
+                        "start": base_start,
+                        "end": base_start,
+                    })
+                    st.rerun()
+
+            return st.session_state.get(ranges_key, ranges)
+
         ex1, ex2 = st.columns(2, gap="small")
         with ex1:
             asis_exclude_enabled = st.checkbox(
@@ -13415,55 +13497,69 @@ elif menu == "SEG분석":
                 value=False,
                 key="seg_effect_asis_exclude_enabled",
             )
-            asis_exclude_period = None
-            if asis_exclude_enabled:
-                asis_exclude_period = st.date_input(
-                    "AS-IS 제외 기간",
-                    value=(asis_start, asis_start),
-                    min_value=seg_calendar_min,
-                    max_value=seg_calendar_max,
-                    format="YYYY-MM-DD",
-                    key="seg_effect_asis_exclude_period",
-                )
+            asis_exclude_ranges = _segv_render_exclusion_editor(
+                "AS-IS", "asis", asis_exclude_enabled, asis_start
+            )
         with ex2:
             tobe_exclude_enabled = st.checkbox(
                 "TO-BE 제외 기간 사용",
                 value=False,
                 key="seg_effect_tobe_exclude_enabled",
             )
-            tobe_exclude_period = None
-            if tobe_exclude_enabled:
-                tobe_exclude_period = st.date_input(
-                    "TO-BE 제외 기간",
-                    value=(tobe_start, tobe_start),
-                    min_value=seg_calendar_min,
-                    max_value=seg_calendar_max,
-                    format="YYYY-MM-DD",
-                    key="seg_effect_tobe_exclude_period",
-                )
+            tobe_exclude_ranges = _segv_render_exclusion_editor(
+                "TO-BE", "tobe", tobe_exclude_enabled, tobe_start
+            )
 
-        def _segv_exclusion(value, base_start, base_end):
-            if value is None:
-                return None
-            start, end = _segv_range(value, (base_start, base_start))
-            # 분석기간과 겹치는 부분만 실제 제외 범위로 사용
-            clipped_start = max(pd.Timestamp(start), pd.Timestamp(base_start))
-            clipped_end = min(pd.Timestamp(end), pd.Timestamp(base_end))
-            if clipped_start > clipped_end:
-                return None
-            return clipped_start.normalize(), clipped_end.normalize()
+        def _segv_collect_exclusions(ranges, base_start, base_end, enabled):
+            if not enabled:
+                return [], 0
+            valid = []
+            invalid_count = 0
+            base_start_ts = pd.Timestamp(base_start).normalize()
+            base_end_ts = pd.Timestamp(base_end).normalize()
+            for item in ranges or []:
+                start_ts = pd.to_datetime(item.get("start"), errors="coerce")
+                end_ts = pd.to_datetime(item.get("end"), errors="coerce")
+                if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+                    invalid_count += 1
+                    continue
+                clipped_start = max(start_ts.normalize(), base_start_ts)
+                clipped_end = min(end_ts.normalize(), base_end_ts)
+                if clipped_start <= clipped_end:
+                    valid.append((clipped_start, clipped_end))
+            return valid, invalid_count
 
-        asis_exclusion = _segv_exclusion(asis_exclude_period, asis_start, asis_end) if asis_exclude_enabled else None
-        tobe_exclusion = _segv_exclusion(tobe_exclude_period, tobe_start, tobe_end) if tobe_exclude_enabled else None
+        asis_exclusions, asis_invalid_exclusions = _segv_collect_exclusions(
+            asis_exclude_ranges, asis_start, asis_end, asis_exclude_enabled
+        )
+        tobe_exclusions, tobe_invalid_exclusions = _segv_collect_exclusions(
+            tobe_exclude_ranges, tobe_start, tobe_end, tobe_exclude_enabled
+        )
+
+        if asis_invalid_exclusions:
+            st.warning(f"AS-IS 제외 기간 중 시작일이 종료일보다 늦은 {asis_invalid_exclusions}개 구간은 적용하지 않습니다.")
+        if tobe_invalid_exclusions:
+            st.warning(f"TO-BE 제외 기간 중 시작일이 종료일보다 늦은 {tobe_invalid_exclusions}개 구간은 적용하지 않습니다.")
+
+        def _segv_exclusion_note(exclusions):
+            if not exclusions:
+                return ""
+            first_start, first_end = exclusions[0]
+            text = f"제외 {len(exclusions)}개 · {first_start:%Y-%m-%d}~{first_end:%m-%d}"
+            if len(exclusions) > 1:
+                text += f" 외 {len(exclusions) - 1}건"
+            return text
 
         period_parts = [
             f"AS-IS {asis_start:%Y-%m-%d} ~ {asis_end:%Y-%m-%d}",
             f"TO-BE {tobe_start:%Y-%m-%d} ~ {tobe_end:%Y-%m-%d}",
         ]
-        if asis_exclusion is not None:
-            period_parts[0] += f" · 제외 {asis_exclusion[0]:%Y-%m-%d} ~ {asis_exclusion[1]:%Y-%m-%d}"
-        if tobe_exclusion is not None:
-            period_parts[1] += f" · 제외 {tobe_exclusion[0]:%Y-%m-%d} ~ {tobe_exclusion[1]:%Y-%m-%d}"
+        asis_exclusion_note = _segv_exclusion_note(asis_exclusions)
+        tobe_exclusion_note = _segv_exclusion_note(tobe_exclusions)
+        if asis_exclusion_note:
+            period_parts[0] += f" · {asis_exclusion_note}"
+        if tobe_exclusion_note:
+            period_parts[1] += f" · {tobe_exclusion_note}"
         st.markdown(
             f'<div class="segv-period-note">{period_parts[0]} &nbsp; / &nbsp; {period_parts[1]}</div>',
             unsafe_allow_html=True,
@@ -13472,12 +13568,17 @@ elif menu == "SEG분석":
         asis_df = _segv_prepare_period(sends, asis_start, asis_end, promotions, False)
         tobe_df = _segv_prepare_period(sends, tobe_start, tobe_end, promotions, False)
 
-        if asis_exclusion is not None and not asis_df.empty:
-            asis_dates = pd.to_datetime(asis_df["_date"], errors="coerce").dt.normalize()
-            asis_df = asis_df[~asis_dates.between(asis_exclusion[0], asis_exclusion[1])].copy()
-        if tobe_exclusion is not None and not tobe_df.empty:
-            tobe_dates = pd.to_datetime(tobe_df["_date"], errors="coerce").dt.normalize()
-            tobe_df = tobe_df[~tobe_dates.between(tobe_exclusion[0], tobe_exclusion[1])].copy()
+        def _segv_apply_exclusions(df, exclusions):
+            if df is None or df.empty or not exclusions:
+                return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            dates = pd.to_datetime(df["_date"], errors="coerce").dt.normalize()
+            excluded_mask = pd.Series(False, index=df.index, dtype=bool)
+            for start_ts, end_ts in exclusions:
+                excluded_mask |= dates.between(start_ts, end_ts, inclusive="both")
+            return df.loc[~excluded_mask].copy()
+
+        asis_df = _segv_apply_exclusions(asis_df, asis_exclusions)
+        tobe_df = _segv_apply_exclusions(tobe_df, tobe_exclusions)
 
         if asis_df.empty or tobe_df.empty:
             if asis_df.empty:
