@@ -10772,7 +10772,7 @@ def _segv_prepare_period(
     - 원본 주차가 있으면 그대로 보존해 주차별 추이에 사용
     """
     cols = [
-        "_date", "_week", "_gender", "_age", "_seg", "_sent", "_success",
+        "_date", "_week", "_gender", "_age", "_seg", "_channel", "_sent", "_success",
         "_click", "_orders", "_amount", "_weekday", "_time",
     ]
     if source is None or source.empty:
@@ -10804,6 +10804,11 @@ def _segv_prepare_period(
     time_col = first_col(d, ["시간대", "발송시간", "시간"])
     weekday_col = first_col(d, ["요일"])
     week_col = first_col(d, ["주차", "주", "Week", "week"])
+    channel_col = first_col(d, [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+    ])
 
     if not all([gender_col, age_col, seg_col, total_send_col, success_col, click_col, order_col, amount_col]):
         return pd.DataFrame(columns=cols)
@@ -10847,6 +10852,15 @@ def _segv_prepare_period(
             return f"{int(m.group(1)):02d}:{m.group(2)}"
         return raw
 
+    def _channel_norm(value):
+        raw = str(value or "").strip()
+        upper = raw.upper()
+        if "RCS" in upper:
+            return "RCS"
+        if "MMS" in upper or "멀티미디어" in raw:
+            return "MMS"
+        return ""
+
     def _week_norm(value):
         raw = str(value or "").strip()
         low = raw.lower()
@@ -10871,6 +10885,28 @@ def _segv_prepare_period(
     out["_gender"] = d[gender_col].map(_gender_norm)
     out["_age"] = d[age_col].map(_age_norm)
     out["_seg"] = d[seg_col].map(_seg_norm)
+
+    # 발송방식 컬럼이 있으면 우선 사용하고, 비어 있거나 컬럼이 없으면
+    # 캠페인/소재명 텍스트의 RCS·MMS 표기를 보조 기준으로 사용합니다.
+    if channel_col:
+        out["_channel"] = d[channel_col].map(_channel_norm)
+    else:
+        out["_channel"] = ""
+    channel_text_cols = [
+        c for c in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]
+        if c in d.columns
+    ]
+    if channel_text_cols:
+        channel_text = (
+            d[channel_text_cols].fillna("").astype(str)
+            .agg(" ".join, axis=1)
+        )
+        fallback_channel = channel_text.map(_channel_norm)
+        blank_channel = out["_channel"].eq("")
+        out.loc[blank_channel, "_channel"] = fallback_channel.loc[blank_channel]
+    # 기존 MMS 데이터처럼 별도 발송방식 표기가 없는 행은 MMS로 간주합니다.
+    out.loc[out["_channel"].eq(""), "_channel"] = "MMS"
+
     out["_sent"] = num(d[total_send_col]).astype(float)
     out["_success"] = num(d[success_col]).astype(float)
     out["_click"] = num(d[click_col]).astype(float)
@@ -13406,6 +13442,20 @@ elif menu == "SEG분석":
         asis_start, asis_end = _segv_range(asis_period, default_asis)
         tobe_start, tobe_end = _segv_range(tobe_period, default_tobe)
 
+        st.markdown('<div class="subsection-title" style="margin-top:10px;">발송 방식</div>', unsafe_allow_html=True)
+        channel_cols = st.columns([0.16, 0.16, 0.68], gap="small")
+        with channel_cols[0]:
+            seg_include_mms = st.checkbox("MMS", value=True, key="seg_effect_channel_mms")
+        with channel_cols[1]:
+            seg_include_rcs = st.checkbox("RCS", value=True, key="seg_effect_channel_rcs")
+        selected_seg_channels = []
+        if seg_include_mms:
+            selected_seg_channels.append("MMS")
+        if seg_include_rcs:
+            selected_seg_channels.append("RCS")
+        if not selected_seg_channels:
+            st.warning("발송 방식을 1개 이상 선택해주세요.")
+
         # AS-IS / TO-BE 각각 여러 개의 제외 기간을 등록할 수 있습니다.
         # 제외 범위가 서로 겹치면 합집합으로 한 번만 제외하며, 분석기간 밖 날짜는 자동으로 무시합니다.
         for _side, _base_start in [("asis", asis_start), ("tobe", tobe_start)]:
@@ -13560,13 +13610,20 @@ elif menu == "SEG분석":
             period_parts[0] += f" · {asis_exclusion_note}"
         if tobe_exclusion_note:
             period_parts[1] += f" · {tobe_exclusion_note}"
+        channel_note = " + ".join(selected_seg_channels) if selected_seg_channels else "미선택"
         st.markdown(
-            f'<div class="segv-period-note">{period_parts[0]} &nbsp; / &nbsp; {period_parts[1]}</div>',
+            f'<div class="segv-period-note">{period_parts[0]} &nbsp; / &nbsp; {period_parts[1]} &nbsp; · &nbsp; 발송방식 {channel_note}</div>',
             unsafe_allow_html=True,
         )
 
         asis_df = _segv_prepare_period(sends, asis_start, asis_end, promotions, False)
         tobe_df = _segv_prepare_period(sends, tobe_start, tobe_end, promotions, False)
+        if selected_seg_channels:
+            asis_df = asis_df[asis_df["_channel"].isin(selected_seg_channels)].copy()
+            tobe_df = tobe_df[tobe_df["_channel"].isin(selected_seg_channels)].copy()
+        else:
+            asis_df = asis_df.iloc[0:0].copy()
+            tobe_df = tobe_df.iloc[0:0].copy()
 
         def _segv_apply_exclusions(df, exclusions):
             if df is None or df.empty or not exclusions:
@@ -13582,9 +13639,9 @@ elif menu == "SEG분석":
 
         if asis_df.empty or tobe_df.empty:
             if asis_df.empty:
-                st.error("선택한 AS-IS 기간에 분석 가능한 데이터가 없습니다.")
+                st.error("선택한 AS-IS 기간·발송방식에 분석 가능한 데이터가 없습니다.")
             if tobe_df.empty:
-                st.error("선택한 TO-BE 기간에 분석 가능한 데이터가 없습니다.")
+                st.error("선택한 TO-BE 기간·발송방식에 분석 가능한 데이터가 없습니다.")
         else:
             a_sum = _segv_summary(asis_df)
             b_sum = _segv_summary(tobe_df)
