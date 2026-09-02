@@ -13280,38 +13280,51 @@ elif menu == "타겟별베스트상품":
             f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · 각 타겟 내 주문금액 높은 순"
         )
 
-        for gender, age in target_best_groups:
-            view = target_best_views.get((gender, age), pd.DataFrame())
-            raw_period_dates = pd.to_datetime(products.get("_date"), errors="coerce").dt.normalize()
-            raw_gender = products.get("성별", pd.Series("", index=products.index)).fillna("").astype(str).str.strip()
-            raw_age = products.get("연령", pd.Series("", index=products.index)).map(clean_identifier_value)
-            raw_target = products.loc[
-                raw_period_dates.between(
-                    pd.Timestamp(target_best_start).normalize(),
-                    pd.Timestamp(target_best_end).normalize(),
-                    inclusive="both",
-                )
-                & raw_gender.eq(gender)
-                & raw_age.eq(age)
-            ].copy()
-            total_amount = pd.to_numeric(raw_target.get("주문금액", 0), errors="coerce").fillna(0).sum() if not raw_target.empty else 0
+        # 네 타겟을 세로로 길게 나열하지 않고 상단 가로 탭으로 전환합니다.
+        # 표는 전체 폭을 그대로 사용해 요청 컬럼의 가독성을 유지합니다.
+        target_best_tabs = st.tabs([
+            "남성 3040",
+            "남성 5060",
+            "여성 3040",
+            "여성 5060",
+        ])
 
-            st.markdown(
-                f'<div class="subsection-title">{gender} {age} '
-                f'<span style="font-size:13px;color:#6b7280;font-weight:600;">'
-                f'· {len(view):,}건 · 주문금액 {format_integer_price(total_amount)}원</span></div>',
-                unsafe_allow_html=True,
-            )
-            if view.empty:
-                st.info(f"선택 기간의 {gender} {age} 상품 실적이 없습니다.")
-            else:
-                selectable_dataframe(
-                    view,
-                    key=f"target_best_{gender}_{age}_{target_best_start}_{target_best_end}",
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(900, 42 + len(view) * 35),
+        raw_period_dates = pd.to_datetime(products.get("_date"), errors="coerce").dt.normalize()
+        raw_gender = products.get("성별", pd.Series("", index=products.index)).fillna("").astype(str).str.strip()
+        raw_age = products.get("연령", pd.Series("", index=products.index)).map(clean_identifier_value)
+        period_mask = raw_period_dates.between(
+            pd.Timestamp(target_best_start).normalize(),
+            pd.Timestamp(target_best_end).normalize(),
+            inclusive="both",
+        )
+
+        for target_tab, (gender, age) in zip(target_best_tabs, target_best_groups):
+            with target_tab:
+                view = target_best_views.get((gender, age), pd.DataFrame())
+                raw_target = products.loc[
+                    period_mask & raw_gender.eq(gender) & raw_age.eq(age)
+                ].copy()
+                total_amount = (
+                    pd.to_numeric(raw_target.get("주문금액", 0), errors="coerce").fillna(0).sum()
+                    if not raw_target.empty else 0
                 )
+
+                st.markdown(
+                    f'<div class="subsection-title">{gender} {age} '
+                    f'<span style="font-size:13px;color:#6b7280;font-weight:600;">'
+                    f'· {len(view):,}건 · 주문금액 {format_integer_price(total_amount)}원</span></div>',
+                    unsafe_allow_html=True,
+                )
+                if view.empty:
+                    st.info(f"선택 기간의 {gender} {age} 상품 실적이 없습니다.")
+                else:
+                    selectable_dataframe(
+                        view,
+                        key=f"target_best_{gender}_{age}_{target_best_start}_{target_best_end}",
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(900, 42 + len(view) * 35),
+                    )
 
 elif menu == "SEG분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG분석 화면으로 바로 연결됩니다.")
