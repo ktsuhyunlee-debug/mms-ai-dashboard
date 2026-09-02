@@ -13585,30 +13585,41 @@ elif menu == "편성 프로그램":
         )
         st.session_state.schedule_candidates_calc = candidates_calc
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            cooldown_days = st.number_input(
-                "발송 후 재편성 제한일",
-                min_value=0,
-                max_value=60,
-                value=int(st.session_state.get("schedule_cooldown", 0)),
-                step=1,
-            )
-        with c2:
-            max_weekly_count = st.number_input(
-                "상품별 주간 최대 편성횟수",
-                min_value=1,
-                max_value=10,
-                value=int(st.session_state.get("schedule_max_weekly", 3)),
-                step=1,
-            )
-        with c3:
-            st.metric("편성 슬롯 수", f"{len(edited_slots.dropna(how='all'))}회")
+        # 대량 상품 입력 시 number_input 변경마다 전체 앱이 rerun되면
+        # 값이 앞뒤로 튀는 것처럼 보일 수 있어, 실행 옵션은 form 안에서 확정합니다.
+        if "schedule_cooldown" not in st.session_state:
+            st.session_state.schedule_cooldown = 0
+        if "schedule_max_weekly" not in st.session_state:
+            st.session_state.schedule_max_weekly = 3
 
-        st.session_state.schedule_cooldown = cooldown_days
-        st.session_state.schedule_max_weekly = max_weekly_count
+        with st.form("schedule_run_options_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                cooldown_days = st.number_input(
+                    "발송 후 재편성 제한일",
+                    min_value=0,
+                    max_value=60,
+                    step=1,
+                    key="schedule_cooldown",
+                )
+            with c2:
+                max_weekly_count = st.number_input(
+                    "상품별 주간 최대 편성횟수",
+                    min_value=1,
+                    max_value=10,
+                    step=1,
+                    key="schedule_max_weekly",
+                )
+            with c3:
+                st.metric("편성 슬롯 수", f"{len(edited_slots.dropna(how='all'))}회")
 
-        if st.button("🤖 매출 우선 자동 편성 실행", type="primary", use_container_width=True):
+            run_schedule = st.form_submit_button(
+                "🤖 매출 우선 자동 편성 실행",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if run_schedule:
             clean_slots = edited_slots.copy().reset_index(drop=True)
             clean_slots["발송일"] = pd.to_datetime(clean_slots["발송일"], errors="coerce")
             clean_slots = clean_slots[
