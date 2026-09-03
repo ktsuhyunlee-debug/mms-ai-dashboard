@@ -2963,19 +2963,14 @@ def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
     return labels
 
 
-def _weekly_product_hover_text(send_row: pd.Series, week_products: pd.DataFrame) -> str:
-    """주간 MMS 상품실적 막대 hover에 해당 발송의 상품별 실적을 표시합니다."""
-    if week_products is None or week_products.empty:
-        return (
-            f"<b>{str(send_row.get('소재', '') or '발송 실적')}</b><br>"
-            f"주문건수 {fmt_num(send_row.get('주문건수', 0))}건 · "
-            f"주문수량 {fmt_num(send_row.get('주문수량', 0))}개 · "
-            f"주문금액 {fmt_num(send_row.get('주문금액', 0))}원"
-        )
+def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str:
+    """주간 MMS 상품실적 막대 hover에 해당 발송의 상품별 실적을 나열합니다."""
+    if pw is None or pw.empty:
+        return "상품 상세 없음"
 
-    matched = week_products.copy()
+    matched = pw.copy()
 
-    # 1) 발송일은 필수 기준으로 사용합니다.
+    # 1) 발송일 일치
     send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
     if pd.notna(send_date) and "_date" in matched.columns:
         product_dates = pd.to_datetime(matched["_date"], errors="coerce").dt.normalize()
@@ -2983,64 +2978,75 @@ def _weekly_product_hover_text(send_row: pd.Series, week_products: pd.DataFrame)
         if not date_match.empty:
             matched = date_match
 
-    # 2) 소재/시간대/성별/연령/SEG/캠페인 순으로, 실제 일치 행이 있을 때만 좁힙니다.
-    #    원본 시트의 일부 값이 비어 있어도 상품 상세가 통째로 사라지지 않게 하기 위함입니다.
-    exact_keys = ["소재", "성별", "연령", "SEG", "캠페인명"]
-    for key in exact_keys:
-        if key not in matched.columns or key not in send_row.index:
-            continue
-        value = str(send_row.get(key, "") or "").strip()
-        if value.lower() in {"", "nan", "nat", "none"}:
-            continue
-        if key == "SEG":
-            current = matched[key].map(clean_identifier_value)
-            target = clean_identifier_value(value)
-        else:
-            current = matched[key].fillna("").astype(str).str.strip()
-            target = value
-        key_match = matched[current.eq(target)]
-        if not key_match.empty:
-            matched = key_match
+    # 2) 캠페인명이 양쪽에 있으면 정확 일치를 최우선
+    send_campaign_col = first_col(pd.DataFrame([send_row]), ["캠페인명", "캠페인"])
+    product_campaign_col = first_col(matched, ["캠페인명", "캠페인"])
+    if send_campaign_col and product_campaign_col:
+        campaign_value = str(send_row.get(send_campaign_col, "") or "").strip()
+        if campaign_value and campaign_value.lower() not in {"nan", "none", "nat"}:
+            campaign_match = matched[
+                matched[product_campaign_col].fillna("").astype(str).str.strip().eq(campaign_value)
+            ]
+            if not campaign_match.empty:
+                matched = campaign_match
 
-    if "시간대" in matched.columns:
-        send_time = _v4482_time_key(send_row.get("시간대", ""))
-        if send_time:
-            time_match = matched[matched["시간대"].map(_v4482_time_key).eq(send_time)]
-            if not time_match.empty:
-                matched = time_match
+    # 3) 소재 + 시간대로 보조 매칭
+    material = str(send_row.get("소재", "") or "").strip()
+    if material and material.lower() not in {"nan", "none", "nat"} and "소재" in matched.columns:
+        material_match = matched[
+            matched["소재"].fillna("").astype(str).str.strip().eq(material)
+        ]
+        if not material_match.empty:
+            matched = material_match
+
+    send_time = _v4482_time_key(send_row.get("시간대", "")) if "_v4482_time_key" in globals() else str(send_row.get("시간대", "")).strip()
+    if send_time and "시간대" in matched.columns:
+        if "_v4482_time_key" in globals():
+            time_keys = matched["시간대"].map(_v4482_time_key)
+            time_match = matched[time_keys.eq(send_time)]
+        else:
+            time_match = matched[matched["시간대"].fillna("").astype(str).str.strip().eq(send_time)]
+        if not time_match.empty:
+            matched = time_match
 
     if matched.empty:
-        return (
-            f"<b>{str(send_row.get('소재', '') or '발송 실적')}</b><br>"
-            f"주문건수 {fmt_num(send_row.get('주문건수', 0))}건 · "
-            f"주문수량 {fmt_num(send_row.get('주문수량', 0))}개 · "
-            f"주문금액 {fmt_num(send_row.get('주문금액', 0))}원"
-        )
+        return "상품 상세 없음"
 
-    sort_cols = [c for c in ["전시순서", "상품명"] if c in matched.columns]
+    # 실제 발송 내 상품 순서 우선, 없으면 주문금액 내림차순
+    sort_cols = []
+    if "전시순서" in matched.columns:
+        matched = matched.copy()
+        matched["_hover_display_order"] = pd.to_numeric(matched["전시순서"], errors="coerce")
+        sort_cols.append("_hover_display_order")
+    if "주문금액" in matched.columns:
+        if not sort_cols:
+            matched = matched.copy()
+        matched["_hover_amount"] = pd.to_numeric(matched["주문금액"], errors="coerce").fillna(0)
+        sort_cols.append("_hover_amount")
     if sort_cols:
-        matched = matched.sort_values(sort_cols, kind="stable")
+        ascending = [True if c == "_hover_display_order" else False for c in sort_cols]
+        matched = matched.sort_values(sort_cols, ascending=ascending, na_position="last")
 
     lines = []
     for _, product_row in matched.iterrows():
-        product_name = str(product_row.get("상품명", "") or "").strip() or "상품명 없음"
-        order_count = pd.to_numeric(pd.Series([product_row.get("주문건수", 0)]), errors="coerce").fillna(0).iloc[0]
-        order_qty = pd.to_numeric(pd.Series([product_row.get("주문수량", 0)]), errors="coerce").fillna(0).iloc[0]
-        order_amount = pd.to_numeric(pd.Series([product_row.get("주문금액", 0)]), errors="coerce").fillna(0).iloc[0]
+        name = str(product_row.get("상품명", "") or "").strip() or "-"
+        orders = pd.to_numeric(pd.Series([product_row.get("주문건수", 0)]), errors="coerce").fillna(0).iloc[0]
+        qty = pd.to_numeric(pd.Series([product_row.get("주문수량", 0)]), errors="coerce").fillna(0).iloc[0]
+        amount = pd.to_numeric(pd.Series([product_row.get("주문금액", 0)]), errors="coerce").fillna(0).iloc[0]
         lines.append(
-            f"<b>{_html.escape(product_name)}</b><br>"
-            f"주문건수 {fmt_num(order_count)}건 · 주문수량 {fmt_num(order_qty)}개 · "
-            f"주문금액 {fmt_num(order_amount)}원"
+            f"<b>{_html.escape(name)}</b><br>"
+            f"주문건수 {int(round(float(orders))):,}건 · "
+            f"주문수량 {int(round(float(qty))):,}개 · "
+            f"주문금액 {int(round(float(amount))):,}원"
         )
-
     return "<br><br>".join(lines)
 
 
 def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go.Figure:
     f = sw.sort_values("_date").copy()
     labels = _weekly_send_chart_labels(f)
-    hover_texts = [
-        _weekly_product_hover_text(row, pw)
+    hover_details = [
+        _weekly_product_hover_for_send(row, pw)
         for _, row in f.iterrows()
     ]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -3050,8 +3056,8 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
             marker_color="#70ad47",
             text=[fmt_num(v) for v in f["주문금액"]],
             textposition="inside",
-            hovertext=hover_texts,
-            hovertemplate="%{hovertext}<extra></extra>",
+            customdata=hover_details,
+            hovertemplate="%{customdata}<extra></extra>",
         ),
         secondary_y=False,
     )
