@@ -13211,6 +13211,59 @@ elif menu == "주간실적":
             unsafe_allow_html=True,
         )
 
+        # V4.5.2: 시즌 상품 제안은 문장뿐 아니라 실제 과거 고성과 사례 표로 표시
+        try:
+            _season_src_df = weekly_heavy["md_src_df"]
+
+            if not _season_src_df.empty:
+                _season_groups = [
+                    ("냉방가전", ["냉방가전", "선풍기", "서큘레이터"]),
+                    ("우양산", ["우양산"]),
+                ]
+                _season_table_shown = False
+
+                for _season_idx, (_season_title, _season_keywords) in enumerate(_season_groups):
+                    _mask = _season_src_df["시즌/상품군"].astype(str).apply(
+                        lambda x: any(k in x for k in _season_keywords)
+                    )
+                    _season_table = _season_src_df.loc[
+                        _mask,
+                        ["발송일", "상품명", "멤버십 혜택가", "주문금액"]
+                    ].drop_duplicates().head(5)
+
+                    if _season_table.empty:
+                        continue
+
+                    if not _season_table_shown:
+                        st.markdown("#### 전년 동일 시즌 고성과 사례")
+                        _season_table_shown = True
+
+                    st.markdown(f"**• {_season_title}**")
+                    selectable_dataframe(
+                        _season_table,
+                        key=f"weekly_season_{selected_year}_{week}_{_season_idx}",
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    if _season_title == "냉방가전":
+                        st.caption(
+                            "발굴 조건 : 3~5만원대 / 스탠드형 / BLDC / 리모컨 / 공기순환"
+                        )
+                    elif _season_title == "우양산":
+                        st.caption(
+                            "발굴 조건 : 1만원 내외 / 초경량 / 3단 접이식 / 암막 / 자동 개폐"
+                        )
+        except Exception as _season_table_error:
+            try:
+                print(
+                    "[WEEKLY_SEASON_TABLE_ERROR]",
+                    type(_season_table_error).__name__,
+                    str(_season_table_error)[:300],
+                )
+            except Exception:
+                pass
+
         st.markdown("### 상세 데이터 보기")
 
         # MD 의사결정용 상세
@@ -13241,7 +13294,11 @@ elif menu == "주간실적":
             st.caption(f"MD 상세 분석을 불러오지 못했습니다: {type(_md_exc).__name__}")
         detail_sections = [
             "MMS 상품 실적",
+            "MMS 발송 통계",
+            "카테고리 분석",
             "SEG 분석",
+            "요일·시간대 분석",
+            "상품별 상세 인사이트",
             "최저가 미확보 상품",
         ]
         detail_report = weekly_heavy["detail_report"]
