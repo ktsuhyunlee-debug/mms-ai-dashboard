@@ -668,6 +668,18 @@ hr {
     display: block !important;
 }
 
+/* 주간실적 MMS 문구: 긴 문구는 고정 높이 안에서 세로 스크롤 */
+[data-testid="stHorizontalBlock"]:has(.weekly-message-card) .asset-card {
+    height: 350px !important;
+    min-height: 350px !important;
+    max-height: 350px !important;
+}
+[data-testid="stHorizontalBlock"]:has(.weekly-message-card) .weekly-message-card {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    overflow-wrap: anywhere !important;
+}
+
 
 /* V4.4.30 발송소재: 원본 이미지 비율은 유지하고 좌우 박스 하단만 정확히 맞춤 */
 .daily-asset-pair {
@@ -9453,20 +9465,37 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     """주간 MMS 발송 캐러셀 오른쪽 상품표를 요청 컬럼 순서로 구성합니다."""
     columns = [
         "전시순서", "MD", "상품명", "멤버십혜택가",
-        "주문건수", "주문수량", "주문금액", "추가노출", "재편성",
+        "주문건수", "주문수량", "주문금액", "추가노출", "재편성", "최저가 확보",
     ]
     if matched is None or matched.empty:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=[
+            "전시순서", "MD", "상품명", "멤버십혜택가",
+            "주문건수", "주문수량", "주문금액", "추가노출", "재편성", "최저가 여부",
+        ])
 
     view = matched[[c for c in columns if c in matched.columns]].copy()
     for c in columns:
         if c not in view.columns:
             view[c] = ""
     view = view[columns]
+    view = view.rename(columns={"최저가 확보": "최저가 여부"})
+
+    # 표 하단 합계행: 주문건수·주문수량·주문금액만 집계합니다.
+    total_row = {c: "" for c in view.columns}
+    total_row["전시순서"] = "합계"
+    for c in ["주문건수", "주문수량", "주문금액"]:
+        source = matched[c] if c in matched.columns else pd.Series(0, index=matched.index)
+        total_row[c] = pd.to_numeric(source, errors="coerce").fillna(0).sum()
+    view = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
 
     if "전시순서" in view.columns:
+        order_raw = view["전시순서"].copy()
         order_num = pd.to_numeric(view["전시순서"], errors="coerce")
-        view["전시순서"] = order_num.map(lambda v: f"{int(v)}" if pd.notna(v) else "")
+        view["전시순서"] = [
+            f"{int(number)}" if pd.notna(number)
+            else ("합계" if str(raw).strip() == "합계" else "")
+            for raw, number in zip(order_raw, order_num)
+        ]
     if "멤버십혜택가" in view.columns:
         view["멤버십혜택가"] = view["멤버십혜택가"].map(
             lambda v: format_integer_price(v) if str(v).strip() not in {"", "nan", "None"} else ""
@@ -9476,7 +9505,7 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
             view[c] = view[c].map(
                 lambda v: format_integer_price(v) if str(v).strip() not in {"", "nan", "None"} else ""
             )
-    for c in ["MD", "상품명", "추가노출", "재편성"]:
+    for c in ["MD", "상품명", "추가노출", "재편성", "최저가 여부"]:
         if c in view.columns:
             view[c] = view[c].fillna("").astype(str).replace({"nan": "", "None": ""})
     return clean_identifier_columns(view)
@@ -9523,8 +9552,8 @@ def _build_weekly_send_carousel_items(
 
         target_parts = []
         for key in ["성별", "연령"]:
-            value = str(send_row.get(key, "") or "").strip()
-            if value and value.lower() not in {"nan", "none", "nat"}:
+            value = clean_identifier_value(send_row.get(key, ""))
+            if value:
                 target_parts.append(value)
         seg_value = clean_identifier_value(send_row.get("SEG", ""))
         if seg_value:
@@ -9620,7 +9649,7 @@ def render_weekly_send_carousel(
         else:
             message_body = "연결된 MMS 문구가 없습니다."
         st.markdown(
-            '<div class="asset-card asset-message-card" '
+            '<div class="asset-card asset-message-card weekly-message-card" '
             'style="min-height:350px; max-height:350px; overflow-y:auto;">'
             f'{message_body}</div>',
             unsafe_allow_html=True,
@@ -14521,5 +14550,3 @@ elif menu == "편성 프로그램":
                                 key=f"schedule_history_status_{stored_signature}_{status}",
                                 use_container_width=True, hide_index=True,
                             )
-
-
