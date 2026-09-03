@@ -9404,6 +9404,243 @@ def _encode_daily_image_cached(path_text: str, modified_ns: int) -> tuple[str, s
     return mime, encoded
 
 
+
+
+def _weekly_send_carousel_match_products(send_row: pd.Series, pw: pd.DataFrame) -> pd.DataFrame:
+    """선택 주차의 한 발송행에 연결되는 상품 로우를 일자→캠페인→소재→시간 순으로 찾습니다."""
+    if pw is None or pw.empty:
+        return pd.DataFrame()
+
+    matched = pw.copy()
+
+    send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
+    if pd.notna(send_date) and "_date" in matched.columns:
+        product_dates = pd.to_datetime(matched["_date"], errors="coerce").dt.normalize()
+        date_match = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
+        if not date_match.empty:
+            matched = date_match
+
+    campaign_value = str(send_row.get("캠페인명", "") or "").strip()
+    product_campaign_col = first_col(matched, ["캠페인명", "캠페인"])
+    if campaign_value and campaign_value.lower() not in {"nan", "none", "nat"} and product_campaign_col:
+        campaign_match = matched[
+            matched[product_campaign_col].fillna("").astype(str).str.strip().eq(campaign_value)
+        ]
+        if not campaign_match.empty:
+            matched = campaign_match
+
+    material = str(send_row.get("소재", "") or "").strip()
+    if material and material.lower() not in {"nan", "none", "nat"} and "소재" in matched.columns:
+        material_match = matched[
+            matched["소재"].fillna("").astype(str).str.strip().eq(material)
+        ]
+        if not material_match.empty:
+            matched = material_match
+
+    send_time = _v4482_time_key(send_row.get("시간대", ""))
+    if send_time and "시간대" in matched.columns:
+        time_match = matched[matched["시간대"].map(_v4482_time_key).eq(send_time)]
+        if not time_match.empty:
+            matched = time_match
+
+    sort_cols = [c for c in ["전시순서", "상품명"] if c in matched.columns]
+    if sort_cols:
+        matched = matched.sort_values(sort_cols, kind="stable", na_position="last")
+    return matched.copy()
+
+
+def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
+    """주간 MMS 발송 캐러셀 오른쪽 상품표를 요청 컬럼 순서로 구성합니다."""
+    columns = [
+        "전시순서", "MD", "상품명", "멤버십혜택가",
+        "주문건수", "주문수량", "주문금액", "추가노출", "재편성",
+    ]
+    if matched is None or matched.empty:
+        return pd.DataFrame(columns=columns)
+
+    view = matched[[c for c in columns if c in matched.columns]].copy()
+    for c in columns:
+        if c not in view.columns:
+            view[c] = ""
+    view = view[columns]
+
+    if "전시순서" in view.columns:
+        order_num = pd.to_numeric(view["전시순서"], errors="coerce")
+        view["전시순서"] = order_num.map(lambda v: f"{int(v)}" if pd.notna(v) else "")
+    if "멤버십혜택가" in view.columns:
+        view["멤버십혜택가"] = view["멤버십혜택가"].map(
+            lambda v: format_integer_price(v) if str(v).strip() not in {"", "nan", "None"} else ""
+        )
+    for c in ["주문건수", "주문수량", "주문금액"]:
+        if c in view.columns:
+            view[c] = view[c].map(
+                lambda v: format_integer_price(v) if str(v).strip() not in {"", "nan", "None"} else ""
+            )
+    for c in ["MD", "상품명", "추가노출", "재편성"]:
+        if c in view.columns:
+            view[c] = view[c].fillna("").astype(str).replace({"nan": "", "None": ""})
+    return clean_identifier_columns(view)
+
+
+def _build_weekly_send_carousel_items(
+    pw: pd.DataFrame,
+    sw: pd.DataFrame,
+    messages_df: pd.DataFrame | None = None,
+) -> list[dict]:
+    """선택 주차 발송건을 실제 발송 순서대로 소재·문구·상품표 묶음으로 만듭니다."""
+    if sw is None or sw.empty:
+        return []
+
+    send_rows = sw.copy()
+    send_rows["_carousel_date"] = pd.to_datetime(send_rows.get("_date"), errors="coerce").dt.normalize()
+    send_rows["_carousel_time_key"] = send_rows.get("시간대", pd.Series("", index=send_rows.index)).map(_v4482_time_key)
+    send_rows["_carousel_time"] = pd.to_datetime(
+        "2000-01-01 " + send_rows["_carousel_time_key"].replace("", pd.NA).astype("string"),
+        errors="coerce",
+    )
+    sort_cols = ["_carousel_date", "_carousel_time"]
+    for tie_col in ["소재", "캠페인명"]:
+        if tie_col in send_rows.columns:
+            sort_cols.append(tie_col)
+    send_rows = send_rows.sort_values(sort_cols, kind="stable", na_position="last").copy()
+    send_rows["_carousel_asset_slot"] = send_rows.groupby("_carousel_date", dropna=False).cumcount() + 1
+
+    items = []
+    for _, send_row in send_rows.iterrows():
+        matched = _weekly_send_carousel_match_products(send_row, pw)
+        send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
+        slot = int(send_row.get("_carousel_asset_slot", 1) or 1)
+        time_value = _v4482_time_key(send_row.get("시간대", ""))
+        campaign_name = str(send_row.get("캠페인명", "") or "").strip()
+        material = str(send_row.get("소재", "") or "").strip()
+        if material.lower() in {"nan", "none", "nat"}:
+            material = ""
+
+        asset_key = daily_asset_key(send_date, time_value, slot_index=slot)
+        image_paths = find_daily_images(asset_key, campaign_name)
+        message_text = extract_mms_message(matched, send_row, messages_df)
+        product_view = _weekly_send_carousel_product_view(matched)
+
+        target_parts = []
+        for key in ["성별", "연령"]:
+            value = str(send_row.get(key, "") or "").strip()
+            if value and value.lower() not in {"nan", "none", "nat"}:
+                target_parts.append(value)
+        seg_value = clean_identifier_value(send_row.get("SEG", ""))
+        if seg_value:
+            target_parts.append(f"SEG{seg_value}" if not str(seg_value).upper().startswith("SEG") else str(seg_value))
+
+        items.append({
+            "send_row": send_row.to_dict(),
+            "date": send_date,
+            "time": time_value,
+            "material": material,
+            "campaign_name": campaign_name,
+            "target": " ".join(target_parts),
+            "asset_key": asset_key,
+            "image_paths": image_paths,
+            "message_text": message_text,
+            "product_view": product_view,
+        })
+    return items
+
+
+def render_weekly_send_carousel(
+    pw: pd.DataFrame,
+    sw: pd.DataFrame,
+    messages_df: pd.DataFrame | None,
+    selected_year: int,
+    week: str,
+) -> None:
+    """주간 상품/발송 그래프 아래에서 발송별 이미지·문구·상품표를 함께 넘겨봅니다."""
+    items = _build_weekly_send_carousel_items(pw, sw, messages_df)
+    st.markdown('<div class="subsection-title">MMS 발송 소재 · 문구</div>', unsafe_allow_html=True)
+    if not items:
+        st.info("선택 주차의 MMS 발송 소재가 없습니다.")
+        return
+
+    state_key = f"weekly_send_carousel_index_{selected_year}_{week}"
+    current_index = int(st.session_state.get(state_key, 0) or 0)
+    if current_index < 0 or current_index >= len(items):
+        current_index = 0
+
+    nav_prev, nav_center, nav_next = st.columns([0.75, 4.5, 0.75])
+    if nav_prev.button("◀ 이전", key=f"{state_key}_prev", use_container_width=True):
+        current_index = (current_index - 1) % len(items)
+    if nav_next.button("다음 ▶", key=f"{state_key}_next", use_container_width=True):
+        current_index = (current_index + 1) % len(items)
+    st.session_state[state_key] = current_index
+
+    item = items[current_index]
+    date_text = item["date"].strftime("%Y-%m-%d") if pd.notna(item["date"]) else "-"
+    meta_parts = [date_text, item["time"] or "-", item["material"] or "소재명 없음"]
+    if item["target"]:
+        meta_parts.append(item["target"])
+    nav_center.markdown(
+        "<div style='text-align:center; padding-top:0.5rem; font-weight:800;'>"
+        f"{current_index + 1} / {len(items)} &nbsp;·&nbsp; {_html.escape(' · '.join(meta_parts))}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    image_col, message_col, table_col = st.columns([1.0, 1.25, 2.75], gap="small")
+
+    with image_col:
+        st.markdown("**발송 이미지**")
+        image_paths = item["image_paths"]
+        image_path = image_paths[0] if image_paths else None
+        if image_path is not None:
+            try:
+                modified_ns = image_path.stat().st_mtime_ns
+            except OSError:
+                modified_ns = 0
+            mime, encoded = _encode_daily_image_cached(str(image_path), modified_ns)
+            image_body = (
+                f'<img src="data:{mime};base64,{encoded}" '
+                f'alt="{_html.escape(image_path.name)}">'
+            )
+        else:
+            image_body = (
+                '<div class="asset-empty">images 폴더에<br>'
+                + _html.escape(f"{item['asset_key']} 또는 캠페인명으로 연결되는 이미지가 없습니다.")
+                + '</div>'
+            )
+        st.markdown(
+            f'<div class="asset-card asset-image-card" style="height:350px; min-height:350px;">{image_body}</div>',
+            unsafe_allow_html=True,
+        )
+        if len(image_paths) > 1:
+            st.caption(f"연결 이미지 {len(image_paths)}장 · 대표 1장 표시")
+
+    with message_col:
+        st.markdown("**MMS 문구**")
+        message_text = str(item["message_text"] or "").lstrip()
+        if message_text:
+            message_body = _html.escape(message_text).replace("\n", "<br>")
+        else:
+            message_body = "연결된 MMS 문구가 없습니다."
+        st.markdown(
+            '<div class="asset-card asset-message-card" '
+            'style="min-height:350px; max-height:350px; overflow-y:auto;">'
+            f'{message_body}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with table_col:
+        st.markdown("**상품 실적**")
+        product_view = item["product_view"]
+        if product_view.empty:
+            st.info("해당 발송과 연결된 상품 실적이 없습니다.")
+        else:
+            selectable_dataframe(
+                product_view,
+                key=f"weekly_send_carousel_table_{selected_year}_{week}_{current_index}",
+                use_container_width=True,
+                hide_index=True,
+                height=350,
+            )
+
+
 def _build_weekly_heavy_bundle(
     products: pd.DataFrame,
     sends: pd.DataFrame,
@@ -12776,6 +13013,11 @@ elif menu == "주간실적":
             use_container_width=True,
             config={"displayModeBar": False},
         )
+
+    # 발송 단위로 이미지·MMS 문구·상품 실적을 한 화면에서 함께 넘겨봅니다.
+    render_weekly_send_carousel(
+        pw, sw, messages, int(selected_year), str(week)
+    )
 
     # 선택 주차 소재 반응 로우를 전체 합산해 성·연령 / 지역 분포를 한 줄로 표시
     render_weekly_material_response_analysis(
