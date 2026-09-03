@@ -4073,6 +4073,44 @@ def _weekly_plain_delta(cur: float, prev: float, pp: bool = False) -> str:
 def _short_weekly_product_name(name: str) -> str:
     return _weekly_short_display_name(name)
 
+
+def _weekly_product_insight_section_html(section_text: str) -> str:
+    """상품별 상세 인사이트를 상품명 제목 + 하이픈 항목으로 표시합니다."""
+    blocks = []
+    for raw_line in str(section_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        matched = re.match(r"^\[(.+?)\]\s*(.*)$", line)
+        if not matched:
+            blocks.append(
+                f'<div style="margin:0 0 5px 0; line-height:1.55;">'
+                f'{_html.escape(line)}</div>'
+            )
+            continue
+
+        product_name = _html.escape(matched.group(1).strip())
+        insight_text = matched.group(2).strip()
+        insights = [
+            part.strip().lstrip("-• ").strip()
+            for part in re.split(r"\s+>\s+", insight_text)
+            if part.strip()
+        ]
+        bullet_html = "".join(
+            '<div style="margin:0 0 4px 12px; padding-left:10px; '
+            'text-indent:-10px; line-height:1.55;">'
+            f'- {_html.escape(insight)}</div>'
+            for insight in insights
+        )
+        blocks.append(
+            '<div style="margin:14px 0 12px 0;">'
+            f'<div style="font-weight:800; margin-bottom:6px;">{product_name}</div>'
+            f'{bullet_html}</div>'
+        )
+
+    return "".join(blocks)
+
 def _extract_unit_count_from_name(name: str):
     """상품명에서 총 수량/매수 추출. 2+1, 3+3, 24롤×2팩, 본품+리필 등 복합 구성을 우선 해석."""
     s = str(name or "").replace("×", "x").replace("X", "x")
@@ -4881,10 +4919,104 @@ def _seasonal_action_sentence(products_all: pd.DataFrame, week_end):
     return "\n".join(_season_lines)
 
 
+def _last_year_same_week_sourcing_table(
+    products_all: pd.DataFrame,
+    week_df: pd.DataFrame,
+    week_end,
+) -> pd.DataFrame:
+    """선택 주차와 동일한 전년 ISO 주차의 실제 발송 상품 중 300만원 이상 상품을 제안합니다."""
+    output_columns = [
+        "전년 기준기간", "발송일", "상품명", "당시 혜택가",
+        "주문금액", "성과등급", "당시 타겟", "소싱 제안",
+    ]
+    if products_all is None or products_all.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    product_col = first_col(products_all, ["상품명", "MMS 상품명", "상품"])
+    amount_col = first_col(products_all, ["주문금액", "거래액", "매출"])
+    history_date_col = first_col(products_all, ["_date", "발송일", "발송일자", "일자", "날짜"])
+    price_col = first_col(
+        products_all,
+        [
+            "멤버십 혜택가", "멤버십혜택가", "혜택가", "최종혜택가",
+            "행사가", "판매가", "MMS혜택가", "MMS 혜택가", "실판매가",
+        ],
+    )
+    if not product_col or not amount_col or not history_date_col:
+        return pd.DataFrame(columns=output_columns)
+
+    current_dates = pd.Series(dtype="datetime64[ns]")
+    if week_df is not None and not week_df.empty:
+        week_date_col = first_col(week_df, ["_date", "발송일", "발송일자", "일자", "날짜"])
+        if week_date_col:
+            current_dates = pd.to_datetime(week_df[week_date_col], errors="coerce").dropna()
+    current_anchor = current_dates.min() if not current_dates.empty else pd.to_datetime(week_end, errors="coerce")
+    if pd.isna(current_anchor):
+        return pd.DataFrame(columns=output_columns)
+
+    iso = pd.Timestamp(current_anchor).isocalendar()
+    prior_iso_year = int(iso.year) - 1
+    try:
+        prior_start = pd.Timestamp(datetime.fromisocalendar(prior_iso_year, int(iso.week), 1)).normalize()
+    except ValueError:
+        prior_anchor = (pd.Timestamp(current_anchor) - pd.DateOffset(years=1)).normalize()
+        prior_start = prior_anchor - pd.Timedelta(days=int(prior_anchor.weekday()))
+    prior_end = prior_start + pd.Timedelta(days=6)
+
+    history = products_all.copy()
+    history["_source_date"] = pd.to_datetime(history[history_date_col], errors="coerce").dt.normalize()
+    history["_source_amount"] = pd.to_numeric(history[amount_col], errors="coerce").fillna(0)
+    history = history[
+        history["_source_date"].between(prior_start, prior_end, inclusive="both")
+        & history[product_col].notna()
+        & (history["_source_amount"] >= 3_000_000)
+    ].copy()
+    if history.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    # 동일 상품이 여러 타겟에 발송된 경우 주문금액이 가장 높았던 실제 발송행을 대표로 사용합니다.
+    best_indices = history.groupby(product_col, dropna=True)["_source_amount"].idxmax()
+    best_rows = history.loc[best_indices].sort_values("_source_amount", ascending=False).head(10)
+    period_text = f"{prior_start:%Y-%m-%d}~{prior_end:%Y-%m-%d}"
+
+    rows = []
+    for _, row in best_rows.iterrows():
+        target_parts = []
+        gender = _clean_text_value(row.get("성별", ""))
+        age = clean_identifier_value(row.get("연령", ""))
+        seg = clean_identifier_value(row.get("SEG", ""))
+        if gender:
+            target_parts.append(gender)
+        if age:
+            target_parts.append(age)
+        if seg:
+            target_parts.append(f"SEG{seg}" if not str(seg).upper().startswith("SEG") else str(seg))
+
+        amount = float(row["_source_amount"])
+        price = pd.to_numeric(pd.Series([row.get(price_col, pd.NA)]), errors="coerce").iloc[0] if price_col else pd.NA
+        grade = product_grade(amount)
+        direction = (
+            "핵심 고성과 상품 기준 동일 상품 재소싱 또는 유사 구성 신규 TEST"
+            if amount >= 5_000_000
+            else "우수 성과 상품 기준 동일 상품 재소싱 또는 유사 구성 신규 TEST"
+        )
+        rows.append({
+            "전년 기준기간": period_text,
+            "발송일": row["_source_date"].strftime("%Y-%m-%d"),
+            "상품명": _safe_product_label(row[product_col]),
+            "당시 혜택가": f"{float(price):,.0f}원" if pd.notna(price) else "-",
+            "주문금액": compact_money(amount),
+            "성과등급": grade,
+            "당시 타겟": " ".join(target_parts) or "-",
+            "소싱 제안": direction,
+        })
+
+    return pd.DataFrame(rows, columns=output_columns)
+
+
 def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame, week_end):
     """MD 의사결정용: 재편성 추천 / 신규·유사신규 소싱 제안 데이터."""
     rec_rows = []
-    sourcing_rows = []
 
     if products_all is None or products_all.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -4944,32 +5076,10 @@ def _md_recommendation_tables(products_all: pd.DataFrame, week_df: pd.DataFrame,
                 "과거 평균 혜택가": price_txt or "-"
             })
 
-    season_items = _seasonal_last_year_evidence(products_all, week_end)
-    for x in season_items[:10]:
-        sg = _normalize_season_group(x["product"], x["group"])
-        reason = _marketing_calendar_reason(sg, week_end)
-        price = x.get("avg_price") or x.get("hp5_price") or x.get("hp3_price")
-        _best_date = pd.to_datetime(x.get("best_date"), errors="coerce")
-        _table_price = x.get("best_price")
-        if _table_price is None:
-            _table_price = price
-        sourcing_rows.append({
-            "시즌/상품군": sg,
-            "발송일": _best_date.strftime("%Y-%m-%d") if pd.notna(_best_date) else "-",
-            "상품명": _safe_product_label(x["product"]),
-            "멤버십 혜택가": f"{_table_price:,.0f}원" if _table_price is not None else "-",
-            "주문금액": compact_money(x["max_amt"]),
-            "과거 고성과 사례": _safe_product_label(x["product"]),
-            "성과": f"{x['scope']} {x['count']}회 / 평균 {compact_money(x['avg_amt'])} / 최고 {compact_money(x['max_amt'])}",
-            "당시 가격": f"{price:,.0f}원" if price is not None else "-",
-            "왜 지금": reason,
-            "소싱 방향": _season_specific_action(sg)
-        })
-
     rec_df = pd.DataFrame(rec_rows)
     if not rec_df.empty:
         rec_df = rec_df.sort_values(["500만원↑", "300만원↑", "운영횟수"], ascending=False).head(15)
-    src_df = pd.DataFrame(sourcing_rows).drop_duplicates(subset=["시즌/상품군", "과거 고성과 사례"]).head(10)
+    src_df = _last_year_same_week_sourcing_table(products_all, week_df, week_end)
     return rec_df, src_df
 
 
@@ -13228,8 +13338,9 @@ elif menu == "주간실적":
 
             with st.expander("▶ 신규·유사신규 소싱 제안", expanded=False):
                 if _md_src_df.empty:
-                    st.caption("전년·과거 동시즌 고성과 근거를 충족한 소싱 제안이 없습니다.")
+                    st.caption("전년 동일 주차의 실제 발송 상품 중 주문금액 300만원 이상 상품이 없습니다.")
                 else:
+                    st.caption("전년 동일 주차의 실제 발송 상품 중 주문금액 300만원 이상 고성과 상품 기준")
                     selectable_dataframe(
                         _md_src_df,
                         key=f"weekly_md_src_{selected_year}_{week}",
@@ -13283,11 +13394,15 @@ elif menu == "주간실적":
         for section_name in detail_sections:
             with st.expander(f"▶ {section_name}", expanded=False):
                 section_text = detail_map.get(section_name, "해당 기간 데이터가 없습니다.")
-                section_lines = [x.strip() for x in section_text.splitlines() if x.strip()]
-                section_html = "".join(
-                    f'<div style="margin:0 0 3px 0; line-height:1.55;">{x}</div>'
-                    for x in section_lines
-                )
+                if section_name == "상품별 상세 인사이트":
+                    section_html = _weekly_product_insight_section_html(section_text)
+                else:
+                    section_lines = [x.strip() for x in section_text.splitlines() if x.strip()]
+                    section_html = "".join(
+                        f'<div style="margin:0 0 3px 0; line-height:1.55;">'
+                        f'{_html.escape(x)}</div>'
+                        for x in section_lines
+                    )
                 st.markdown(
                     f'<div class="insight-box">{section_html}</div>',
                     unsafe_allow_html=True,
