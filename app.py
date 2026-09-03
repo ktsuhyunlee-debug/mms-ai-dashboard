@@ -9465,8 +9465,8 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     """주간 MMS 발송 캐러셀 오른쪽 상품표를 요청 컬럼 순서로 구성합니다."""
     if matched is None or matched.empty:
         return pd.DataFrame(columns=[
-            "전시순서", "MD", "상품명", "멤버십혜택가", "주문건수",
-            "주문수량", "주문금액", "추가노출", "최저가 여부", "재편성",
+            "전시순서", "MD", "상품명", "재편성", "최저가 여부",
+            "멤버십혜택가", "주문건수", "주문수량", "주문금액", "추가노출",
         ])
 
     prepared = matched.copy()
@@ -9478,8 +9478,8 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
             prepared = merge_lowest_price(prepared)
 
     columns = [
-        "전시순서", "MD", "상품명", "멤버십혜택가", "주문건수",
-        "주문수량", "주문금액", "추가노출", "최저가 확보", "재편성",
+        "전시순서", "MD", "상품명", "재편성", "최저가 확보",
+        "멤버십혜택가", "주문건수", "주문수량", "주문금액", "추가노출",
     ]
     view = prepared[[c for c in columns if c in prepared.columns]].copy()
     for c in columns:
@@ -9519,26 +9519,6 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     return clean_identifier_columns(view)
 
 
-def _style_weekly_send_carousel_total(df: pd.DataFrame):
-    """주간 발송별 상품 실적표의 합계행을 굵게 강조합니다."""
-    def _row_style(row):
-        is_total = str(row.get("전시순서", "")).strip() == "합계"
-        if is_total:
-            style = (
-                "font-weight: 800 !important; "
-                "background-color: #eef2f7 !important; "
-                "border-top: 2px solid #94a3b8 !important;"
-            )
-            return [style for _ in row]
-        return ["" for _ in row]
-
-    try:
-        return df.style.apply(_row_style, axis=1)
-    except Exception:
-        return df
-
-
-@st.cache_data(show_spinner=False, ttl=30)
 def _build_weekly_send_carousel_items(
     pw: pd.DataFrame,
     sw: pd.DataFrame,
@@ -9602,10 +9582,6 @@ def _build_weekly_send_carousel_items(
     return items
 
 
-_weekly_fragment = getattr(st, "fragment", lambda func: func)
-
-
-@_weekly_fragment
 def render_weekly_send_carousel(
     pw: pd.DataFrame,
     sw: pd.DataFrame,
@@ -9712,10 +9688,8 @@ def render_weekly_send_carousel(
         if product_view.empty:
             st.info("해당 발송과 연결된 상품 실적이 없습니다.")
         else:
-            styled_product_view = _style_weekly_send_carousel_total(product_view)
             selectable_dataframe(
-                styled_product_view,
-                summary_df=product_view,
+                product_view,
                 key=f"weekly_send_carousel_table_{selected_year}_{week}_{current_index}",
                 use_container_width=True,
                 hide_index=True,
