@@ -670,9 +670,9 @@ hr {
 
 /* 주간실적 MMS 문구: 긴 문구는 고정 높이 안에서 세로 스크롤 */
 [data-testid="stHorizontalBlock"]:has(.weekly-message-card) .asset-card {
-    height: 350px !important;
-    min-height: 350px !important;
-    max-height: 350px !important;
+    height: 390px !important;
+    min-height: 390px !important;
+    max-height: 390px !important;
 }
 [data-testid="stHorizontalBlock"]:has(.weekly-message-card) .weekly-message-card {
     overflow-y: auto !important;
@@ -9463,17 +9463,25 @@ def _weekly_send_carousel_match_products(send_row: pd.Series, pw: pd.DataFrame) 
 
 def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     """주간 MMS 발송 캐러셀 오른쪽 상품표를 요청 컬럼 순서로 구성합니다."""
-    columns = [
-        "전시순서", "MD", "상품명", "멤버십혜택가",
-        "주문건수", "주문수량", "주문금액", "추가노출", "재편성", "최저가 확보",
-    ]
     if matched is None or matched.empty:
         return pd.DataFrame(columns=[
-            "전시순서", "MD", "상품명", "멤버십혜택가",
-            "주문건수", "주문수량", "주문금액", "추가노출", "재편성", "최저가 여부",
+            "전시순서", "MD", "상품명", "재편성", "최저가 여부",
+            "멤버십혜택가", "주문건수", "주문수량", "주문금액", "추가노출",
         ])
 
-    view = matched[[c for c in columns if c in matched.columns]].copy()
+    prepared = matched.copy()
+    lowest_status = prepared.get("최저가 확보", pd.Series("", index=prepared.index)).fillna("").astype(str).str.strip()
+    if lowest_status.eq("").all():
+        if "최저가 여부" in prepared.columns:
+            prepared["최저가 확보"] = prepared["최저가 여부"]
+        elif "발송일 최저가" in prepared.columns and "멤버십혜택가" in prepared.columns:
+            prepared = merge_lowest_price(prepared)
+
+    columns = [
+        "전시순서", "MD", "상품명", "재편성", "최저가 확보",
+        "멤버십혜택가", "주문건수", "주문수량", "주문금액", "추가노출",
+    ]
+    view = prepared[[c for c in columns if c in prepared.columns]].copy()
     for c in columns:
         if c not in view.columns:
             view[c] = ""
@@ -9484,7 +9492,7 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     total_row = {c: "" for c in view.columns}
     total_row["전시순서"] = "합계"
     for c in ["주문건수", "주문수량", "주문금액"]:
-        source = matched[c] if c in matched.columns else pd.Series(0, index=matched.index)
+        source = prepared[c] if c in prepared.columns else pd.Series(0, index=prepared.index)
         total_row[c] = pd.to_numeric(source, errors="coerce").fillna(0).sum()
     view = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
 
@@ -9612,12 +9620,33 @@ def render_weekly_send_carousel(
         unsafe_allow_html=True,
     )
 
-    image_col, message_col, table_col = st.columns([1.0, 1.25, 2.75], gap="small")
+    image_col, message_col, table_col = st.columns([1.15, 1.15, 3.0], gap="small")
 
     with image_col:
         st.markdown("**발송 이미지**")
         image_paths = item["image_paths"]
-        image_path = image_paths[0] if image_paths else None
+        image_state_key = (
+            f"weekly_send_image_index_{selected_year}_{week}_"
+            f"{current_index}_{item['asset_key']}"
+        )
+        image_index = int(st.session_state.get(image_state_key, 0) or 0)
+        if image_index < 0 or image_index >= len(image_paths):
+            image_index = 0
+
+        if len(image_paths) > 1:
+            image_prev, image_count, image_next = st.columns([0.75, 1.0, 0.75], gap="small")
+            if image_prev.button("◀", key=f"{image_state_key}_prev", use_container_width=True):
+                image_index = (image_index - 1) % len(image_paths)
+            if image_next.button("▶", key=f"{image_state_key}_next", use_container_width=True):
+                image_index = (image_index + 1) % len(image_paths)
+            image_count.markdown(
+                f"<div style='text-align:center; padding-top:0.45rem; font-weight:800;'>"
+                f"{image_index + 1} / {len(image_paths)}</div>",
+                unsafe_allow_html=True,
+            )
+        st.session_state[image_state_key] = image_index
+
+        image_path = image_paths[image_index] if image_paths else None
         if image_path is not None:
             try:
                 modified_ns = image_path.stat().st_mtime_ns
@@ -9635,11 +9664,9 @@ def render_weekly_send_carousel(
                 + '</div>'
             )
         st.markdown(
-            f'<div class="asset-card asset-image-card" style="height:350px; min-height:350px;">{image_body}</div>',
+            f'<div class="asset-card asset-image-card" style="height:390px; min-height:390px;">{image_body}</div>',
             unsafe_allow_html=True,
         )
-        if len(image_paths) > 1:
-            st.caption(f"연결 이미지 {len(image_paths)}장 · 대표 1장 표시")
 
     with message_col:
         st.markdown("**MMS 문구**")
@@ -9650,7 +9677,7 @@ def render_weekly_send_carousel(
             message_body = "연결된 MMS 문구가 없습니다."
         st.markdown(
             '<div class="asset-card asset-message-card weekly-message-card" '
-            'style="min-height:350px; max-height:350px; overflow-y:auto;">'
+            'style="min-height:390px; max-height:390px; overflow-y:auto;">'
             f'{message_body}</div>',
             unsafe_allow_html=True,
         )
@@ -9666,7 +9693,7 @@ def render_weekly_send_carousel(
                 key=f"weekly_send_carousel_table_{selected_year}_{week}_{current_index}",
                 use_container_width=True,
                 hide_index=True,
-                height=350,
+                height=390,
             )
 
 
