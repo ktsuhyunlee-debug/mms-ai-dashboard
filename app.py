@@ -2963,9 +2963,86 @@ def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
     return labels
 
 
-def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
+def _weekly_product_hover_text(send_row: pd.Series, week_products: pd.DataFrame) -> str:
+    """주간 MMS 상품실적 막대 hover에 해당 발송의 상품별 실적을 표시합니다."""
+    if week_products is None or week_products.empty:
+        return (
+            f"<b>{str(send_row.get('소재', '') or '발송 실적')}</b><br>"
+            f"주문건수 {fmt_num(send_row.get('주문건수', 0))}건 · "
+            f"주문수량 {fmt_num(send_row.get('주문수량', 0))}개 · "
+            f"주문금액 {fmt_num(send_row.get('주문금액', 0))}원"
+        )
+
+    matched = week_products.copy()
+
+    # 1) 발송일은 필수 기준으로 사용합니다.
+    send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
+    if pd.notna(send_date) and "_date" in matched.columns:
+        product_dates = pd.to_datetime(matched["_date"], errors="coerce").dt.normalize()
+        date_match = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
+        if not date_match.empty:
+            matched = date_match
+
+    # 2) 소재/시간대/성별/연령/SEG/캠페인 순으로, 실제 일치 행이 있을 때만 좁힙니다.
+    #    원본 시트의 일부 값이 비어 있어도 상품 상세가 통째로 사라지지 않게 하기 위함입니다.
+    exact_keys = ["소재", "성별", "연령", "SEG", "캠페인명"]
+    for key in exact_keys:
+        if key not in matched.columns or key not in send_row.index:
+            continue
+        value = str(send_row.get(key, "") or "").strip()
+        if value.lower() in {"", "nan", "nat", "none"}:
+            continue
+        if key == "SEG":
+            current = matched[key].map(clean_identifier_value)
+            target = clean_identifier_value(value)
+        else:
+            current = matched[key].fillna("").astype(str).str.strip()
+            target = value
+        key_match = matched[current.eq(target)]
+        if not key_match.empty:
+            matched = key_match
+
+    if "시간대" in matched.columns:
+        send_time = _v4482_time_key(send_row.get("시간대", ""))
+        if send_time:
+            time_match = matched[matched["시간대"].map(_v4482_time_key).eq(send_time)]
+            if not time_match.empty:
+                matched = time_match
+
+    if matched.empty:
+        return (
+            f"<b>{str(send_row.get('소재', '') or '발송 실적')}</b><br>"
+            f"주문건수 {fmt_num(send_row.get('주문건수', 0))}건 · "
+            f"주문수량 {fmt_num(send_row.get('주문수량', 0))}개 · "
+            f"주문금액 {fmt_num(send_row.get('주문금액', 0))}원"
+        )
+
+    sort_cols = [c for c in ["전시순서", "상품명"] if c in matched.columns]
+    if sort_cols:
+        matched = matched.sort_values(sort_cols, kind="stable")
+
+    lines = []
+    for _, product_row in matched.iterrows():
+        product_name = str(product_row.get("상품명", "") or "").strip() or "상품명 없음"
+        order_count = pd.to_numeric(pd.Series([product_row.get("주문건수", 0)]), errors="coerce").fillna(0).iloc[0]
+        order_qty = pd.to_numeric(pd.Series([product_row.get("주문수량", 0)]), errors="coerce").fillna(0).iloc[0]
+        order_amount = pd.to_numeric(pd.Series([product_row.get("주문금액", 0)]), errors="coerce").fillna(0).iloc[0]
+        lines.append(
+            f"<b>{_html.escape(product_name)}</b><br>"
+            f"주문건수 {fmt_num(order_count)}건 · 주문수량 {fmt_num(order_qty)}개 · "
+            f"주문금액 {fmt_num(order_amount)}원"
+        )
+
+    return "<br><br>".join(lines)
+
+
+def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go.Figure:
     f = sw.sort_values("_date").copy()
     labels = _weekly_send_chart_labels(f)
+    hover_texts = [
+        _weekly_product_hover_text(row, pw)
+        for _, row in f.iterrows()
+    ]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Bar(
@@ -2973,6 +3050,8 @@ def weekly_product_chart(sw: pd.DataFrame) -> go.Figure:
             marker_color="#70ad47",
             text=[fmt_num(v) for v in f["주문금액"]],
             textposition="inside",
+            hovertext=hover_texts,
+            hovertemplate="%{hovertext}<extra></extra>",
         ),
         secondary_y=False,
     )
@@ -9360,7 +9439,7 @@ def _build_weekly_heavy_bundle(
         "md_error": md_error,
         "detail_report": detail_report,
         "detail_error": detail_error,
-        "product_chart": weekly_product_chart(sw),
+        "product_chart": weekly_product_chart(sw, pw),
         "send_chart": weekly_send_chart(sw),
         "big_table": category_summary_table(pw, first_col(pw, ["대카", "대카테고리", "대분류"]), week, selected_year),
         "mid_table": category_summary_table(pw, first_col(pw, ["중카", "중카테고리", "중분류"]), week, selected_year),
