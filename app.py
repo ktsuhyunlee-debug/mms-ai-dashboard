@@ -3686,6 +3686,9 @@ def render_weekly_product_grouped_table(
     formatted_df: pd.DataFrame,
     group_end_rows: set[int] | None = None,
     height: int = 680,
+    total_labels: set[str] | None = None,
+    total_bold_only: bool = False,
+    apply_amount_colors: bool = True,
 ):
     # st.dataframe에서 border-*가 표시되지 않아 이 표만 실제 HTML table로 렌더링한다.
     # 추가 행/칸 없이 그룹 마지막 행 아래선만 2px로 강조한다.
@@ -3694,6 +3697,7 @@ def render_weekly_product_grouped_table(
         return
 
     group_end_rows = set(group_end_rows or set())
+    total_labels = set(total_labels or {"총합계"})
     cols = list(formatted_df.columns)
     numeric_cols = {
         "전시순서", "멤버십혜택가", "주문건수", "주문수량", "주문금액", "주문비중"
@@ -3710,7 +3714,7 @@ def render_weekly_product_grouped_table(
         frow = formatted_df.iloc[pos]
         rrow = raw_df.iloc[pos] if pos < len(raw_df) else frow
         row_texts = [_clean_text_value(v) for v in frow.tolist()]
-        is_total = any(v == "총합계" for v in row_texts)
+        is_total = any(v in total_labels for v in row_texts)
 
         classes = []
         if pos in group_end_rows and not is_total:
@@ -3720,7 +3724,7 @@ def render_weekly_product_grouped_table(
 
         amount = pd.to_numeric(pd.Series([rrow.get("주문금액", None)]), errors="coerce").iloc[0]
         bg = ""
-        if not is_total and pd.notna(amount):
+        if apply_amount_colors and not is_total and pd.notna(amount):
             if float(amount) >= 3_000_000:
                 bg = "background:#fff2cc;"
             elif float(amount) < 1_000_000:
@@ -3732,7 +3736,10 @@ def render_weekly_product_grouped_table(
             raw_value = rrow.get(col, "")
             data_num = ""
             if col in numeric_cols:
-                n = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
+                raw_number_text = str(raw_value).replace(",", "").replace("%", "").strip()
+                n = pd.to_numeric(pd.Series([raw_number_text]), errors="coerce").iloc[0]
+                if pd.notna(n) and "%" in str(raw_value) and "비중" in col:
+                    n = float(n) / 100
                 if pd.notna(n):
                     data_num = f' data-num="{float(n)}"'
             cells.append(
@@ -3742,6 +3749,11 @@ def render_weekly_product_grouped_table(
         body_rows.append(f'<tr{cls} style="{bg}">{"".join(cells)}</tr>')
 
     viewport_height = max(360, int(height) - 42)
+    total_row_css = (
+        "font-weight:800;"
+        if total_bold_only
+        else "font-weight:800; background:#fff !important; border-top:2px solid #7c8797;"
+    )
     html_doc = f"""<!doctype html>
 <html lang='ko'>
 <head>
@@ -3756,7 +3768,7 @@ th, td {{ padding:8px 9px; white-space:nowrap; text-align:left; border-right:1px
 th {{ position:sticky; top:0; z-index:4; background:#f5f8fc; font-weight:750; color:#111827; border-bottom:1px solid #d9dee7; }}
 th:last-child, td:last-child {{ border-right:0; }}
 tr.group-end td {{ border-bottom:2px solid #7c8797 !important; }}
-tr.total-row td {{ font-weight:800; background:#fff !important; border-top:2px solid #7c8797; }}
+tr.total-row td {{ {total_row_css} }}
 td.cell-selected {{ outline:2px solid rgba(47,111,236,.62); outline-offset:-2px; background-image:linear-gradient(rgba(47,111,236,.08),rgba(47,111,236,.08)); }}
 .summary {{ height:42px; display:flex; align-items:center; padding:0 10px; font-size:12px; color:#475569; overflow-x:auto; white-space:nowrap; }}
 .summary strong {{ color:#111827; }}
@@ -9519,19 +9531,6 @@ def _weekly_send_carousel_product_view(matched: pd.DataFrame) -> pd.DataFrame:
     return clean_identifier_columns(view)
 
 
-def _style_weekly_send_carousel_total(df: pd.DataFrame):
-    """주간 발송별 상품 실적표의 합계행은 배경 변경 없이 글씨만 굵게 표시합니다."""
-    def _row_style(row):
-        if str(row.get("전시순서", "")).strip() == "합계":
-            return ["font-weight: 800 !important;" for _ in row]
-        return ["" for _ in row]
-
-    try:
-        return df.style.apply(_row_style, axis=1)
-    except Exception:
-        return df
-
-
 @st.cache_data(show_spinner=False, ttl=30)
 def _build_weekly_send_carousel_items(
     pw: pd.DataFrame,
@@ -9706,14 +9705,13 @@ def render_weekly_send_carousel(
         if product_view.empty:
             st.info("해당 발송과 연결된 상품 실적이 없습니다.")
         else:
-            styled_product_view = _style_weekly_send_carousel_total(product_view)
-            selectable_dataframe(
-                styled_product_view,
-                summary_df=product_view,
-                key=f"weekly_send_carousel_table_{selected_year}_{week}_{current_index}",
-                use_container_width=True,
-                hide_index=True,
+            render_weekly_product_grouped_table(
+                product_view,
+                product_view,
                 height=390,
+                total_labels={"합계"},
+                total_bold_only=True,
+                apply_amount_colors=False,
             )
 
 
@@ -13211,59 +13209,6 @@ elif menu == "주간실적":
             unsafe_allow_html=True,
         )
 
-        # V4.5.2: 시즌 상품 제안은 문장뿐 아니라 실제 과거 고성과 사례 표로 표시
-        try:
-            _season_src_df = weekly_heavy["md_src_df"]
-
-            if not _season_src_df.empty:
-                _season_groups = [
-                    ("냉방가전", ["냉방가전", "선풍기", "서큘레이터"]),
-                    ("우양산", ["우양산"]),
-                ]
-                _season_table_shown = False
-
-                for _season_idx, (_season_title, _season_keywords) in enumerate(_season_groups):
-                    _mask = _season_src_df["시즌/상품군"].astype(str).apply(
-                        lambda x: any(k in x for k in _season_keywords)
-                    )
-                    _season_table = _season_src_df.loc[
-                        _mask,
-                        ["발송일", "상품명", "멤버십 혜택가", "주문금액"]
-                    ].drop_duplicates().head(5)
-
-                    if _season_table.empty:
-                        continue
-
-                    if not _season_table_shown:
-                        st.markdown("#### 전년 동일 시즌 고성과 사례")
-                        _season_table_shown = True
-
-                    st.markdown(f"**• {_season_title}**")
-                    selectable_dataframe(
-                        _season_table,
-                        key=f"weekly_season_{selected_year}_{week}_{_season_idx}",
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    if _season_title == "냉방가전":
-                        st.caption(
-                            "발굴 조건 : 3~5만원대 / 스탠드형 / BLDC / 리모컨 / 공기순환"
-                        )
-                    elif _season_title == "우양산":
-                        st.caption(
-                            "발굴 조건 : 1만원 내외 / 초경량 / 3단 접이식 / 암막 / 자동 개폐"
-                        )
-        except Exception as _season_table_error:
-            try:
-                print(
-                    "[WEEKLY_SEASON_TABLE_ERROR]",
-                    type(_season_table_error).__name__,
-                    str(_season_table_error)[:300],
-                )
-            except Exception:
-                pass
-
         st.markdown("### 상세 데이터 보기")
 
         # MD 의사결정용 상세
@@ -13294,10 +13239,6 @@ elif menu == "주간실적":
             st.caption(f"MD 상세 분석을 불러오지 못했습니다: {type(_md_exc).__name__}")
         detail_sections = [
             "MMS 상품 실적",
-            "MMS 발송 통계",
-            "카테고리 분석",
-            "SEG 분석",
-            "요일·시간대 분석",
             "상품별 상세 인사이트",
             "최저가 미확보 상품",
         ]
