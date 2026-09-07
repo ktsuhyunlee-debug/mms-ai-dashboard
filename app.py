@@ -1509,7 +1509,8 @@ def aggregate_send(data: pd.DataFrame, mode: str) -> pd.DataFrame:
             d["_label"].str.extract(r"(\d+)")[0], errors="coerce"
         ).fillna(0)
     else:
-        d["_label"] = d["_date"].dt.strftime("%m%d")
+        # 일별 표의 구분과 그래프 X축을 실제 일자로 명확하게 표시
+        d["_label"] = d["_date"].dt.strftime("%Y-%m-%d")
         d["_sort1"] = d["_date"].dt.year
         d["_sort2"] = d["_date"].dt.dayofyear
 
@@ -12577,38 +12578,16 @@ if menu == "홈":
         )
     st.markdown('<div class="home-section-spacer"></div>', unsafe_allow_html=True)
 
-    # 일별 SPM·CTR 그래프와 표: 기존 Home 일간 조회 로직 유지(분석 조건 미적용)
+    # 일별도 상단 분석 조건의 기간을 그대로 사용
     st.markdown('<div class="section-title">일별 실적</div>', unsafe_allow_html=True)
-    st.caption("일간 조회 기간")
-    daily_start_col, daily_end_col = st.columns(2)
-    with daily_start_col:
-        daily_start_date = st.date_input(
-            "시작일", value=sends["_date"].min().date(),
-            min_value=sends["_date"].min().date(), max_value=sends["_date"].max().date(),
-            format="YYYY/MM/DD", key="home_daily_start",
-        )
-    with daily_end_col:
-        daily_end_date = st.date_input(
-            "종료일", value=sends["_date"].max().date(),
-            min_value=sends["_date"].min().date(), max_value=sends["_date"].max().date(),
-            format="YYYY/MM/DD", key="home_daily_end",
-        )
-    if daily_start_date > daily_end_date:
-        daily_start_date, daily_end_date = daily_end_date, daily_start_date
     daily = _menu_cache_get(
-        "home_daily_aggregate",
-        (str(daily_start_date), str(daily_end_date)),
-        lambda: aggregate_send(
-            sends[
-                (sends["_date"].dt.date >= daily_start_date)
-                & (sends["_date"].dt.date <= daily_end_date)
-            ].copy(),
-            "Daily",
-        ),
+        "home_daily_applied_aggregate",
+        home_aggregate_key,
+        lambda: aggregate_send(home_applied_sends, "Daily"),
         max_entries=12,
     )
     if daily.empty:
-        st.info("선택한 기간의 일간 데이터가 없습니다.")
+        st.info("적용된 분석 조건에 해당하는 일별 데이터가 없습니다.")
     else:
         daily_spm_col, _, daily_ctr_col = st.columns([1, 0.08, 1])
         with daily_spm_col:
