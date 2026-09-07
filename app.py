@@ -11184,6 +11184,235 @@ def _build_target_best_integrated_views(
     return result
 
 
+def _build_target_best_monthly_summary(
+    products: pd.DataFrame,
+    sends: pd.DataFrame,
+    selected_months: tuple[int, ...] = (),
+) -> dict:
+    """타겟별 월간 CTR과 상품 구성 지표를 계산합니다.
+
+    상품 지표는 알파코드·쇼라코드 조합(코드가 없으면 상품명)을 하나의 상품으로 보고,
+    TOP20은 동일 월 전체 타겟의 주문금액 상위 20개 상품을 기준으로 합니다.
+    """
+    target_groups = [
+        ("남성", "3040"), ("남성", "5060"),
+        ("여성", "3040"), ("여성", "5060"),
+    ]
+    product_data = products.copy() if isinstance(products, pd.DataFrame) else pd.DataFrame()
+    send_data = sends.copy() if isinstance(sends, pd.DataFrame) else pd.DataFrame()
+
+    if selected_months:
+        months = [int(month) for month in selected_months if 1 <= int(month) <= 12]
+    else:
+        # 여러 연도가 포함돼도 최근 발생 순서를 유지해 12월→1월처럼 자연스럽게 표시합니다.
+        dated_frames = []
+        for frame in [product_data, send_data]:
+            if not frame.empty and "_date" in frame.columns:
+                dates = pd.to_datetime(frame["_date"], errors="coerce").dropna()
+                if not dates.empty:
+                    dated_frames.append(pd.DataFrame({"날짜": dates, "월": dates.dt.month.astype(int)}))
+        if dated_frames:
+            month_recency = (
+                pd.concat(dated_frames, ignore_index=True)
+                .groupby("월", as_index=False)["날짜"].max()
+                .sort_values("날짜", kind="stable")
+            )
+            months = month_recency["월"].astype(int).tolist()
+        else:
+            months = []
+
+    empty_result = {
+        "months": months,
+        "views": {group: pd.DataFrame() for group in target_groups},
+    }
+    if not months:
+        return empty_result
+
+    if not product_data.empty and "_date" in product_data.columns:
+        product_data["_summary_month"] = pd.to_datetime(
+            product_data["_date"], errors="coerce"
+        ).dt.month
+        product_data = product_data[product_data["_summary_month"].isin(months)].copy()
+        product_data["_summary_gender"] = (
+            product_data.get("성별", pd.Series("", index=product_data.index))
+            .fillna("").astype(str).str.strip()
+            .replace({"남": "남성", "남자": "남성", "여": "여성", "여자": "여성"})
+        )
+        product_data["_summary_age"] = product_data.get(
+            "연령", pd.Series("", index=product_data.index)
+        ).map(clean_identifier_value)
+        alpha = product_data.get(
+            "알파코드", pd.Series("", index=product_data.index)
+        ).map(clean_identifier_value)
+        shora = product_data.get(
+            "쇼라코드", pd.Series("", index=product_data.index)
+        ).map(clean_identifier_value)
+        names = product_data.get(
+            "상품명", pd.Series("", index=product_data.index)
+        ).fillna("").astype(str).str.strip()
+        product_data["_summary_product_key"] = [
+            f"A:{a}|S:{s}" if a or s else (f"N:{name}" if name else "")
+            for a, s, name in zip(alpha, shora, names)
+        ]
+        amount_source = product_data.get(
+            "주문금액", pd.Series(0, index=product_data.index, dtype="float64")
+        )
+        product_data["_summary_amount"] = pd.to_numeric(
+            amount_source, errors="coerce"
+        ).fillna(0)
+        product_data = product_data[product_data["_summary_product_key"].ne("")].copy()
+
+    if not send_data.empty and "_date" in send_data.columns:
+        send_data["_summary_month"] = pd.to_datetime(
+            send_data["_date"], errors="coerce"
+        ).dt.month
+        send_data = send_data[send_data["_summary_month"].isin(months)].copy()
+        send_data["_summary_gender"] = (
+            send_data.get("성별", pd.Series("", index=send_data.index))
+            .fillna("").astype(str).str.strip()
+            .replace({"남": "남성", "남자": "남성", "여": "여성", "여자": "여성"})
+        )
+        send_data["_summary_age"] = send_data.get(
+            "연령", pd.Series("", index=send_data.index)
+        ).map(clean_identifier_value)
+
+    top20_by_month = {}
+    if not product_data.empty:
+        overall_monthly = (
+            product_data.groupby(
+                ["_summary_month", "_summary_product_key"], as_index=False, dropna=False
+            )["_summary_amount"].sum()
+        )
+        for month in months:
+            month_totals = overall_monthly[overall_monthly["_summary_month"].eq(month)]
+            top20_by_month[month] = set(
+                month_totals.nlargest(20, "_summary_amount")["_summary_product_key"].tolist()
+            )
+
+    send_count_col = first_col(send_data, ["발송 성공 건수", "총 발송 건수"]) if not send_data.empty else None
+    click_col = first_col(send_data, ["클릭 수(uniq)", "클릭 수"]) if not send_data.empty else None
+    views = {}
+    for gender, age in target_groups:
+        product_target = product_data[
+            product_data.get("_summary_gender", pd.Series("", index=product_data.index)).eq(gender)
+            & product_data.get("_summary_age", pd.Series("", index=product_data.index)).eq(age)
+        ].copy() if not product_data.empty else pd.DataFrame()
+        send_target = send_data[
+            send_data.get("_summary_gender", pd.Series("", index=send_data.index)).eq(gender)
+            & send_data.get("_summary_age", pd.Series("", index=send_data.index)).eq(age)
+        ].copy() if not send_data.empty else pd.DataFrame()
+
+        rows = []
+        for month in months:
+            month_products = product_target[
+                product_target["_summary_month"].eq(month)
+            ].copy() if not product_target.empty else pd.DataFrame()
+            if month_products.empty:
+                product_count = 0
+                average_amount = pd.NA
+                high_share = pd.NA
+                low_share = pd.NA
+                top20_share = pd.NA
+            else:
+                product_totals = month_products.groupby(
+                    "_summary_product_key", as_index=True
+                )["_summary_amount"].sum()
+                product_count = int(len(product_totals))
+                average_amount = float(product_totals.mean()) if product_count else pd.NA
+                high_share = float(product_totals.ge(5_000_000).mean() * 100) if product_count else pd.NA
+                low_share = float(product_totals.lt(1_000_000).mean() * 100) if product_count else pd.NA
+                top20_keys = top20_by_month.get(month, set())
+                top20_share = (
+                    float(product_totals.index.to_series().isin(top20_keys).mean() * 100)
+                    if product_count else pd.NA
+                )
+
+            month_sends = send_target[
+                send_target["_summary_month"].eq(month)
+            ].copy() if not send_target.empty else pd.DataFrame()
+            if month_sends.empty or not send_count_col or not click_col:
+                ctr = pd.NA
+            else:
+                sent = float(pd.to_numeric(month_sends[send_count_col], errors="coerce").fillna(0).sum())
+                clicks = float(pd.to_numeric(month_sends[click_col], errors="coerce").fillna(0).sum())
+                ctr = clicks / sent * 100 if sent else pd.NA
+
+            rows.append({
+                "월": int(month),
+                "CTR": ctr,
+                "상품당 평균 주문금액": average_amount,
+                "500만원 이상 상품 비중": high_share,
+                "100만원 미만 상품 비중": low_share,
+                "TOP20 상품 포함 비중": top20_share,
+                "상품수": product_count,
+            })
+        views[(gender, age)] = pd.DataFrame(rows)
+
+    return {"months": months, "views": views}
+
+
+def _target_best_monthly_summary_html(summary: pd.DataFrame, months: list[int]) -> str:
+    """타겟 월별 비교 지표를 가로형 HTML 표로 표시합니다."""
+    if summary is None or summary.empty or not months:
+        return '<div class="target-best-month-empty">월별 비교 데이터가 없습니다.</div>'
+
+    month_lookup = summary.set_index("월").to_dict("index")
+    highlight_month = months[-1]
+
+    def _fmt(value, kind: str) -> str:
+        try:
+            if pd.isna(value):
+                return "-"
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if kind == "ctr":
+            return f"{numeric:.1f}%"
+        if kind == "money":
+            return f"{numeric / 10_000:,.0f}만원"
+        return f"{numeric:.0f}%"
+
+    metric_rows = [
+        ("CTR", "CTR", "ctr"),
+        ("상품당 평균 주문금액", "상품당 평균 주문금액", "money"),
+        ("500만원 이상 상품 비중", "500만원 이상 상품 비중", "share"),
+        ("100만원 미만 상품 비중", "100만원 미만 상품 비중", "share"),
+        ("TOP20 상품 포함 비중", "TOP20 상품 포함 비중", "share"),
+    ]
+    header_cells = "".join(
+        f'<th class="month-col{" latest" if month == highlight_month else ""}">{month}월</th>'
+        for month in months
+    )
+    body_rows = []
+    for label, column, kind in metric_rows:
+        value_cells = "".join(
+            f'<td class="month-col{" latest" if month == highlight_month else ""}">'
+            f'{_fmt(month_lookup.get(month, {}).get(column, pd.NA), kind)}</td>'
+            for month in months
+        )
+        body_rows.append(f'<tr><th class="metric-name">{_html.escape(label)}</th>{value_cells}</tr>')
+
+    return (
+        '<style>'
+        '.target-best-month-wrap{width:100%;overflow-x:auto;border:1px solid #dfe4ec;border-radius:11px;'
+        'background:#fff;box-shadow:0 2px 8px rgba(25,42,70,.035);margin:2px 0 12px}'
+        '.target-best-month-table{width:100%;border-collapse:separate;border-spacing:0;min-width:620px;'
+        'table-layout:fixed;font-size:14px;color:#111827}'
+        '.target-best-month-table th,.target-best-month-table td{padding:9px 10px;text-align:center;'
+        'border-right:1px solid #e7eaf0;border-bottom:1px solid #e7eaf0;white-space:nowrap}'
+        '.target-best-month-table thead th{background:#eef2f7;color:#334155;font-weight:900}'
+        '.target-best-month-table .metric-name{background:#f8fafc;text-align:left;font-weight:850;width:190px}'
+        '.target-best-month-table .month-col.latest{background:#f1edff;font-weight:900;color:#4b31c2}'
+        '.target-best-month-table tr:last-child th,.target-best-month-table tr:last-child td{border-bottom:0}'
+        '.target-best-month-table th:last-child,.target-best-month-table td:last-child{border-right:0}'
+        '.target-best-month-empty{padding:13px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;color:#64748b}'
+        '</style>'
+        '<div class="target-best-month-wrap"><table class="target-best-month-table">'
+        f'<thead><tr><th class="metric-name">구분</th>{header_cells}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody></table></div>'
+    )
+
+
 def _build_product_history_view_fast(products: pd.DataFrame, group_keys: list[str], selected_values: tuple) -> pd.DataFrame:
     history_mask = pd.Series(True, index=products.index)
     for key, value in zip(group_keys, selected_values):
@@ -11777,8 +12006,79 @@ def _segv_compare_table(asis_g: pd.DataFrame, tobe_g: pd.DataFrame) -> pd.DataFr
     return out
 
 
+def _segv_target_compare_table(asis_df: pd.DataFrame, tobe_df: pd.DataFrame) -> pd.DataFrame:
+    """SEG 선택을 모두 해제했을 때 성별·연령대 단위로 합산한 전후 실적을 생성합니다."""
+    target_base = pd.DataFrame(
+        [(gender, age) for gender, age in [
+            ("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")
+        ]],
+        columns=["성별", "연령"],
+    )
 
-def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
+    def _summarize(source: pd.DataFrame) -> pd.DataFrame:
+        columns = [
+            "성별", "연령", "발송횟수", "발송모수", "평균 발송모수",
+            "발송성공건수", "클릭수", "주문건수", "주문금액", "CTR", "SPM",
+        ]
+        if source is None or source.empty:
+            return pd.DataFrame(columns=columns)
+        grouped = source.groupby(["_gender", "_age"], as_index=False, dropna=False).agg(
+            발송횟수=("_sent", "size"),
+            발송모수=("_sent", "sum"),
+            발송성공건수=("_success", "sum"),
+            클릭수=("_click", "sum"),
+            주문건수=("_orders", "sum"),
+            주문금액=("_amount", "sum"),
+        )
+        grouped["평균 발송모수"] = grouped["발송모수"].div(
+            grouped["발송횟수"].replace(0, pd.NA)
+        ).fillna(0)
+        grouped["CTR"] = grouped["클릭수"].div(
+            grouped["발송성공건수"].replace(0, pd.NA)
+        ).fillna(0)
+        grouped["SPM"] = grouped["주문금액"].div(
+            grouped["발송모수"].replace(0, pd.NA)
+        ).fillna(0)
+        grouped = grouped.rename(columns={"_gender": "성별", "_age": "연령"})
+        return grouped[columns]
+
+    asis_target = _summarize(asis_df)
+    tobe_target = _summarize(tobe_df)
+    asis_target = asis_target.rename(columns={
+        column: f"A_{column}" for column in asis_target.columns
+        if column not in ["성별", "연령"]
+    })
+    tobe_target = tobe_target.rename(columns={
+        column: f"B_{column}" for column in tobe_target.columns
+        if column not in ["성별", "연령"]
+    })
+    merged = target_base.merge(asis_target, on=["성별", "연령"], how="left").merge(
+        tobe_target, on=["성별", "연령"], how="left"
+    )
+    asis_ok = pd.to_numeric(merged.get("A_발송모수"), errors="coerce").fillna(0).gt(0)
+    tobe_ok = pd.to_numeric(merged.get("B_발송모수"), errors="coerce").fillna(0).gt(0)
+    comparable = asis_ok & tobe_ok
+
+    output = pd.DataFrame({
+        "구분": merged["성별"] + " " + merged["연령"],
+        "AS-IS CTR(%)": pd.to_numeric(merged.get("A_CTR"), errors="coerce") * 100,
+        "AS-IS SPM(원)": pd.to_numeric(merged.get("A_SPM"), errors="coerce"),
+        "AS-IS 평균 발송모수": pd.to_numeric(merged.get("A_평균 발송모수"), errors="coerce"),
+        "TO-BE CTR(%)": pd.to_numeric(merged.get("B_CTR"), errors="coerce") * 100,
+        "TO-BE SPM(원)": pd.to_numeric(merged.get("B_SPM"), errors="coerce"),
+        "TO-BE 평균 발송모수": pd.to_numeric(merged.get("B_평균 발송모수"), errors="coerce"),
+    })
+    output["CTR 증감(p)"] = (
+        output["TO-BE CTR(%)"] - output["AS-IS CTR(%)"]
+    ).where(comparable)
+    output["SPM 증감(원)"] = (
+        output["TO-BE SPM(원)"] - output["AS-IS SPM(원)"]
+    ).where(comparable)
+    return output
+
+
+
+def _segv_compare_table_html(compare_df: pd.DataFrame, show_seg_column: bool = True) -> str:
     """SEG 전후 비교표를 compact하게 표시하되 AS-IS / TO-BE / 증감 영역은 명확히 구분합니다."""
     if compare_df is None or compare_df.empty:
         return '<div class="segv-empty">비교 가능한 SEG 데이터가 없습니다.</div>'
@@ -11821,21 +12121,29 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
         group = compare_df[compare_df["구분"].astype(str).eq(group_name)].copy()
         if group.empty:
             continue
-        group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
-        group = group.sort_values("_seg_sort")
+        if show_seg_column:
+            group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
+            group = group.sort_values("_seg_sort")
+        else:
+            group = group.head(1)
         for idx, (_, row) in enumerate(group.iterrows()):
             target_cell = ""
             if idx == 0:
+                rowspan = f' rowspan="{len(group)}"' if show_seg_column else ""
                 target_cell = (
-                    f'<td class="segv-target" rowspan="{len(group)}">'
+                    f'<td class="segv-target"{rowspan}>'
                     f'<b>{_html.escape(group_name.replace(" ", ""))}</b></td>'
                 )
+            seg_cell = (
+                f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
+                if show_seg_column else ""
+            )
             ctr_delta = row.get("CTR 증감(p)")
             spm_delta = row.get("SPM 증감(원)")
             rows.append(
                 "<tr>"
                 + target_cell
-                + f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
+                + seg_cell
                 + f'<td class="segv-asis-cell segv-group-start">{_fmt(row.get("AS-IS CTR(%)"), "ctr")}</td>'
                 + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS SPM(원)"), "spm")}</td>'
                 + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 평균 발송모수"), "sent")}</td>'
@@ -11847,6 +12155,7 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
                 + "</tr>"
             )
 
+    seg_header = '<th class="segv-fixed-head" rowspan="2">SEG</th>' if show_seg_column else ""
     return f"""
     <style>
       .segv-table-wrap {{
@@ -11884,7 +12193,7 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
         <thead>
           <tr>
             <th class="segv-fixed-head" rowspan="2">구분</th>
-            <th class="segv-fixed-head" rowspan="2">SEG</th>
+            {seg_header}
             <th class="segv-asis-head" colspan="3">AS-IS</th>
             <th class="segv-tobe-head" colspan="3">TO-BE</th>
             <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
@@ -14575,6 +14884,20 @@ elif menu == "타겟별베스트상품":
             target_best_filtered_products,
             target_best_applied.get("send_type", "전체"),
         )
+        # 월별 비교표는 월 선택 전의 적용기간 전체 데이터를 보존한 뒤 선택 월별로 각각 계산합니다.
+        target_best_period_products = target_best_filtered_products.copy()
+        target_best_period_sends = apply_home_analysis_date_filter(
+            sends,
+            target_best_applied["mode"],
+            target_best_start,
+            target_best_end,
+            target_best_applied["include_ranges"],
+            target_best_applied["exclude_ranges"],
+        )
+        target_best_period_sends = apply_home_send_type_filter(
+            target_best_period_sends,
+            target_best_applied.get("send_type", "전체"),
+        )
 
         # 1~12월 다중선택: 선택이 없으면 전체 월, 복수 선택 시 해당 월을 합산합니다.
         st.markdown("**🗓️ 월 선택**")
@@ -14623,6 +14946,17 @@ elif menu == "타겟별베스트상품":
                 target_best_applied.get("exclude_ranges", []),
                 include_reason=True,
             ),
+        )
+
+        target_best_monthly_bundle = _menu_cache_get(
+            "target_best_monthly_summary",
+            ("monthly",) + target_best_signature,
+            lambda: _build_target_best_monthly_summary(
+                target_best_period_products,
+                target_best_period_sends,
+                target_best_selected_months,
+            ),
+            max_entries=12,
         )
 
         target_best_views = _menu_cache_get(
@@ -14677,6 +15011,10 @@ elif menu == "타겟별베스트상품":
         for target_tab, (gender, age) in zip(target_best_tabs, target_best_groups):
             with target_tab:
                 view = target_best_views.get((gender, age), pd.DataFrame())
+                monthly_view = target_best_monthly_bundle.get("views", {}).get(
+                    (gender, age), pd.DataFrame()
+                )
+                monthly_columns = target_best_monthly_bundle.get("months", [])
                 raw_target = target_best_filtered_products.loc[
                     raw_gender.eq(gender) & raw_age.eq(age)
                 ].copy()
@@ -14691,6 +15029,19 @@ elif menu == "타겟별베스트상품":
                     f"· {len(view):,}{'개 상품' if target_best_integrated else '건'} "
                     f'· 주문금액 {format_integer_price(total_amount)}원</span></div>',
                     unsafe_allow_html=True,
+                )
+                st.markdown(
+                    '<div style="font-size:15px;font-weight:900;color:#1f2937;margin:2px 0 7px;">'
+                    '월별 상품 구성 비교</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    _target_best_monthly_summary_html(monthly_view, monthly_columns),
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "CTR은 타겟 전체 발송 기준 · 상품당 평균 및 상품 비중은 월별 상품코드 통합 기준 · "
+                    "TOP20은 해당 월 전체 타겟 주문금액 상위 20개 상품 기준"
                 )
                 if view.empty:
                     st.info(f"선택 기간의 {gender} {age} 상품 실적이 없습니다.")
@@ -15027,10 +15378,33 @@ elif menu == "SEG분석":
 
             st.markdown(
                 '<div class="subsection-title">② SEG별 전후 비교 '
-                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 평균 발송모수는 회차당 평균·만 단위 축약</span></div>',
+                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 전체 해제 시 성별·연령대 합산</span></div>',
                 unsafe_allow_html=True,
             )
-            st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
+            seg_filter_cols = st.columns([0.13, 0.13, 0.13, 0.61], gap="small")
+            with seg_filter_cols[0]:
+                show_seg1 = st.checkbox("SEG1", value=True, key="seg_compare_show_seg1")
+            with seg_filter_cols[1]:
+                show_seg2 = st.checkbox("SEG2", value=True, key="seg_compare_show_seg2")
+            with seg_filter_cols[2]:
+                show_seg3 = st.checkbox("SEG3", value=True, key="seg_compare_show_seg3")
+
+            selected_compare_segs = [
+                seg_label
+                for seg_label, checked in [
+                    ("SEG1", show_seg1), ("SEG2", show_seg2), ("SEG3", show_seg3)
+                ]
+                if checked
+            ]
+            if selected_compare_segs:
+                seg_compare_view = compare_df[
+                    compare_df["SEG"].fillna("").astype(str).isin(selected_compare_segs)
+                ].copy()
+                comparison_html = _segv_compare_table_html(seg_compare_view, show_seg_column=True)
+            else:
+                target_compare_view = _segv_target_compare_table(asis_df, tobe_df)
+                comparison_html = _segv_compare_table_html(target_compare_view, show_seg_column=False)
+            st.markdown(comparison_html, unsafe_allow_html=True)
 
             st.markdown(
                 '<div class="subsection-title">③ 전체 성과 추이 '
