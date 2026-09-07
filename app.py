@@ -10981,6 +10981,7 @@ def _build_target_best_product_views(
 ) -> dict[tuple[str, str], pd.DataFrame]:
     """선택 기간의 성별·연령별 상품 실적을 주문금액 높은 순으로 반환합니다."""
     target_groups = [
+        ("전체", "전체"),
         ("남성", "3040"),
         ("남성", "5060"),
         ("여성", "3040"),
@@ -11014,10 +11015,13 @@ def _build_target_best_product_views(
     ]
 
     for gender, age in target_groups:
-        sub = period[
-            period["_target_gender"].eq(gender)
-            & period["_target_age"].eq(age)
-        ].copy()
+        if gender == "전체":
+            sub = period.copy()
+        else:
+            sub = period[
+                period["_target_gender"].eq(gender)
+                & period["_target_age"].eq(age)
+            ].copy()
         if sub.empty:
             result[(gender, age)] = pd.DataFrame(columns=display_cols)
             continue
@@ -11063,6 +11067,7 @@ def _build_target_best_integrated_views(
 ) -> dict[tuple[str, str], pd.DataFrame]:
     """타겟별 상품을 알파코드·쇼라코드 기준으로 묶어 누적 성과를 반환합니다."""
     target_groups = [
+        ("전체", "전체"),
         ("남성", "3040"),
         ("남성", "5060"),
         ("여성", "3040"),
@@ -11134,10 +11139,13 @@ def _build_target_best_integrated_views(
         return float(positive.iloc[0]) if not positive.empty else 0.0
 
     for gender, age in target_groups:
-        sub = period[
-            period["_target_gender"].eq(gender)
-            & period["_target_age"].eq(age)
-        ].copy()
+        if gender == "전체":
+            sub = period.copy()
+        else:
+            sub = period[
+                period["_target_gender"].eq(gender)
+                & period["_target_age"].eq(age)
+            ].copy()
         if sub.empty:
             continue
 
@@ -11195,6 +11203,7 @@ def _build_target_best_monthly_summary(
     TOP20은 동일 월 전체 타겟의 주문금액 상위 20개 상품을 기준으로 합니다.
     """
     target_groups = [
+        ("전체", "전체"),
         ("남성", "3040"), ("남성", "5060"),
         ("여성", "3040"), ("여성", "5060"),
     ]
@@ -11293,14 +11302,18 @@ def _build_target_best_monthly_summary(
     click_col = first_col(send_data, ["클릭 수(uniq)", "클릭 수"]) if not send_data.empty else None
     views = {}
     for gender, age in target_groups:
-        product_target = product_data[
-            product_data.get("_summary_gender", pd.Series("", index=product_data.index)).eq(gender)
-            & product_data.get("_summary_age", pd.Series("", index=product_data.index)).eq(age)
-        ].copy() if not product_data.empty else pd.DataFrame()
-        send_target = send_data[
-            send_data.get("_summary_gender", pd.Series("", index=send_data.index)).eq(gender)
-            & send_data.get("_summary_age", pd.Series("", index=send_data.index)).eq(age)
-        ].copy() if not send_data.empty else pd.DataFrame()
+        if gender == "전체":
+            product_target = product_data.copy()
+            send_target = send_data.copy()
+        else:
+            product_target = product_data[
+                product_data.get("_summary_gender", pd.Series("", index=product_data.index)).eq(gender)
+                & product_data.get("_summary_age", pd.Series("", index=product_data.index)).eq(age)
+            ].copy() if not product_data.empty else pd.DataFrame()
+            send_target = send_data[
+                send_data.get("_summary_gender", pd.Series("", index=send_data.index)).eq(gender)
+                & send_data.get("_summary_age", pd.Series("", index=send_data.index)).eq(age)
+            ].copy() if not send_data.empty else pd.DataFrame()
 
         rows = []
         for month in months:
@@ -14975,6 +14988,7 @@ elif menu == "타겟별베스트상품":
         )
 
         target_best_groups = [
+            ("전체", "전체"),
             ("남성", "3040"),
             ("남성", "5060"),
             ("여성", "3040"),
@@ -14989,9 +15003,10 @@ elif menu == "타겟별베스트상품":
             f"각 타겟 내 주문금액 높은 순"
         )
 
-        # 네 타겟을 세로로 길게 나열하지 않고 상단 가로 탭으로 전환합니다.
+        # 전체 및 네 타겟을 상단 가로 탭으로 전환합니다.
         # 표는 전체 폭을 그대로 사용해 요청 컬럼의 가독성을 유지합니다.
         target_best_tabs = st.tabs([
+            "전체",
             "남성 3040",
             "남성 5060",
             "여성 3040",
@@ -15015,16 +15030,21 @@ elif menu == "타겟별베스트상품":
                     (gender, age), pd.DataFrame()
                 )
                 monthly_columns = target_best_monthly_bundle.get("months", [])
-                raw_target = target_best_filtered_products.loc[
-                    raw_gender.eq(gender) & raw_age.eq(age)
-                ].copy()
+                if gender == "전체":
+                    raw_target = target_best_filtered_products.copy()
+                    target_title = "전체"
+                else:
+                    raw_target = target_best_filtered_products.loc[
+                        raw_gender.eq(gender) & raw_age.eq(age)
+                    ].copy()
+                    target_title = f"{gender} {age}"
                 total_amount = (
                     pd.to_numeric(raw_target.get("주문금액", 0), errors="coerce").fillna(0).sum()
                     if not raw_target.empty else 0
                 )
 
                 st.markdown(
-                    f'<div class="subsection-title">{gender} {age} '
+                    f'<div class="subsection-title">{target_title} '
                     f'<span style="font-size:13px;color:#6b7280;font-weight:600;">'
                     f"· {len(view):,}{'개 상품' if target_best_integrated else '건'} "
                     f'· 주문금액 {format_integer_price(total_amount)}원</span></div>',
@@ -15044,7 +15064,7 @@ elif menu == "타겟별베스트상품":
                     "TOP20은 해당 월 전체 타겟 주문금액 상위 20개 상품 기준"
                 )
                 if view.empty:
-                    st.info(f"선택 기간의 {gender} {age} 상품 실적이 없습니다.")
+                    st.info(f"선택 기간의 {target_title} 상품 실적이 없습니다.")
                 else:
                     selectable_dataframe(
                         view,
