@@ -11868,22 +11868,20 @@ def _segv_compare_table_html(compare_df: pd.DataFrame, selected_segs=None) -> st
                     + "</tr>"
                 )
         table_class = "segv-compare"
-        thead_html = """
-        <thead>
-          <tr>
-            <th class="segv-fixed-head" rowspan="2">구분</th>
-            <th class="segv-fixed-head" rowspan="2">SEG</th>
-            <th class="segv-asis-head" colspan="3">AS-IS</th>
-            <th class="segv-tobe-head" colspan="3">TO-BE</th>
-            <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
-          </tr>
-          <tr>
-            <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">평균 발송모수</th>
-            <th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">평균 발송모수</th>
-            <th class="segv-delta-sub segv-sub-start">CTR (%p)</th><th class="segv-delta-sub">SPM (원)</th>
-          </tr>
-        </thead>
-        """
+        # 줄바꿈·들여쓰기가 Markdown 코드블록으로 해석되지 않도록 표 머리글을 compact HTML로 생성합니다.
+        thead_html = (
+            '<thead><tr>'
+            '<th class="segv-fixed-head" rowspan="2">구분</th>'
+            '<th class="segv-fixed-head" rowspan="2">SEG</th>'
+            '<th class="segv-asis-head" colspan="3">AS-IS</th>'
+            '<th class="segv-tobe-head" colspan="3">TO-BE</th>'
+            '<th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>'
+            '</tr><tr>'
+            '<th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">평균 발송모수</th>'
+            '<th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">평균 발송모수</th>'
+            '<th class="segv-delta-sub segv-sub-start">CTR (%p)</th><th class="segv-delta-sub">SPM (원)</th>'
+            '</tr></thead>'
+        )
 
     return f"""
     <style>
@@ -11920,12 +11918,7 @@ def _segv_compare_table_html(compare_df: pd.DataFrame, selected_segs=None) -> st
       .segv-compare th:last-child, .segv-compare td:last-child {{ border-right:0; }}
       .segv-empty {{ padding:14px; border:1px solid #e5e7eb; border-radius:10px; background:#fff; color:#64748b; }}
     </style>
-    <div class="segv-table-wrap">
-      <table class="{table_class}">
-        {thead_html}
-        <tbody>{''.join(rows)}</tbody>
-      </table>
-    </div>
+    <div class="segv-table-wrap"><table class="{table_class}">{thead_html}<tbody>{''.join(rows)}</tbody></table></div>
     """
 
 
