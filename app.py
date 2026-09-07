@@ -11778,10 +11778,19 @@ def _segv_compare_table(asis_g: pd.DataFrame, tobe_g: pd.DataFrame) -> pd.DataFr
 
 
 
-def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
+def _segv_compare_table_html(compare_df: pd.DataFrame, selected_segs=None) -> str:
     """SEG 전후 비교표를 compact하게 표시하되 AS-IS / TO-BE / 증감 영역은 명확히 구분합니다."""
     if compare_df is None or compare_df.empty:
         return '<div class="segv-empty">비교 가능한 SEG 데이터가 없습니다.</div>'
+
+    if selected_segs is None:
+        selected_seg_labels = {"SEG1", "SEG2", "SEG3"}
+    else:
+        selected_seg_labels = {
+            f"SEG{clean_identifier_value(seg).replace('SEG', '').replace('seg', '')}"
+            for seg in selected_segs
+            if clean_identifier_value(seg)
+        }
 
     def _fmt(value, kind):
         try:
@@ -11815,37 +11824,66 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
             return "delta-down"
         return "delta-flat"
 
-    rows = []
     group_order = ["남성 3040", "여성 3040", "남성 5060", "여성 5060"]
-    for group_name in group_order:
-        group = compare_df[compare_df["구분"].astype(str).eq(group_name)].copy()
-        if group.empty:
-            continue
-        group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
-        group = group.sort_values("_seg_sort")
-        for idx, (_, row) in enumerate(group.iterrows()):
-            target_cell = ""
-            if idx == 0:
-                target_cell = (
-                    f'<td class="segv-target" rowspan="{len(group)}">'
-                    f'<b>{_html.escape(group_name.replace(" ", ""))}</b></td>'
+    rows = []
+    if not selected_seg_labels:
+        # SEG를 하나도 선택하지 않은 경우 요청대로 타겟 구분만 남깁니다.
+        rows = [
+            f'<tr><td class="segv-target-only-cell"><b>{_html.escape(group_name.replace(" ", ""))}</b></td></tr>'
+            for group_name in group_order
+        ]
+        table_class = "segv-compare segv-compare-target-only"
+        thead_html = '<thead><tr><th class="segv-fixed-head">구분</th></tr></thead>'
+    else:
+        filtered_compare = compare_df[
+            compare_df["SEG"].fillna("").astype(str).str.strip().isin(selected_seg_labels)
+        ].copy()
+        for group_name in group_order:
+            group = filtered_compare[filtered_compare["구분"].astype(str).eq(group_name)].copy()
+            if group.empty:
+                continue
+            group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
+            group = group.sort_values("_seg_sort")
+            for idx, (_, row) in enumerate(group.iterrows()):
+                target_cell = ""
+                if idx == 0:
+                    target_cell = (
+                        f'<td class="segv-target" rowspan="{len(group)}">'
+                        f'<b>{_html.escape(group_name.replace(" ", ""))}</b></td>'
+                    )
+                ctr_delta = row.get("CTR 증감(p)")
+                spm_delta = row.get("SPM 증감(원)")
+                rows.append(
+                    "<tr>"
+                    + target_cell
+                    + f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
+                    + f'<td class="segv-asis-cell segv-group-start">{_fmt(row.get("AS-IS CTR(%)"), "ctr")}</td>'
+                    + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS SPM(원)"), "spm")}</td>'
+                    + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 평균 발송모수"), "sent")}</td>'
+                    + f'<td class="segv-tobe-cell segv-group-start">{_fmt(row.get("TO-BE CTR(%)"), "ctr")}</td>'
+                    + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE SPM(원)"), "spm")}</td>'
+                    + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE 평균 발송모수"), "sent")}</td>'
+                    + f'<td class="segv-delta-cell segv-group-start {_delta_class(ctr_delta)}">{_fmt(ctr_delta, "ctr_delta")}</td>'
+                    + f'<td class="segv-delta-cell {_delta_class(spm_delta)}">{_fmt(spm_delta, "spm_delta")}</td>'
+                    + "</tr>"
                 )
-            ctr_delta = row.get("CTR 증감(p)")
-            spm_delta = row.get("SPM 증감(원)")
-            rows.append(
-                "<tr>"
-                + target_cell
-                + f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
-                + f'<td class="segv-asis-cell segv-group-start">{_fmt(row.get("AS-IS CTR(%)"), "ctr")}</td>'
-                + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS SPM(원)"), "spm")}</td>'
-                + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 평균 발송모수"), "sent")}</td>'
-                + f'<td class="segv-tobe-cell segv-group-start">{_fmt(row.get("TO-BE CTR(%)"), "ctr")}</td>'
-                + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE SPM(원)"), "spm")}</td>'
-                + f'<td class="segv-tobe-cell">{_fmt(row.get("TO-BE 평균 발송모수"), "sent")}</td>'
-                + f'<td class="segv-delta-cell segv-group-start {_delta_class(ctr_delta)}">{_fmt(ctr_delta, "ctr_delta")}</td>'
-                + f'<td class="segv-delta-cell {_delta_class(spm_delta)}">{_fmt(spm_delta, "spm_delta")}</td>'
-                + "</tr>"
-            )
+        table_class = "segv-compare"
+        thead_html = """
+        <thead>
+          <tr>
+            <th class="segv-fixed-head" rowspan="2">구분</th>
+            <th class="segv-fixed-head" rowspan="2">SEG</th>
+            <th class="segv-asis-head" colspan="3">AS-IS</th>
+            <th class="segv-tobe-head" colspan="3">TO-BE</th>
+            <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
+          </tr>
+          <tr>
+            <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">평균 발송모수</th>
+            <th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">평균 발송모수</th>
+            <th class="segv-delta-sub segv-sub-start">CTR (%p)</th><th class="segv-delta-sub">SPM (원)</th>
+          </tr>
+        </thead>
+        """
 
     return f"""
     <style>
@@ -11869,6 +11907,9 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
       .segv-compare .segv-asis-cell {{ background:#f4f6f8; font-weight:700; }}
       .segv-compare .segv-tobe-cell {{ background:#f4f1ff; font-weight:800; }}
       .segv-compare .segv-delta-cell {{ background:#fff; font-weight:900; }}
+      .segv-compare-target-only {{ min-width:0 !important; table-layout:auto !important; }}
+      .segv-compare-target-only .segv-fixed-head {{ width:auto; }}
+      .segv-compare .segv-target-only-cell {{ background:#f7f9fc; color:#111827; font-size:15px; font-weight:900; text-align:left; padding-left:18px; }}
       .segv-compare td.segv-group-start {{ border-left:3px solid #d0d6df; }}
       .segv-compare td.segv-tobe-cell.segv-group-start {{ border-left-color:#b8abff; }}
       .segv-compare td.segv-delta-cell.segv-group-start {{ border-left-color:#b6c7d9; }}
@@ -11880,21 +11921,8 @@ def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
       .segv-empty {{ padding:14px; border:1px solid #e5e7eb; border-radius:10px; background:#fff; color:#64748b; }}
     </style>
     <div class="segv-table-wrap">
-      <table class="segv-compare">
-        <thead>
-          <tr>
-            <th class="segv-fixed-head" rowspan="2">구분</th>
-            <th class="segv-fixed-head" rowspan="2">SEG</th>
-            <th class="segv-asis-head" colspan="3">AS-IS</th>
-            <th class="segv-tobe-head" colspan="3">TO-BE</th>
-            <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
-          </tr>
-          <tr>
-            <th class="segv-asis-sub segv-sub-start">CTR</th><th class="segv-asis-sub">SPM</th><th class="segv-asis-sub">평균 발송모수</th>
-            <th class="segv-tobe-sub segv-sub-start">CTR</th><th class="segv-tobe-sub">SPM</th><th class="segv-tobe-sub">평균 발송모수</th>
-            <th class="segv-delta-sub segv-sub-start">CTR (%p)</th><th class="segv-delta-sub">SPM (원)</th>
-          </tr>
-        </thead>
+      <table class="{table_class}">
+        {thead_html}
         <tbody>{''.join(rows)}</tbody>
       </table>
     </div>
@@ -15030,7 +15058,26 @@ elif menu == "SEG분석":
                 '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 평균 발송모수는 회차당 평균·만 단위 축약</span></div>',
                 unsafe_allow_html=True,
             )
-            st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
+            seg_filter_cols = st.columns([0.13, 0.13, 0.13, 0.61], gap="small")
+            with seg_filter_cols[0]:
+                show_seg1 = st.checkbox("SEG1", value=True, key="seg_compare_show_seg1")
+            with seg_filter_cols[1]:
+                show_seg2 = st.checkbox("SEG2", value=True, key="seg_compare_show_seg2")
+            with seg_filter_cols[2]:
+                show_seg3 = st.checkbox("SEG3", value=True, key="seg_compare_show_seg3")
+            selected_compare_segs = [
+                seg_label
+                for seg_label, is_checked in [
+                    ("SEG1", show_seg1),
+                    ("SEG2", show_seg2),
+                    ("SEG3", show_seg3),
+                ]
+                if is_checked
+            ]
+            st.markdown(
+                _segv_compare_table_html(compare_df, selected_compare_segs),
+                unsafe_allow_html=True,
+            )
 
             st.markdown(
                 '<div class="subsection-title">③ 전체 성과 추이 '
