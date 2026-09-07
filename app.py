@@ -162,6 +162,10 @@ html, body, [class*="css"] {
     border-left: 4px solid var(--primary);
 }
 
+.home-section-spacer {
+    height: 24px;
+}
+
 .subsection-title {
     font-size: 17px;
     font-weight: 750;
@@ -1575,19 +1579,42 @@ def filter_weekly_period(df: pd.DataFrame, start_week: str, end_week: str):
     return df.iloc[lo : hi + 1]
 
 
-def trend_chart(df: pd.DataFrame, title: str, color: str) -> go.Figure:
+def trend_chart(
+    df: pd.DataFrame,
+    title: str,
+    color: str,
+    metric: str = "SPM",
+) -> go.Figure:
+    """Home 월별·주간·일별 SPM/CTR 막대 및 3구간 이동평균 추세 그래프."""
     labels = df["_label"].astype(str).tolist()
-    vals = df["발송대비매출(SPM)"].astype(float).tolist()
+    is_ctr = str(metric).upper() == "CTR"
+    if is_ctr:
+        vals = (df["반응율(Uniq CTR)"].astype(float) * 100).tolist()
+        series_name = "CTR"
+        value_text = [f"{v:.1f}%" for v in vals]
+        yaxis_title = "CTR (%)"
+        minimum_ymax = 1
+    else:
+        vals = df["발송대비매출(SPM)"].astype(float).tolist()
+        series_name = "SPM"
+        value_text = [f"{v:.1f}" for v in vals]
+        yaxis_title = "SPM"
+        minimum_ymax = 10
+
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
             x=labels,
             y=vals,
             marker_color=color,
-            name="SPM",
-            text=[f"{v:.1f}" for v in vals],
+            name=series_name,
+            text=value_text,
             textposition="outside",
             cliponaxis=False,
+            hovertemplate=(
+                "%{x}<br>CTR %{y:.1f}%<extra></extra>"
+                if is_ctr else "%{x}<br>SPM %{y:.1f}<extra></extra>"
+            ),
         )
     )
     if len(vals) >= 2:
@@ -1603,15 +1630,17 @@ def trend_chart(df: pd.DataFrame, title: str, color: str) -> go.Figure:
         )
     ymax = max(vals) if vals else 0
     fig.update_layout(
-        title=dict(text=title, x=.5, font=dict(size=23)),
-        height=480,
-        margin=dict(l=60, r=30, t=72, b=100),
+        title=dict(text=title, x=.5, font=dict(size=20)),
+        height=440,
+        margin=dict(l=55, r=22, t=68, b=92),
         plot_bgcolor="#ffffff",
         barmode="overlay",
         yaxis=dict(
+            title=yaxis_title,
             tickformat=",.1f",
+            ticksuffix="%" if is_ctr else "",
             gridcolor="#ddd",
-            range=[0, max(ymax * 1.22, 10)],
+            range=[0, max(ymax * 1.22, minimum_ymax)],
         ),
         xaxis=dict(
             tickangle=-35 if len(labels) > 12 else 0,
@@ -12491,52 +12520,65 @@ if menu == "홈":
         key_prefix="home_applied_response",
     )
 
-    # 월간 그래프와 표
-    st.markdown('<div class="section-title">월별 SPM / 발송대비매출</div>', unsafe_allow_html=True)
+    # 월별 SPM·CTR 그래프와 표
+    st.markdown('<div class="section-title">월별 실적</div>', unsafe_allow_html=True)
     if monthly.empty:
         st.info("적용된 분석 조건에 해당하는 월별 데이터가 없습니다.")
     else:
-        st.plotly_chart(
-            trend_chart(monthly, "월별 SPM / 발송대비매출", "#fdbb00"),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
+        monthly_spm_col, _, monthly_ctr_col = st.columns([1, 0.08, 1])
+        with monthly_spm_col:
+            st.plotly_chart(
+                trend_chart(monthly, "월별 SPM / 발송대비매출", "#fdbb00", "SPM"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_monthly_spm_chart",
+            )
+        with monthly_ctr_col:
+            st.plotly_chart(
+                trend_chart(monthly, "월별 CTR / 반응율", "#5b8ff9", "CTR"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_monthly_ctr_chart",
+            )
         _home_monthly_view = clean_identifier_columns(format_home_table_with_summary(monthly, "Monthly"))
         selectable_dataframe(
             _home_monthly_view,
             key="home_monthly_table",
             use_container_width=True, hide_index=True, height=400,
         )
+    st.markdown('<div class="home-section-spacer"></div>', unsafe_allow_html=True)
 
-    # 주간 그래프와 표 - 독립 조회 기간
-    st.markdown('<div class="section-title">주간 SPM / 발송대비매출</div>', unsafe_allow_html=True)
-    st.caption("주간 조회 기간")
-    week_labels = weekly_all["_label"].astype(str).tolist() if not weekly_all.empty else []
-    if week_labels:
-        week_start_col, week_end_col = st.columns(2)
-        with week_start_col:
-            start_week = st.selectbox("시작 주차", week_labels, index=0, key="home_week_start")
-        with week_end_col:
-            end_week = st.selectbox("종료 주차", week_labels, index=len(week_labels)-1, key="home_week_end")
-        weekly = filter_weekly_period(weekly_all, start_week, end_week)
-    else:
-        weekly = weekly_all.copy()
+    # 주간은 상단 분석 조건의 기간을 그대로 사용
+    st.markdown('<div class="section-title">주간 실적</div>', unsafe_allow_html=True)
+    weekly = weekly_all.copy()
     if weekly.empty:
-        st.info("선택한 기간의 주간 데이터가 없습니다.")
+        st.info("적용된 분석 조건에 해당하는 주간 데이터가 없습니다.")
     else:
-        st.plotly_chart(
-            trend_chart(weekly, "주간 SPM / 발송대비매출", "#70ad47"),
-            use_container_width=True, config={"displayModeBar": False},
-        )
+        weekly_spm_col, _, weekly_ctr_col = st.columns([1, 0.08, 1])
+        with weekly_spm_col:
+            st.plotly_chart(
+                trend_chart(weekly, "주간 SPM / 발송대비매출", "#70ad47", "SPM"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_weekly_spm_chart",
+            )
+        with weekly_ctr_col:
+            st.plotly_chart(
+                trend_chart(weekly, "주간 CTR / 반응율", "#8b5cf6", "CTR"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_weekly_ctr_chart",
+            )
         _home_weekly_view = clean_identifier_columns(format_home_table_with_summary(weekly, "Weekly"))
         selectable_dataframe(
             _home_weekly_view,
             key="home_weekly_table",
             use_container_width=True, hide_index=True, height=520,
         )
+    st.markdown('<div class="home-section-spacer"></div>', unsafe_allow_html=True)
 
-    # 일간 표: 기존 Home 일간 조회 로직 유지(분석 조건 미적용)
-    st.markdown('<div class="section-title">Daily</div>', unsafe_allow_html=True)
+    # 일별 SPM·CTR 그래프와 표: 기존 Home 일간 조회 로직 유지(분석 조건 미적용)
+    st.markdown('<div class="section-title">일별 실적</div>', unsafe_allow_html=True)
     st.caption("일간 조회 기간")
     daily_start_col, daily_end_col = st.columns(2)
     with daily_start_col:
@@ -12568,6 +12610,21 @@ if menu == "홈":
     if daily.empty:
         st.info("선택한 기간의 일간 데이터가 없습니다.")
     else:
+        daily_spm_col, _, daily_ctr_col = st.columns([1, 0.08, 1])
+        with daily_spm_col:
+            st.plotly_chart(
+                trend_chart(daily, "일별 SPM / 발송대비매출", "#22a06b", "SPM"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_daily_spm_chart",
+            )
+        with daily_ctr_col:
+            st.plotly_chart(
+                trend_chart(daily, "일별 CTR / 반응율", "#ef6c8f", "CTR"),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="home_daily_ctr_chart",
+            )
         _home_daily_view = clean_identifier_columns(format_home_table_with_summary(daily, "Daily"))
         selectable_dataframe(
             _home_daily_view,
