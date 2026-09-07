@@ -9244,6 +9244,50 @@ def apply_home_analysis_date_filter(
     return result.sort_values("_date", kind="stable").copy()
 
 
+def apply_home_send_type_filter(df: pd.DataFrame, send_type: str) -> pd.DataFrame:
+    """Home 분석용 발송 유형 필터. 구분값이 없는 기존 데이터는 MMS로 본다."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    selected_type = str(send_type or "전체").strip().upper()
+    if selected_type not in {"MMS", "RCS"}:
+        return df.copy()
+
+    d = df.copy()
+
+    def _normalize_send_type(value) -> str:
+        raw = str(value or "").strip()
+        upper = raw.upper()
+        if "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw:
+            return "RCS"
+        if "MMS" in upper or "멀티미디어" in raw:
+            return "MMS"
+        return ""
+
+    channel_col = first_col(d, [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+    ])
+    if channel_col:
+        channel = d[channel_col].map(_normalize_send_type)
+    else:
+        channel = pd.Series("", index=d.index, dtype="object")
+
+    text_cols = [
+        col for col in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]
+        if col in d.columns
+    ]
+    if text_cols:
+        combined_text = d[text_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        fallback = combined_text.map(_normalize_send_type)
+        blank_mask = channel.eq("")
+        channel.loc[blank_mask] = fallback.loc[blank_mask]
+
+    channel.loc[channel.eq("")] = "MMS"
+    return d.loc[channel.eq(selected_type)].sort_values("_date", kind="stable").copy()
+
+
 def _home_analysis_valid_range_count(ranges: list) -> tuple[int, int]:
     valid_count = 0
     invalid_count = 0
@@ -9285,6 +9329,7 @@ def _home_analysis_default_state(home_data_min, home_data_max) -> tuple[dict, di
     """Home 분석 조건의 Draft/Applied 기본 상태를 생성한다."""
     draft = {
         "mode": "전체",
+        "send_type": "전체",
         "base_start": home_data_min,
         "base_end": home_data_max,
         "include_ranges": [{"id": 1, "start": home_data_min, "end": home_data_max}],
@@ -9301,6 +9346,7 @@ def _home_analysis_default_state(home_data_min, home_data_max) -> tuple[dict, di
     }
     applied = {
         "mode": "전체",
+        "send_type": "전체",
         "base_start": home_data_min,
         "base_end": home_data_max,
         "include_ranges": [dict(x) for x in draft["include_ranges"]],
@@ -9454,6 +9500,7 @@ def _small_dataframe_signature(df: pd.DataFrame, columns: list[str] | None = Non
 def _build_home_aggregate_bundle(
     sends: pd.DataFrame,
     mode: str,
+    send_type: str,
     base_start,
     base_end,
     include_ranges: list,
@@ -9462,6 +9509,7 @@ def _build_home_aggregate_bundle(
     filtered = apply_home_analysis_date_filter(
         sends, mode, base_start, base_end, include_ranges, exclude_ranges
     )
+    filtered = apply_home_send_type_filter(filtered, send_type)
     return aggregate_send(filtered, "Monthly"), aggregate_send(filtered, "Weekly")
 
 
@@ -10649,12 +10697,25 @@ def render_home_material_response_analysis(
         return
 
     applied_date_index = pd.DatetimeIndex(applied_dates)
+    applied_campaign_col = first_col(applied_sends, ["캠페인명", "캠페인", "Campaign", "campaign"])
+    applied_campaigns = set()
+    if applied_campaign_col:
+        applied_campaigns = set(
+            _normalize_campaign_text(applied_sends[applied_campaign_col])
+            .loc[lambda values: values.ne("")]
+            .tolist()
+        )
 
     def _home_raw_slice(raw: pd.DataFrame) -> pd.DataFrame:
         if raw is None or raw.empty or "_date" not in raw.columns:
             return pd.DataFrame()
         raw_dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
-        return raw.loc[raw_dates.notna() & raw_dates.isin(applied_date_index)].copy()
+        mask = raw_dates.notna() & raw_dates.isin(applied_date_index)
+        raw_campaign_col = first_col(raw, ["캠페인명", "캠페인", "Campaign", "campaign"])
+        if applied_campaigns and raw_campaign_col:
+            raw_campaigns = _normalize_campaign_text(raw[raw_campaign_col])
+            mask &= raw_campaigns.isin(applied_campaigns)
+        return raw.loc[mask].copy()
 
     age_selected = _home_raw_slice(material_age_raw)
     region_selected = _home_raw_slice(material_region_raw)
@@ -12191,6 +12252,7 @@ if menu == "홈":
     applied["base_start"] = _home_clamp_date(applied.get("base_start"), home_data_min)
     applied["base_end"] = _home_clamp_date(applied.get("base_end"), home_data_max)
     for state in (draft, applied):
+        state.setdefault("send_type", "전체")
         state.setdefault("include_ranges", [{"id": 1, "start": home_data_min, "end": home_data_max}])
         state.setdefault("exclude_ranges", [{
             "id": 1, "start": home_data_min, "end": home_data_min,
@@ -12224,11 +12286,14 @@ if menu == "홈":
 
     applied_is_custom = (
         applied.get("mode", "전체") != "전체"
+        or applied.get("send_type", "전체") != "전체"
         or applied.get("base_start") != home_data_min
         or applied.get("base_end") != home_data_max
     )
     if applied_is_custom:
         applied_parts = [str(applied.get("mode", "전체"))]
+        if applied.get("send_type", "전체") != "전체":
+            applied_parts.append(f"발송유형 {applied.get('send_type')}")
         if applied.get("mode") in {"포함구간", "포함 + 제외"}:
             applied_parts.append(f"포함 {len(applied.get('include_ranges', []))}개")
         if applied.get("mode") in {"제외구간", "포함 + 제외"}:
@@ -12245,13 +12310,27 @@ if menu == "홈":
     current_mode = draft.get("mode", "전체")
     if current_mode not in analysis_modes:
         current_mode = "전체"
-    draft["mode"] = st.radio(
-        "📌 분석 방식",
-        analysis_modes,
-        index=analysis_modes.index(current_mode),
-        horizontal=True,
-        key="home_analysis_mode",
-    )
+    send_type_options = ["전체", "MMS", "RCS"]
+    current_send_type = str(draft.get("send_type", "전체"))
+    if current_send_type not in send_type_options:
+        current_send_type = "전체"
+    analysis_mode_col, send_type_col = st.columns([1.6, 1.0], gap="large")
+    with analysis_mode_col:
+        draft["mode"] = st.radio(
+            "📌 분석 방식",
+            analysis_modes,
+            index=analysis_modes.index(current_mode),
+            horizontal=True,
+            key="home_analysis_mode",
+        )
+    with send_type_col:
+        draft["send_type"] = st.radio(
+            "📨 발송 유형",
+            send_type_options,
+            index=send_type_options.index(current_send_type),
+            horizontal=True,
+            key="home_analysis_send_type",
+        )
 
     st.markdown("**📅 기본 기간**")
     base_col1, base_sep, base_col2 = st.columns([1, 0.08, 1])
@@ -12400,6 +12479,8 @@ if menu == "홈":
         sends, draft["mode"], draft["base_start"], draft["base_end"],
         draft["include_ranges"], draft["exclude_ranges"],
     ) if not base_invalid else sends.iloc[0:0].copy()
+    base_preview_df = apply_home_send_type_filter(base_preview_df, draft["send_type"])
+    preview_df = apply_home_send_type_filter(preview_df, draft["send_type"])
 
     base_days = int(pd.to_datetime(base_preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not base_preview_df.empty else 0
     preview_days = int(pd.to_datetime(preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not preview_df.empty else 0
@@ -12407,7 +12488,8 @@ if menu == "홈":
 
     result_col, apply_col, reset_col = st.columns([3.2, 0.9, 0.9])
     result_col.markdown(
-        f"**📋 분석 대상 : {preview_days:,}일 (발송 {preview_send_count:,}건) · 기본 {base_days:,}일 → 적용 {preview_days:,}일**"
+        f"**📋 분석 대상 : {draft['send_type']} · {preview_days:,}일 "
+        f"(발송 {preview_send_count:,}건) · 기본 {base_days:,}일 → 적용 {preview_days:,}일**"
     )
     apply_clicked = apply_col.button(
         "✔ 적용", key="home_analysis_apply", use_container_width=True,
@@ -12426,7 +12508,10 @@ if menu == "홈":
         st.session_state.home_analysis_applied = reset_applied
         widget_keys = [
             key for key in list(st.session_state.keys())
-            if key in {"home_analysis_mode", "home_analysis_base_start", "home_analysis_base_end"}
+            if key in {
+                "home_analysis_mode", "home_analysis_send_type",
+                "home_analysis_base_start", "home_analysis_base_end",
+            }
             or key.startswith("home_inc_")
             or key.startswith("home_exc_")
         ]
@@ -12438,6 +12523,7 @@ if menu == "홈":
     if apply_clicked:
         st.session_state.home_analysis_applied = {
             "mode": draft["mode"],
+            "send_type": draft["send_type"],
             "base_start": draft["base_start"],
             "base_end": draft["base_end"],
             "include_ranges": [dict(x) for x in draft["include_ranges"]],
@@ -12455,8 +12541,12 @@ if menu == "홈":
         applied["include_ranges"],
         applied["exclude_ranges"],
     )
+    home_applied_sends = apply_home_send_type_filter(
+        home_applied_sends, applied.get("send_type", "전체")
+    )
     home_aggregate_key = (
         str(applied.get("mode", "전체")),
+        str(applied.get("send_type", "전체")),
         str(applied.get("base_start", "")),
         str(applied.get("base_end", "")),
         _range_signature(applied.get("include_ranges", [])),
@@ -12468,6 +12558,7 @@ if menu == "홈":
         lambda: _build_home_aggregate_bundle(
             sends,
             applied["mode"],
+            applied.get("send_type", "전체"),
             applied["base_start"],
             applied["base_end"],
             applied["include_ranges"],
