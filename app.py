@@ -11777,79 +11777,8 @@ def _segv_compare_table(asis_g: pd.DataFrame, tobe_g: pd.DataFrame) -> pd.DataFr
     return out
 
 
-def _segv_target_compare_table(asis_df: pd.DataFrame, tobe_df: pd.DataFrame) -> pd.DataFrame:
-    """SEG 선택을 모두 해제했을 때 성별·연령대 단위로 합산한 전후 실적을 생성합니다."""
-    target_base = pd.DataFrame(
-        [(gender, age) for gender, age in [
-            ("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")
-        ]],
-        columns=["성별", "연령"],
-    )
 
-    def _summarize(source: pd.DataFrame) -> pd.DataFrame:
-        columns = [
-            "성별", "연령", "발송횟수", "발송모수", "평균 발송모수",
-            "발송성공건수", "클릭수", "주문건수", "주문금액", "CTR", "SPM",
-        ]
-        if source is None or source.empty:
-            return pd.DataFrame(columns=columns)
-        grouped = source.groupby(["_gender", "_age"], as_index=False, dropna=False).agg(
-            발송횟수=("_sent", "size"),
-            발송모수=("_sent", "sum"),
-            발송성공건수=("_success", "sum"),
-            클릭수=("_click", "sum"),
-            주문건수=("_orders", "sum"),
-            주문금액=("_amount", "sum"),
-        )
-        grouped["평균 발송모수"] = grouped["발송모수"].div(
-            grouped["발송횟수"].replace(0, pd.NA)
-        ).fillna(0)
-        grouped["CTR"] = grouped["클릭수"].div(
-            grouped["발송성공건수"].replace(0, pd.NA)
-        ).fillna(0)
-        grouped["SPM"] = grouped["주문금액"].div(
-            grouped["발송모수"].replace(0, pd.NA)
-        ).fillna(0)
-        grouped = grouped.rename(columns={"_gender": "성별", "_age": "연령"})
-        return grouped[columns]
-
-    asis_target = _summarize(asis_df)
-    tobe_target = _summarize(tobe_df)
-    asis_target = asis_target.rename(columns={
-        column: f"A_{column}" for column in asis_target.columns
-        if column not in ["성별", "연령"]
-    })
-    tobe_target = tobe_target.rename(columns={
-        column: f"B_{column}" for column in tobe_target.columns
-        if column not in ["성별", "연령"]
-    })
-    merged = target_base.merge(asis_target, on=["성별", "연령"], how="left").merge(
-        tobe_target, on=["성별", "연령"], how="left"
-    )
-    asis_ok = pd.to_numeric(merged.get("A_발송모수"), errors="coerce").fillna(0).gt(0)
-    tobe_ok = pd.to_numeric(merged.get("B_발송모수"), errors="coerce").fillna(0).gt(0)
-    comparable = asis_ok & tobe_ok
-
-    output = pd.DataFrame({
-        "구분": merged["성별"] + " " + merged["연령"],
-        "AS-IS CTR(%)": pd.to_numeric(merged.get("A_CTR"), errors="coerce") * 100,
-        "AS-IS SPM(원)": pd.to_numeric(merged.get("A_SPM"), errors="coerce"),
-        "AS-IS 평균 발송모수": pd.to_numeric(merged.get("A_평균 발송모수"), errors="coerce"),
-        "TO-BE CTR(%)": pd.to_numeric(merged.get("B_CTR"), errors="coerce") * 100,
-        "TO-BE SPM(원)": pd.to_numeric(merged.get("B_SPM"), errors="coerce"),
-        "TO-BE 평균 발송모수": pd.to_numeric(merged.get("B_평균 발송모수"), errors="coerce"),
-    })
-    output["CTR 증감(p)"] = (
-        output["TO-BE CTR(%)"] - output["AS-IS CTR(%)"]
-    ).where(comparable)
-    output["SPM 증감(원)"] = (
-        output["TO-BE SPM(원)"] - output["AS-IS SPM(원)"]
-    ).where(comparable)
-    return output
-
-
-
-def _segv_compare_table_html(compare_df: pd.DataFrame, show_seg_column: bool = True) -> str:
+def _segv_compare_table_html(compare_df: pd.DataFrame) -> str:
     """SEG 전후 비교표를 compact하게 표시하되 AS-IS / TO-BE / 증감 영역은 명확히 구분합니다."""
     if compare_df is None or compare_df.empty:
         return '<div class="segv-empty">비교 가능한 SEG 데이터가 없습니다.</div>'
@@ -11892,29 +11821,21 @@ def _segv_compare_table_html(compare_df: pd.DataFrame, show_seg_column: bool = T
         group = compare_df[compare_df["구분"].astype(str).eq(group_name)].copy()
         if group.empty:
             continue
-        if show_seg_column:
-            group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
-            group = group.sort_values("_seg_sort")
-        else:
-            group = group.head(1)
+        group["_seg_sort"] = pd.to_numeric(group["SEG"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
+        group = group.sort_values("_seg_sort")
         for idx, (_, row) in enumerate(group.iterrows()):
             target_cell = ""
             if idx == 0:
-                rowspan = f' rowspan="{len(group)}"' if show_seg_column else ""
                 target_cell = (
-                    f'<td class="segv-target"{rowspan}>'
+                    f'<td class="segv-target" rowspan="{len(group)}">'
                     f'<b>{_html.escape(group_name.replace(" ", ""))}</b></td>'
                 )
-            seg_cell = (
-                f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
-                if show_seg_column else ""
-            )
             ctr_delta = row.get("CTR 증감(p)")
             spm_delta = row.get("SPM 증감(원)")
             rows.append(
                 "<tr>"
                 + target_cell
-                + seg_cell
+                + f'<td class="segv-seg">{_html.escape(str(row.get("SEG", "")))}</td>'
                 + f'<td class="segv-asis-cell segv-group-start">{_fmt(row.get("AS-IS CTR(%)"), "ctr")}</td>'
                 + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS SPM(원)"), "spm")}</td>'
                 + f'<td class="segv-asis-cell">{_fmt(row.get("AS-IS 평균 발송모수"), "sent")}</td>'
@@ -11926,7 +11847,6 @@ def _segv_compare_table_html(compare_df: pd.DataFrame, show_seg_column: bool = T
                 + "</tr>"
             )
 
-    seg_header = '<th class="segv-fixed-head" rowspan="2">SEG</th>' if show_seg_column else ""
     return f"""
     <style>
       .segv-table-wrap {{
@@ -11964,7 +11884,7 @@ def _segv_compare_table_html(compare_df: pd.DataFrame, show_seg_column: bool = T
         <thead>
           <tr>
             <th class="segv-fixed-head" rowspan="2">구분</th>
-            {seg_header}
+            <th class="segv-fixed-head" rowspan="2">SEG</th>
             <th class="segv-asis-head" colspan="3">AS-IS</th>
             <th class="segv-tobe-head" colspan="3">TO-BE</th>
             <th class="segv-delta-head" colspan="2">증감 · TO-BE − AS-IS</th>
@@ -15107,33 +15027,10 @@ elif menu == "SEG분석":
 
             st.markdown(
                 '<div class="subsection-title">② SEG별 전후 비교 '
-                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 전체 해제 시 성별·연령대 합산</span></div>',
+                '<span class="segv-section-note">회색=AS-IS / 보라=TO-BE / 증감은 빨강=개선·파랑=감소 · 평균 발송모수는 회차당 평균·만 단위 축약</span></div>',
                 unsafe_allow_html=True,
             )
-            seg_filter_cols = st.columns([0.13, 0.13, 0.13, 0.61], gap="small")
-            with seg_filter_cols[0]:
-                show_seg1 = st.checkbox("SEG1", value=True, key="seg_compare_show_seg1")
-            with seg_filter_cols[1]:
-                show_seg2 = st.checkbox("SEG2", value=True, key="seg_compare_show_seg2")
-            with seg_filter_cols[2]:
-                show_seg3 = st.checkbox("SEG3", value=True, key="seg_compare_show_seg3")
-
-            selected_compare_segs = [
-                seg_label
-                for seg_label, checked in [
-                    ("SEG1", show_seg1), ("SEG2", show_seg2), ("SEG3", show_seg3)
-                ]
-                if checked
-            ]
-            if selected_compare_segs:
-                seg_compare_view = compare_df[
-                    compare_df["SEG"].fillna("").astype(str).isin(selected_compare_segs)
-                ].copy()
-                comparison_html = _segv_compare_table_html(seg_compare_view, show_seg_column=True)
-            else:
-                target_compare_view = _segv_target_compare_table(asis_df, tobe_df)
-                comparison_html = _segv_compare_table_html(target_compare_view, show_seg_column=False)
-            st.markdown(comparison_html, unsafe_allow_html=True)
+            st.markdown(_segv_compare_table_html(compare_df), unsafe_allow_html=True)
 
             st.markdown(
                 '<div class="subsection-title">③ 전체 성과 추이 '
