@@ -14396,6 +14396,8 @@ elif menu == "타겟별베스트상품":
                     "target_best_analysis_base_start",
                     "target_best_analysis_base_end",
                     "target_best_integrated_analysis",
+                    "target_best_month_pills",
+                    "target_best_month_multiselect",
                 }
                 or key.startswith("target_best_inc_")
                 or key.startswith("target_best_exc_")
@@ -14437,10 +14439,46 @@ elif menu == "타겟별베스트상품":
             target_best_applied.get("send_type", "전체"),
         )
 
+        # 1~12월 다중선택: 선택이 없으면 전체 월, 복수 선택 시 해당 월을 합산합니다.
+        st.markdown("**🗓️ 월 선택**")
+        target_best_month_options = [f"{month}월" for month in range(1, 13)]
+        if hasattr(st, "pills"):
+            target_best_selected_month_labels = st.pills(
+                "월 선택",
+                target_best_month_options,
+                selection_mode="multi",
+                key="target_best_month_pills",
+                label_visibility="collapsed",
+            ) or []
+        else:
+            target_best_selected_month_labels = st.multiselect(
+                "월 선택",
+                target_best_month_options,
+                key="target_best_month_multiselect",
+                placeholder="선택하지 않으면 전체 월",
+                label_visibility="collapsed",
+            )
+        target_best_selected_months = tuple(
+            sorted(int(str(label).replace("월", "")) for label in target_best_selected_month_labels)
+        )
+        if target_best_selected_months:
+            target_best_month_values = pd.to_datetime(
+                target_best_filtered_products.get("_date"), errors="coerce"
+            ).dt.month
+            target_best_filtered_products = target_best_filtered_products.loc[
+                target_best_month_values.isin(target_best_selected_months)
+            ].copy()
+            target_best_month_text = " + ".join(
+                f"{month}월" for month in target_best_selected_months
+            ) + " 합계"
+        else:
+            target_best_month_text = "전체 월"
+
         target_best_signature = (
             str(target_best_applied.get("mode", "전체")),
             str(target_best_applied.get("send_type", "전체")),
             bool(target_best_integrated),
+            target_best_selected_months,
             str(target_best_start),
             str(target_best_end),
             _range_signature(target_best_applied.get("include_ranges", [])),
@@ -14475,6 +14513,7 @@ elif menu == "타겟별베스트상품":
             f"조회기간 {pd.Timestamp(target_best_start).strftime('%Y-%m-%d')} ~ "
             f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · "
             f"발송유형 {target_best_applied.get('send_type', '전체')} · "
+            f"선택월 {target_best_month_text} · "
             f"표시방식 {'상품코드별 통합' if target_best_integrated else '발송건별'} · "
             f"각 타겟 내 주문금액 높은 순"
         )
