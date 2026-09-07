@@ -12121,6 +12121,143 @@ def _segv_metric_chart(asis_w: pd.DataFrame, tobe_w: pd.DataFrame, metric: str, 
         )
     return fig
 
+
+def _segv_target_metric_chart(
+    asis_df: pd.DataFrame,
+    tobe_df: pd.DataFrame,
+    gender: str,
+    age: str,
+    metric: str,
+    tobe_start=None,
+) -> go.Figure:
+    """선택 타겟의 SEG1~3 주차별 CTR/SPM 추이를 AS-IS와 TO-BE로 나눠 표시합니다."""
+    metric_meta = {
+        "CTR": (lambda s: s * 100, "%", ".2f"),
+        "SPM": (lambda s: s, "원", ",.0f"),
+    }
+    transform, suffix, value_format = metric_meta[metric]
+    colors = {"1": "#5b3fd4", "2": "#22a06b", "3": "#e07a3f"}
+    fig = go.Figure()
+
+    def _target_rows(source: pd.DataFrame) -> pd.DataFrame:
+        if source is None or source.empty:
+            return pd.DataFrame(columns=getattr(source, "columns", []))
+        gender_values = source.get(
+            "_gender", pd.Series("", index=source.index)
+        ).fillna("").astype(str).str.strip()
+        age_values = source.get(
+            "_age", pd.Series("", index=source.index)
+        ).fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+        return source.loc[gender_values.eq(gender) & age_values.eq(age)].copy()
+
+    asis_target = _target_rows(asis_df)
+    tobe_target = _target_rows(tobe_df)
+    asis_all_week = _segv_weekly(asis_target)
+    tobe_all_week = _segv_weekly(tobe_target)
+
+    # 기간 구분은 배경색과 TO-BE 시작선으로 유지하고, 선 색은 SEG 번호에 고정합니다.
+    if not asis_all_week.empty:
+        a0 = pd.to_datetime(asis_all_week["주차시작"], errors="coerce").min()
+        a1 = pd.to_datetime(asis_all_week["주차시작"], errors="coerce").max() + pd.Timedelta(days=6)
+        if pd.notna(a0) and pd.notna(a1):
+            fig.add_vrect(x0=a0, x1=a1, fillcolor="rgba(107,114,128,0.065)", line_width=0, layer="below")
+    if not tobe_all_week.empty:
+        b0 = pd.to_datetime(tobe_all_week["주차시작"], errors="coerce").min()
+        b1 = pd.to_datetime(tobe_all_week["주차시작"], errors="coerce").max() + pd.Timedelta(days=6)
+        if pd.notna(b0) and pd.notna(b1):
+            fig.add_vrect(x0=b0, x1=b1, fillcolor="rgba(91,63,212,0.055)", line_width=0, layer="below")
+
+    tick_frames = []
+    for seg in ["1", "2", "3"]:
+        has_legend = False
+        for period_label, target, dash in [
+            ("AS-IS", asis_target, "dot"),
+            ("TO-BE", tobe_target, "solid"),
+        ]:
+            if target.empty:
+                continue
+            seg_values = target.get(
+                "_seg", pd.Series("", index=target.index)
+            ).fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+            weekly = _segv_weekly(target.loc[seg_values.eq(seg)].copy())
+            if weekly.empty:
+                continue
+            tick_frames.append(weekly[["주차시작", "주차"]])
+            y = transform(pd.to_numeric(weekly[metric], errors="coerce").fillna(0))
+            week_labels = weekly["주차"].fillna("").astype(str).str.strip()
+            bad = week_labels.str.lower().str.contains(
+                r"undefined|null|nan|none|nat|<na>", regex=True, na=False
+            ) | week_labels.eq("")
+            week_labels = week_labels.mask(
+                bad,
+                pd.to_datetime(weekly["주차시작"], errors="coerce").dt.strftime("%m/%d주"),
+            )
+            fig.add_trace(go.Scatter(
+                x=weekly["주차시작"],
+                y=y,
+                mode="lines+markers",
+                name=f"SEG{seg}",
+                legendgroup=f"SEG{seg}",
+                showlegend=not has_legend,
+                line=dict(color=colors[seg], width=2.6, dash=dash),
+                marker=dict(size=7, color=colors[seg], line=dict(width=1, color="#ffffff")),
+                customdata=[[period_label, str(label)] for label in week_labels.tolist()],
+                hovertemplate=(
+                    f"<b>SEG{seg} · %{{customdata[0]}}</b><br>"
+                    f"%{{customdata[1]}}<br>{metric}: <b>%{{y:{value_format}}}{suffix}</b><extra></extra>"
+                ),
+            ))
+            has_legend = True
+
+    ticks = pd.concat(tick_frames, ignore_index=True) if tick_frames else pd.DataFrame(columns=["주차시작", "주차"])
+    if not ticks.empty:
+        ticks["주차시작"] = pd.to_datetime(ticks["주차시작"], errors="coerce").dt.normalize()
+        ticks = ticks.dropna(subset=["주차시작"])
+        ticks["주차"] = ticks["주차"].fillna("").astype(str).str.strip()
+        bad = ticks["주차"].str.lower().str.contains(
+            r"undefined|null|nan|none|nat|<na>", regex=True, na=False
+        ) | ticks["주차"].eq("")
+        ticks.loc[bad, "주차"] = ticks.loc[bad, "주차시작"].dt.strftime("%m/%d주")
+        ticks = (
+            ticks.sort_values(["주차시작", "주차"], kind="stable")
+            .drop_duplicates(subset=["주차시작"], keep="first")
+            .sort_values("주차시작")
+        )
+
+    start_ts = pd.to_datetime(tobe_start, errors="coerce")
+    if pd.notna(start_ts):
+        fig.add_vline(x=start_ts, line_dash="dot", line_color="#5b3fd4", line_width=1.4)
+
+    fig.update_layout(
+        title=dict(text=f"<b>{metric} 추이</b>", x=0.02, xanchor="left", font=dict(size=17, color="#111827")),
+        height=390,
+        margin=dict(l=52, r=18, t=68, b=78),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        hovermode="closest",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(size=12, color="#374151"),
+        ),
+        xaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
+        yaxis=dict(title=None, gridcolor="#eef1f5", tickfont=dict(size=11, color="#1f2937"), automargin=True),
+        font=dict(color="#111827", size=12),
+    )
+    if not ticks.empty:
+        fig.update_xaxes(
+            tickmode="array",
+            tickvals=ticks["주차시작"],
+            ticktext=ticks["주차"],
+            tickangle=-45,
+            tickfont=dict(size=11, color="#1f2937"),
+            automargin=True,
+        )
+    if metric == "CTR":
+        fig.update_yaxes(ticksuffix="%")
+    else:
+        fig.update_yaxes(ticksuffix="원", separatethousands=True)
+    return fig
+
 def _segv_position_chart(group_df: pd.DataFrame, overall_ctr: float, overall_spm: float, title: str,
                          x_range=None, y_range=None) -> go.Figure:
     colors = {"1": "#5b3fd4", "2": "#22a06b", "3": "#9ca3af"}
@@ -14931,42 +15068,54 @@ elif menu == "SEG분석":
                     )
 
             st.markdown(
-                '<div class="subsection-title">④ SEG 포지셔닝 · AS-IS → TO-BE '
-                '<span class="segv-section-note">빈 원=AS-IS / 채운 원=TO-BE / 화살표=이동 방향 · 우상단 이동일수록 CTR·SPM 동반 개선</span></div>',
+                '<div class="subsection-title">④ 타겟별 CTR·SPM 추이 '
+                '<span class="segv-section-note">SEG1·2·3 주차별 추이 · 점선=AS-IS / 실선=TO-BE · 회색 배경=AS-IS / 연보라 배경=TO-BE</span></div>',
                 unsafe_allow_html=True,
             )
-            all_ctr = pd.concat([
-                pd.to_numeric(a_group.get("CTR"), errors="coerce").dropna() * 100,
-                pd.to_numeric(b_group.get("CTR"), errors="coerce").dropna() * 100,
-            ], ignore_index=True)
-            all_spm = pd.concat([
-                pd.to_numeric(a_group.get("SPM"), errors="coerce").dropna(),
-                pd.to_numeric(b_group.get("SPM"), errors="coerce").dropna(),
-            ], ignore_index=True)
-            if len(all_ctr):
-                xmin = max(0.0, min(float(all_ctr.min()), b_sum["ctr"] * 100) - 0.55)
-                xmax = max(float(all_ctr.max()), b_sum["ctr"] * 100) + 0.75
-                ypad = max(8.0, float(all_spm.max()) * 0.13 if len(all_spm) else 8.0)
-                ymin = max(0.0, min(float(all_spm.min()), b_sum["spm"]) - ypad)
-                ymax = max(float(all_spm.max()), b_sum["spm"]) + ypad * 1.45
-                x_range, y_range = [xmin, xmax], [ymin, ymax]
-            else:
-                x_range = y_range = None
-
-            position_groups = [("남성", "3040"), ("여성", "3040"), ("남성", "5060"), ("여성", "5060")]
-            pos_rows = [st.columns(2, gap="small"), st.columns(2, gap="small")]
-            for idx, (gender, age) in enumerate(position_groups):
-                col = pos_rows[idx // 2][idx % 2]
-                with col:
-                    a_sub = a_group[(a_group["성별"] == gender) & (a_group["연령"] == age)].copy()
-                    b_sub = b_group[(b_group["성별"] == gender) & (b_group["연령"] == age)].copy()
-                    fig = _segv_position_compare_chart(a_sub, b_sub, b_sum["ctr"], b_sum["spm"], f"{gender}{age}", x_range, y_range)
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True,
-                        config={"displayModeBar": False, "responsive": True},
-                        key=f"seg_effect_pos_2x2_{gender}_{age}",
+            target_trend_groups = [
+                ("남성", "3040"),
+                ("여성", "3040"),
+                ("남성", "5060"),
+                ("여성", "5060"),
+            ]
+            target_trend_tabs = st.tabs([
+                "남성 3040",
+                "여성 3040",
+                "남성 5060",
+                "여성 5060",
+            ])
+            for target_tab, (gender, age) in zip(target_trend_tabs, target_trend_groups):
+                with target_tab:
+                    asis_target_mask = (
+                        asis_df["_gender"].fillna("").astype(str).str.strip().eq(gender)
+                        & asis_df["_age"].fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip().eq(age)
                     )
+                    tobe_target_mask = (
+                        tobe_df["_gender"].fillna("").astype(str).str.strip().eq(gender)
+                        & tobe_df["_age"].fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip().eq(age)
+                    )
+                    if not asis_target_mask.any() and not tobe_target_mask.any():
+                        st.info(f"선택 기간의 {gender} {age} SEG 데이터가 없습니다.")
+                    else:
+                        ctr_col, spm_col = st.columns(2, gap="small")
+                        with ctr_col:
+                            st.plotly_chart(
+                                _segv_target_metric_chart(
+                                    asis_df, tobe_df, gender, age, "CTR", pd.Timestamp(tobe_start)
+                                ),
+                                use_container_width=True,
+                                config={"displayModeBar": False, "responsive": True},
+                                key=f"seg_target_ctr_{gender}_{age}",
+                            )
+                        with spm_col:
+                            st.plotly_chart(
+                                _segv_target_metric_chart(
+                                    asis_df, tobe_df, gender, age, "SPM", pd.Timestamp(tobe_start)
+                                ),
+                                use_container_width=True,
+                                config={"displayModeBar": False, "responsive": True},
+                                key=f"seg_target_spm_{gender}_{age}",
+                            )
 
 elif menu == "타겟분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟분석 화면으로 바로 연결됩니다.")
