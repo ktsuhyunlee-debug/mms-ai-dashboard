@@ -13872,22 +13872,450 @@ elif menu == "타겟별베스트상품":
     else:
         target_best_min = product_dates.min().date()
         target_best_max = product_dates.max().date()
-        target_best_range = st.date_input(
-            "기간 선택",
-            [target_best_min, target_best_max],
-            min_value=target_best_min,
-            max_value=target_best_max,
-            key="target_best_date_range",
+
+        default_draft, default_applied = _home_analysis_default_state(
+            target_best_min, target_best_max
         )
-        if len(target_best_range) == 2:
-            target_best_start, target_best_end = target_best_range
+        if "target_best_analysis_draft" not in st.session_state:
+            st.session_state.target_best_analysis_draft = default_draft
+        if "target_best_analysis_applied" not in st.session_state:
+            st.session_state.target_best_analysis_applied = default_applied
+
+        target_best_draft = st.session_state.target_best_analysis_draft
+        target_best_applied = st.session_state.target_best_analysis_applied
+
+        def _target_best_clamp_date(value, fallback):
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return fallback
+            return min(max(parsed.date(), target_best_min), target_best_max)
+
+        for target_best_state in (target_best_draft, target_best_applied):
+            target_best_state.setdefault("mode", "전체")
+            target_best_state.setdefault("send_type", "전체")
+            target_best_state["base_start"] = _target_best_clamp_date(
+                target_best_state.get("base_start"), target_best_min
+            )
+            target_best_state["base_end"] = _target_best_clamp_date(
+                target_best_state.get("base_end"), target_best_max
+            )
+            target_best_state.setdefault(
+                "include_ranges",
+                [{"id": 1, "start": target_best_min, "end": target_best_max}],
+            )
+            target_best_state.setdefault(
+                "exclude_ranges",
+                [{
+                    "id": 1,
+                    "start": target_best_min,
+                    "end": target_best_min,
+                    "reason_type": "사유 없음",
+                    "reason_detail": "",
+                    "reason": "",
+                }],
+            )
+            target_best_state.setdefault("next_include_id", 2)
+            target_best_state.setdefault("next_exclude_id", 2)
+            for item in target_best_state["include_ranges"]:
+                item["start"] = _target_best_clamp_date(item.get("start"), target_best_min)
+                item["end"] = _target_best_clamp_date(item.get("end"), target_best_max)
+            for item in target_best_state["exclude_ranges"]:
+                item["start"] = _target_best_clamp_date(item.get("start"), target_best_min)
+                item["end"] = _target_best_clamp_date(item.get("end"), target_best_min)
+                item.setdefault("reason_type", "사유 없음")
+                item.setdefault("reason_detail", "")
+                item.setdefault("reason", "")
+
+        st.markdown('<div class="subsection-title">조회기간</div>', unsafe_allow_html=True)
+        target_best_notice = st.session_state.pop("target_best_analysis_notice", None)
+        if target_best_notice:
+            st.success(target_best_notice)
+
+        target_best_is_custom = (
+            target_best_applied.get("mode", "전체") != "전체"
+            or target_best_applied.get("send_type", "전체") != "전체"
+            or target_best_applied.get("base_start") != target_best_min
+            or target_best_applied.get("base_end") != target_best_max
+        )
+        if target_best_is_custom:
+            target_best_parts = [str(target_best_applied.get("mode", "전체"))]
+            target_best_parts.append(
+                f"발송유형 {target_best_applied.get('send_type', '전체')}"
+            )
+            target_best_parts.append(
+                f"{pd.Timestamp(target_best_applied['base_start']):%Y-%m-%d}"
+                f"~{pd.Timestamp(target_best_applied['base_end']):%Y-%m-%d}"
+            )
+            st.markdown(
+                "<div style='display:inline-block;padding:5px 10px;margin-bottom:8px;"
+                "border:1px solid #cfe0ff;border-radius:999px;background:#eef4ff;"
+                "font-size:0.86rem;color:#2f6fec;font-weight:700;'>"
+                f"📊 분석 조건 적용 중 · {' / '.join(target_best_parts)}</div>",
+                unsafe_allow_html=True,
+            )
+
+        target_best_modes = ["전체", "포함구간", "제외구간", "포함 + 제외"]
+        target_best_mode = str(target_best_draft.get("mode", "전체"))
+        if target_best_mode not in target_best_modes:
+            target_best_mode = "전체"
+        target_best_send_types = ["전체", "MMS", "RCS"]
+        target_best_send_type = str(target_best_draft.get("send_type", "전체"))
+        if target_best_send_type not in target_best_send_types:
+            target_best_send_type = "전체"
+
+        target_mode_col, target_type_col = st.columns([1.6, 1.0], gap="large")
+        with target_mode_col:
+            target_best_draft["mode"] = st.radio(
+                "📌 분석 방식",
+                target_best_modes,
+                index=target_best_modes.index(target_best_mode),
+                horizontal=True,
+                key="target_best_analysis_mode",
+            )
+        with target_type_col:
+            target_best_draft["send_type"] = st.radio(
+                "📨 발송 유형",
+                target_best_send_types,
+                index=target_best_send_types.index(target_best_send_type),
+                horizontal=True,
+                key="target_best_analysis_send_type",
+            )
+
+        st.markdown("**📅 기본 기간**")
+        target_start_col, target_sep_col, target_end_col = st.columns([1, 0.08, 1])
+        with target_start_col:
+            target_best_draft["base_start"] = st.date_input(
+                "기본 시작일",
+                value=target_best_draft["base_start"],
+                min_value=target_best_min,
+                max_value=target_best_max,
+                format="YYYY-MM-DD",
+                key="target_best_analysis_base_start",
+                label_visibility="collapsed",
+            )
+        with target_sep_col:
+            st.markdown(
+                "<div style='text-align:center;padding-top:8px;'>~</div>",
+                unsafe_allow_html=True,
+            )
+        with target_end_col:
+            target_best_draft["base_end"] = st.date_input(
+                "기본 종료일",
+                value=target_best_draft["base_end"],
+                min_value=target_best_min,
+                max_value=target_best_max,
+                format="YYYY-MM-DD",
+                key="target_best_analysis_base_end",
+                label_visibility="collapsed",
+            )
+
+        target_best_base_invalid = (
+            target_best_draft["base_start"] > target_best_draft["base_end"]
+        )
+        if target_best_base_invalid:
+            st.warning("기본 기간의 시작일은 종료일보다 늦을 수 없습니다.")
+
+        target_best_include_ranges = target_best_draft["include_ranges"]
+        target_best_exclude_ranges = target_best_draft["exclude_ranges"]
+
+        if target_best_draft["mode"] in {"포함구간", "포함 + 제외"}:
+            include_summary = _home_analysis_range_summary(target_best_include_ranges)
+            with st.expander(
+                f"📂 포함구간 ({len(target_best_include_ranges)}) · {include_summary}",
+                expanded=False,
+            ):
+                delete_include_id = None
+                for idx, item in enumerate(target_best_include_ranges, start=1):
+                    row = st.columns([0.14, 1, 0.08, 1, 0.34])
+                    row[0].markdown(f"**{idx}**")
+                    item["start"] = row[1].date_input(
+                        f"포함 시작일 {idx}",
+                        value=item["start"],
+                        min_value=target_best_min,
+                        max_value=target_best_max,
+                        format="YYYY-MM-DD",
+                        key=f"target_best_inc_start_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    row[2].markdown(
+                        "<div style='text-align:center;padding-top:8px;'>~</div>",
+                        unsafe_allow_html=True,
+                    )
+                    item["end"] = row[3].date_input(
+                        f"포함 종료일 {idx}",
+                        value=item["end"],
+                        min_value=target_best_min,
+                        max_value=target_best_max,
+                        format="YYYY-MM-DD",
+                        key=f"target_best_inc_end_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    if row[4].button(
+                        "삭제",
+                        key=f"target_best_inc_del_{item['id']}",
+                        use_container_width=True,
+                        disabled=len(target_best_include_ranges) <= 1,
+                    ):
+                        delete_include_id = item["id"]
+                if delete_include_id is not None:
+                    target_best_draft["include_ranges"] = [
+                        item for item in target_best_include_ranges
+                        if item["id"] != delete_include_id
+                    ]
+                    st.rerun()
+                if st.button(
+                    "＋ 포함구간 추가",
+                    key="target_best_inc_add",
+                    use_container_width=True,
+                ):
+                    new_id = target_best_draft["next_include_id"]
+                    target_best_draft["next_include_id"] += 1
+                    target_best_draft["include_ranges"].append({
+                        "id": new_id,
+                        "start": target_best_draft["base_start"],
+                        "end": target_best_draft["base_start"],
+                    })
+                    st.rerun()
+                valid_count, invalid_count = _home_analysis_valid_range_count(
+                    target_best_draft["include_ranges"]
+                )
+                if valid_count == 0:
+                    st.warning("적용 가능한 포함구간이 없습니다.")
+                if invalid_count:
+                    st.warning(
+                        f"시작일이 종료일보다 늦은 포함구간 {invalid_count}개는 적용에서 제외됩니다."
+                    )
+
+        if target_best_draft["mode"] in {"제외구간", "포함 + 제외"}:
+            exclude_summary = _home_analysis_range_summary(
+                target_best_exclude_ranges, include_reason=True
+            )
+            target_best_reason_options = [
+                "사유 없음", "보답프로그램", "기획전", "AI TEST",
+                "시즌 제외", "데이터 이상", "기타",
+            ]
+            with st.expander(
+                f"📂 제외구간 ({len(target_best_exclude_ranges)}) · {exclude_summary}",
+                expanded=False,
+            ):
+                delete_exclude_id = None
+                for idx, item in enumerate(target_best_exclude_ranges, start=1):
+                    row = st.columns([0.12, 0.84, 0.06, 0.84, 0.92, 0.92, 0.3])
+                    row[0].markdown(f"**{idx}**")
+                    item["start"] = row[1].date_input(
+                        f"제외 시작일 {idx}",
+                        value=item["start"],
+                        min_value=target_best_min,
+                        max_value=target_best_max,
+                        format="YYYY-MM-DD",
+                        key=f"target_best_exc_start_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    row[2].markdown(
+                        "<div style='text-align:center;padding-top:8px;'>~</div>",
+                        unsafe_allow_html=True,
+                    )
+                    item["end"] = row[3].date_input(
+                        f"제외 종료일 {idx}",
+                        value=item["end"],
+                        min_value=target_best_min,
+                        max_value=target_best_max,
+                        format="YYYY-MM-DD",
+                        key=f"target_best_exc_end_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    reason_type = str(item.get("reason_type", "사유 없음"))
+                    if reason_type not in target_best_reason_options:
+                        reason_type = "기타" if item.get("reason") else "사유 없음"
+                    item["reason_type"] = row[4].selectbox(
+                        f"제외 사유 {idx}",
+                        target_best_reason_options,
+                        index=target_best_reason_options.index(reason_type),
+                        key=f"target_best_exc_reason_type_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                    if item["reason_type"] == "기타":
+                        item["reason_detail"] = row[5].text_input(
+                            f"기타 사유 {idx}",
+                            value=item.get("reason_detail", ""),
+                            placeholder="직접 입력",
+                            key=f"target_best_exc_reason_detail_{item['id']}",
+                            label_visibility="collapsed",
+                        )
+                        item["reason"] = item["reason_detail"].strip()
+                    else:
+                        row[5].markdown("<div style='height:38px;'></div>", unsafe_allow_html=True)
+                        item["reason"] = (
+                            "" if item["reason_type"] == "사유 없음"
+                            else item["reason_type"]
+                        )
+                    if row[6].button(
+                        "삭제",
+                        key=f"target_best_exc_del_{item['id']}",
+                        use_container_width=True,
+                        disabled=len(target_best_exclude_ranges) <= 1,
+                    ):
+                        delete_exclude_id = item["id"]
+                if delete_exclude_id is not None:
+                    target_best_draft["exclude_ranges"] = [
+                        item for item in target_best_exclude_ranges
+                        if item["id"] != delete_exclude_id
+                    ]
+                    st.rerun()
+                if st.button(
+                    "＋ 제외구간 추가",
+                    key="target_best_exc_add",
+                    use_container_width=True,
+                ):
+                    new_id = target_best_draft["next_exclude_id"]
+                    target_best_draft["next_exclude_id"] += 1
+                    target_best_draft["exclude_ranges"].append({
+                        "id": new_id,
+                        "start": target_best_draft["base_start"],
+                        "end": target_best_draft["base_start"],
+                        "reason_type": "사유 없음",
+                        "reason_detail": "",
+                        "reason": "",
+                    })
+                    st.rerun()
+                _, invalid_count = _home_analysis_valid_range_count(
+                    target_best_draft["exclude_ranges"]
+                )
+                if invalid_count:
+                    st.warning(
+                        f"시작일이 종료일보다 늦은 제외구간 {invalid_count}개는 적용에서 제외됩니다."
+                    )
+
+        if target_best_base_invalid:
+            target_best_preview = products.iloc[0:0].copy()
+            target_best_base_preview = products.iloc[0:0].copy()
         else:
-            target_best_start, target_best_end = target_best_min, target_best_max
+            target_best_base_preview = apply_home_analysis_date_filter(
+                products,
+                "전체",
+                target_best_draft["base_start"],
+                target_best_draft["base_end"],
+                [],
+                [],
+            )
+            target_best_preview = apply_home_analysis_date_filter(
+                products,
+                target_best_draft["mode"],
+                target_best_draft["base_start"],
+                target_best_draft["base_end"],
+                target_best_draft["include_ranges"],
+                target_best_draft["exclude_ranges"],
+            )
+            target_best_base_preview = apply_home_send_type_filter(
+                target_best_base_preview, target_best_draft["send_type"]
+            )
+            target_best_preview = apply_home_send_type_filter(
+                target_best_preview, target_best_draft["send_type"]
+            )
+
+        base_product_days = (
+            int(pd.to_datetime(target_best_base_preview["_date"], errors="coerce").dt.normalize().nunique())
+            if not target_best_base_preview.empty else 0
+        )
+        preview_product_days = (
+            int(pd.to_datetime(target_best_preview["_date"], errors="coerce").dt.normalize().nunique())
+            if not target_best_preview.empty else 0
+        )
+        preview_product_count = int(len(target_best_preview))
+
+        result_col, apply_col, reset_col = st.columns([3.2, 0.9, 0.9])
+        result_col.markdown(
+            f"**📋 분석 대상 : {target_best_draft['send_type']} · "
+            f"{preview_product_days:,}일 (상품 {preview_product_count:,}건) · "
+            f"기본 {base_product_days:,}일 → 적용 {preview_product_days:,}일**"
+        )
+        apply_clicked = apply_col.button(
+            "✔ 적용",
+            key="target_best_analysis_apply",
+            use_container_width=True,
+            disabled=target_best_base_invalid or preview_product_count == 0,
+        )
+        reset_clicked = reset_col.button(
+            "↺ 초기화",
+            key="target_best_analysis_reset",
+            use_container_width=True,
+        )
+
+        if preview_product_count == 0 and not target_best_base_invalid:
+            st.warning("현재 조건에 해당하는 상품 데이터가 없어 적용할 수 없습니다.")
+
+        if reset_clicked:
+            reset_draft, reset_applied = _home_analysis_default_state(
+                target_best_min, target_best_max
+            )
+            st.session_state.target_best_analysis_draft = reset_draft
+            st.session_state.target_best_analysis_applied = reset_applied
+            widget_keys = [
+                key for key in list(st.session_state.keys())
+                if key in {
+                    "target_best_analysis_mode",
+                    "target_best_analysis_send_type",
+                    "target_best_analysis_base_start",
+                    "target_best_analysis_base_end",
+                }
+                or key.startswith("target_best_inc_")
+                or key.startswith("target_best_exc_")
+            ]
+            for key in widget_keys:
+                del st.session_state[key]
+            st.session_state.target_best_analysis_notice = (
+                "타겟별베스트상품 분석 조건을 초기화했습니다."
+            )
+            st.rerun()
+
+        if apply_clicked:
+            st.session_state.target_best_analysis_applied = {
+                "mode": target_best_draft["mode"],
+                "send_type": target_best_draft["send_type"],
+                "base_start": target_best_draft["base_start"],
+                "base_end": target_best_draft["base_end"],
+                "include_ranges": [dict(item) for item in target_best_draft["include_ranges"]],
+                "exclude_ranges": [dict(item) for item in target_best_draft["exclude_ranges"]],
+            }
+            st.session_state.target_best_analysis_notice = (
+                "타겟별베스트상품 분석 조건을 적용했습니다."
+            )
+            st.rerun()
+
+        target_best_applied = st.session_state.target_best_analysis_applied
+        target_best_start = target_best_applied["base_start"]
+        target_best_end = target_best_applied["base_end"]
+        target_best_filtered_products = apply_home_analysis_date_filter(
+            products,
+            target_best_applied["mode"],
+            target_best_start,
+            target_best_end,
+            target_best_applied["include_ranges"],
+            target_best_applied["exclude_ranges"],
+        )
+        target_best_filtered_products = apply_home_send_type_filter(
+            target_best_filtered_products,
+            target_best_applied.get("send_type", "전체"),
+        )
+
+        target_best_signature = (
+            str(target_best_applied.get("mode", "전체")),
+            str(target_best_applied.get("send_type", "전체")),
+            str(target_best_start),
+            str(target_best_end),
+            _range_signature(target_best_applied.get("include_ranges", [])),
+            _range_signature(
+                target_best_applied.get("exclude_ranges", []),
+                include_reason=True,
+            ),
+        )
 
         target_best_views = _menu_cache_get(
             "target_best_product_views",
-            (str(target_best_start), str(target_best_end)),
-            lambda: _build_target_best_product_views(products, target_best_start, target_best_end),
+            target_best_signature,
+            lambda: _build_target_best_product_views(
+                target_best_filtered_products, target_best_start, target_best_end
+            ),
             max_entries=12,
         )
 
@@ -13899,7 +14327,9 @@ elif menu == "타겟별베스트상품":
         ]
         st.caption(
             f"조회기간 {pd.Timestamp(target_best_start).strftime('%Y-%m-%d')} ~ "
-            f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · 각 타겟 내 주문금액 높은 순"
+            f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · "
+            f"발송유형 {target_best_applied.get('send_type', '전체')} · "
+            f"각 타겟 내 주문금액 높은 순"
         )
 
         # 네 타겟을 세로로 길게 나열하지 않고 상단 가로 탭으로 전환합니다.
@@ -13911,20 +14341,21 @@ elif menu == "타겟별베스트상품":
             "여성 5060",
         ])
 
-        raw_period_dates = pd.to_datetime(products.get("_date"), errors="coerce").dt.normalize()
-        raw_gender = products.get("성별", pd.Series("", index=products.index)).fillna("").astype(str).str.strip()
-        raw_age = products.get("연령", pd.Series("", index=products.index)).map(clean_identifier_value)
-        period_mask = raw_period_dates.between(
-            pd.Timestamp(target_best_start).normalize(),
-            pd.Timestamp(target_best_end).normalize(),
-            inclusive="both",
-        )
+        raw_gender = target_best_filtered_products.get(
+            "성별", pd.Series("", index=target_best_filtered_products.index)
+        ).fillna("").astype(str).str.strip()
+        raw_age = target_best_filtered_products.get(
+            "연령", pd.Series("", index=target_best_filtered_products.index)
+        ).map(clean_identifier_value)
+        target_best_key_token = hashlib.sha1(
+            repr(target_best_signature).encode("utf-8")
+        ).hexdigest()[:10]
 
         for target_tab, (gender, age) in zip(target_best_tabs, target_best_groups):
             with target_tab:
                 view = target_best_views.get((gender, age), pd.DataFrame())
-                raw_target = products.loc[
-                    period_mask & raw_gender.eq(gender) & raw_age.eq(age)
+                raw_target = target_best_filtered_products.loc[
+                    raw_gender.eq(gender) & raw_age.eq(age)
                 ].copy()
                 total_amount = (
                     pd.to_numeric(raw_target.get("주문금액", 0), errors="coerce").fillna(0).sum()
@@ -13942,7 +14373,7 @@ elif menu == "타겟별베스트상품":
                 else:
                     selectable_dataframe(
                         view,
-                        key=f"target_best_{gender}_{age}_{target_best_start}_{target_best_end}",
+                        key=f"target_best_{gender}_{age}_{target_best_key_token}",
                         use_container_width=True,
                         hide_index=True,
                         height=min(900, 42 + len(view) * 35),
