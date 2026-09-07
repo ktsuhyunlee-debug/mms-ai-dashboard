@@ -11055,6 +11055,135 @@ def _build_target_best_product_views(
 
     return result
 
+
+def _build_target_best_integrated_views(
+    products: pd.DataFrame,
+    start_date,
+    end_date,
+) -> dict[tuple[str, str], pd.DataFrame]:
+    """타겟별 상품을 알파코드·쇼라코드 기준으로 묶어 누적 성과를 반환합니다."""
+    target_groups = [
+        ("남성", "3040"),
+        ("남성", "5060"),
+        ("여성", "3040"),
+        ("여성", "5060"),
+    ]
+    display_cols = [
+        "알파코드", "쇼라코드", "상품명", "정상가", "멤버십혜택가",
+        "할인율", "발송횟수", "주문금액", "평균금액",
+    ]
+    result = {
+        key: pd.DataFrame(columns=display_cols)
+        for key in target_groups
+    }
+    if products is None or products.empty or "_date" not in products.columns:
+        return result
+
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    dates = pd.to_datetime(products["_date"], errors="coerce").dt.normalize()
+    period = products.loc[dates.between(start_ts, end_ts, inclusive="both")].copy()
+    if period.empty:
+        return result
+
+    period["_target_gender"] = (
+        period["성별"].fillna("").astype(str).str.strip()
+        if "성별" in period.columns else ""
+    )
+    period["_target_age"] = (
+        period["연령"].map(clean_identifier_value)
+        if "연령" in period.columns else ""
+    )
+    period["_alpha_code"] = (
+        period["알파코드"].map(clean_identifier_value)
+        if "알파코드" in period.columns
+        else pd.Series("", index=period.index, dtype="object")
+    )
+    period["_shora_code"] = (
+        period["쇼라코드"].map(clean_identifier_value)
+        if "쇼라코드" in period.columns
+        else pd.Series("", index=period.index, dtype="object")
+    )
+    period["_product_name"] = (
+        period["상품명"].fillna("").astype(str).str.strip()
+        if "상품명" in period.columns
+        else pd.Series("", index=period.index, dtype="object")
+    )
+    period["_date_sort"] = pd.to_datetime(period["_date"], errors="coerce")
+    period["_integrated_key"] = [
+        f"A:{alpha}|S:{shora}" if alpha or shora else f"N:{name}"
+        for alpha, shora, name in zip(
+            period["_alpha_code"], period["_shora_code"], period["_product_name"]
+        )
+    ]
+
+    def _first_nonblank(series: pd.Series):
+        for value in series.tolist():
+            if pd.notna(value) and str(value).strip() not in {"", "nan", "None"}:
+                return value
+        return ""
+
+    def _latest_positive_number(group: pd.DataFrame, column: str) -> float:
+        if column not in group.columns:
+            return 0.0
+        values = pd.to_numeric(
+            group[column].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        )
+        positive = values[values.gt(0)]
+        return float(positive.iloc[0]) if not positive.empty else 0.0
+
+    for gender, age in target_groups:
+        sub = period[
+            period["_target_gender"].eq(gender)
+            & period["_target_age"].eq(age)
+        ].copy()
+        if sub.empty:
+            continue
+
+        sub = sub.sort_values("_date_sort", ascending=False, kind="stable")
+        rows = []
+        for _, group in sub.groupby("_integrated_key", sort=False, dropna=False):
+            send_count = int(len(group))
+            order_amount = float(num(group["주문금액"]).sum()) if "주문금액" in group.columns else 0.0
+            average_amount = order_amount / send_count if send_count else 0.0
+            normal_price = _latest_positive_number(group, "정상가")
+            benefit_price = _latest_positive_number(group, "멤버십혜택가")
+            discount_rate = (
+                floor_discount_rate(normal_price, benefit_price)
+                if normal_price > 0 and benefit_price > 0 else pd.NA
+            )
+            if pd.isna(discount_rate) and "할인율" in group.columns:
+                discount_display = format_discount_percent(_first_nonblank(group["할인율"]))
+            else:
+                discount_display = format_discount_percent(discount_rate)
+
+            rows.append({
+                "알파코드": clean_identifier_value(_first_nonblank(group["_alpha_code"])),
+                "쇼라코드": clean_identifier_value(_first_nonblank(group["_shora_code"])),
+                "상품명": str(_first_nonblank(group["_product_name"])),
+                "정상가": format_integer_price(normal_price),
+                "멤버십혜택가": format_integer_price(benefit_price),
+                "할인율": discount_display,
+                "발송횟수": format_integer_price(send_count),
+                "주문금액": format_integer_price(order_amount),
+                "평균금액": format_integer_price(average_amount),
+                "_order_amount_sort": order_amount,
+            })
+
+        view = pd.DataFrame(rows)
+        if view.empty:
+            result[(gender, age)] = pd.DataFrame(columns=display_cols)
+        else:
+            result[(gender, age)] = (
+                view.sort_values("_order_amount_sort", ascending=False, kind="stable")
+                [display_cols]
+                .reset_index(drop=True)
+            )
+
+    return result
+
+
 def _build_product_history_view_fast(products: pd.DataFrame, group_keys: list[str], selected_values: tuple) -> pd.DataFrame:
     history_mask = pd.Series(True, index=products.index)
     for key, value in zip(group_keys, selected_values):
@@ -13963,7 +14092,9 @@ elif menu == "타겟별베스트상품":
         if target_best_send_type not in target_best_send_types:
             target_best_send_type = "전체"
 
-        target_mode_col, target_type_col = st.columns([1.6, 1.0], gap="large")
+        target_mode_col, target_type_col, target_integrated_col = st.columns(
+            [1.55, 0.9, 0.55], gap="large"
+        )
         with target_mode_col:
             target_best_draft["mode"] = st.radio(
                 "📌 분석 방식",
@@ -13979,6 +14110,13 @@ elif menu == "타겟별베스트상품":
                 index=target_best_send_types.index(target_best_send_type),
                 horizontal=True,
                 key="target_best_analysis_send_type",
+            )
+        with target_integrated_col:
+            target_best_integrated = st.toggle(
+                "🔗 통합분석",
+                value=False,
+                key="target_best_integrated_analysis",
+                help="동일 상품의 발송 이력을 알파코드·쇼라코드 기준으로 합산합니다.",
             )
 
         st.markdown("**📅 기본 기간**")
@@ -14257,6 +14395,7 @@ elif menu == "타겟별베스트상품":
                     "target_best_analysis_send_type",
                     "target_best_analysis_base_start",
                     "target_best_analysis_base_end",
+                    "target_best_integrated_analysis",
                 }
                 or key.startswith("target_best_inc_")
                 or key.startswith("target_best_exc_")
@@ -14301,6 +14440,7 @@ elif menu == "타겟별베스트상품":
         target_best_signature = (
             str(target_best_applied.get("mode", "전체")),
             str(target_best_applied.get("send_type", "전체")),
+            bool(target_best_integrated),
             str(target_best_start),
             str(target_best_end),
             _range_signature(target_best_applied.get("include_ranges", [])),
@@ -14313,8 +14453,14 @@ elif menu == "타겟별베스트상품":
         target_best_views = _menu_cache_get(
             "target_best_product_views",
             target_best_signature,
-            lambda: _build_target_best_product_views(
-                target_best_filtered_products, target_best_start, target_best_end
+            lambda: (
+                _build_target_best_integrated_views(
+                    target_best_filtered_products, target_best_start, target_best_end
+                )
+                if target_best_integrated
+                else _build_target_best_product_views(
+                    target_best_filtered_products, target_best_start, target_best_end
+                )
             ),
             max_entries=12,
         )
@@ -14329,6 +14475,7 @@ elif menu == "타겟별베스트상품":
             f"조회기간 {pd.Timestamp(target_best_start).strftime('%Y-%m-%d')} ~ "
             f"{pd.Timestamp(target_best_end).strftime('%Y-%m-%d')} · "
             f"발송유형 {target_best_applied.get('send_type', '전체')} · "
+            f"표시방식 {'상품코드별 통합' if target_best_integrated else '발송건별'} · "
             f"각 타겟 내 주문금액 높은 순"
         )
 
@@ -14365,7 +14512,8 @@ elif menu == "타겟별베스트상품":
                 st.markdown(
                     f'<div class="subsection-title">{gender} {age} '
                     f'<span style="font-size:13px;color:#6b7280;font-weight:600;">'
-                    f'· {len(view):,}건 · 주문금액 {format_integer_price(total_amount)}원</span></div>',
+                    f"· {len(view):,}{'개 상품' if target_best_integrated else '건'} "
+                    f'· 주문금액 {format_integer_price(total_amount)}원</span></div>',
                     unsafe_allow_html=True,
                 )
                 if view.empty:
