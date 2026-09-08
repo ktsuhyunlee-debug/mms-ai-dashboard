@@ -234,13 +234,13 @@ html, body, [class*="css"] {
 .weekly-kpi-value-row {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
+    justify-content: flex-start;
+    gap: 7px;
     min-width: 0;
 }
 
 .weekly-kpi-value-row .metric-value {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-width: 0;
     font-size: clamp(18px, 1.45vw, 23px);
     white-space: nowrap;
@@ -249,9 +249,9 @@ html, body, [class*="css"] {
 .weekly-kpi-value-row .metric-delta {
     flex: 0 0 auto;
     margin-top: 0;
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.2;
-    text-align: right;
+    text-align: left;
     white-space: nowrap;
 }
 
@@ -302,16 +302,16 @@ html, body, [class*="css"] {
 .weekly-target-metric-value-row {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 5px;
     min-width: 0;
 }
 
 .weekly-target-metric-delta {
     flex: 0 0 auto;
-    font-size: 9px;
+    font-size: 10px;
     line-height: 1.15;
-    text-align: right;
+    text-align: left;
     white-space: nowrap;
 }
 
