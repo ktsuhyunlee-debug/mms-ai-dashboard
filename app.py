@@ -286,16 +286,16 @@ html, body, [class*="css"] {
 
 .weekly-target-metric-name {
     color: var(--muted);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 650;
     margin-bottom: 4px;
 }
 
 .weekly-target-metric-value {
     color: #111827;
-    font-size: 19px;
+    font-size: clamp(18px, 1.45vw, 23px);
     font-weight: 800;
-    letter-spacing: -0.4px;
+    letter-spacing: -0.5px;
     line-height: 1.2;
 }
 
@@ -303,14 +303,14 @@ html, body, [class*="css"] {
     display: flex;
     align-items: baseline;
     justify-content: flex-start;
-    gap: 5px;
+    gap: 7px;
     min-width: 0;
 }
 
 .weekly-target-metric-delta {
     flex: 0 0 auto;
-    font-size: 10px;
-    line-height: 1.15;
+    font-size: 11px;
+    line-height: 1.2;
     text-align: left;
     white-space: nowrap;
 }
