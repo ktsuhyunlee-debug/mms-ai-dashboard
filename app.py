@@ -221,6 +221,50 @@ html, body, [class*="css"] {
 .weekly-delta-down { color: #2f6fec !important; }
 .weekly-delta-flat { color: #111827 !important; }
 
+/* 주간실적 3번째 줄: 성별·연령 타겟별 CTR / SPM */
+.weekly-target-card {
+    min-height: 118px;
+    margin-top: 14px;
+    padding: 16px 17px;
+}
+
+.weekly-target-card .metric-label {
+    color: #111827;
+    font-size: 13px;
+    font-weight: 800;
+    margin-bottom: 12px;
+}
+
+.weekly-target-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+}
+
+.weekly-target-metric {
+    min-width: 0;
+}
+
+.weekly-target-metric + .weekly-target-metric {
+    border-left: 1px solid var(--border);
+    padding-left: 16px;
+}
+
+.weekly-target-metric-name {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.weekly-target-metric-value {
+    color: #111827;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    line-height: 1.2;
+}
+
 /* 주간실적 KPI 하단 구성비 카드 */
 .weekly-breakdown-card {
     min-height: 230px;
@@ -3214,6 +3258,50 @@ def grouped_send_table(sw: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     g["SPM"] = safe_div(g["주문금액"], g["발송건수"])
     g["발송당매출(발송횟수)"] = safe_div(g["주문금액"], g["발송횟수"])
     return g.fillna(0)
+
+
+def _weekly_target_ctr_spm_cards(sw: pd.DataFrame) -> list[dict]:
+    """선택 주차의 4개 성별·연령 타겟별 CTR/SPM 카드 값을 반환합니다."""
+    targets = [
+        ("남성", "3040"),
+        ("남성", "5060"),
+        ("여성", "3040"),
+        ("여성", "5060"),
+    ]
+    empty = [
+        {"label": f"{gender} {age}", "ctr": None, "spm": None}
+        for gender, age in targets
+    ]
+    if sw is None or sw.empty or not {"성별", "연령"}.issubset(sw.columns):
+        return empty
+
+    send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
+    if send_col is None or click_col is None or "주문금액" not in sw.columns:
+        return empty
+
+    work = sw.copy()
+    work["_weekly_target_gender"] = (
+        work["성별"].fillna("").astype(str).str.strip()
+        .replace({"남자": "남성", "남": "남성", "여자": "여성", "여": "여성"})
+    )
+    work["_weekly_target_age"] = work["연령"].map(clean_identifier_value)
+
+    result = []
+    for gender, age in targets:
+        target_rows = work[
+            work["_weekly_target_gender"].eq(gender)
+            & work["_weekly_target_age"].eq(age)
+        ]
+        target_send = float(pd.to_numeric(target_rows[send_col], errors="coerce").fillna(0).sum())
+        target_click = float(pd.to_numeric(target_rows[click_col], errors="coerce").fillna(0).sum())
+        target_amount = float(pd.to_numeric(target_rows["주문금액"], errors="coerce").fillna(0).sum())
+        result.append({
+            "label": f"{gender} {age}",
+            "ctr": (target_click / target_send) if target_send > 0 else None,
+            "spm": (target_amount / target_send) if target_send > 0 else None,
+        })
+    return result
 
 
 def weekly_display_format(df: pd.DataFrame) -> pd.DataFrame:
@@ -13765,7 +13853,38 @@ elif menu == "주간실적":
         if i == 4:
             card_cols = st.columns(4)
 
-    # 주간 KPI 보조 카드: MMS 실적 비중 / 상품 편성 구성
+    # 3번째 줄: 성별·연령 타겟별 CTR / SPM 4개 카드
+    target_card_cols = st.columns(4)
+    for target_col, target_metric in zip(
+        target_card_cols, _weekly_target_ctr_spm_cards(sw)
+    ):
+        target_ctr_display = (
+            f'{float(target_metric["ctr"])*100:.1f}%'
+            if target_metric["ctr"] is not None
+            else "-"
+        )
+        target_spm_display = (
+            f'{float(target_metric["spm"]):.1f}'
+            if target_metric["spm"] is not None
+            else "-"
+        )
+        with target_col:
+            st.markdown(
+                '<div class="metric-card weekly-target-card">'
+                f'<div class="metric-label">{target_metric["label"]}</div>'
+                '<div class="weekly-target-metrics">'
+                '<div class="weekly-target-metric">'
+                '<div class="weekly-target-metric-name">CTR</div>'
+                f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
+                '</div>'
+                '<div class="weekly-target-metric">'
+                '<div class="weekly-target-metric-name">SPM</div>'
+                f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
+                '</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # 4번째 줄: MMS 실적 비중 / 상품 편성 구성
     _mms_stats = _weekly_mms_share_stats(
         sw, overall_performance, int(selected_year), str(week)
     )
