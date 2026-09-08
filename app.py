@@ -11564,6 +11564,349 @@ def _target_best_monthly_summary_html(summary: pd.DataFrame, months: list[int]) 
     )
 
 
+def _product_mix_product_keys(df: pd.DataFrame) -> pd.Series:
+    """알파코드·쇼라코드 조합, 코드가 없으면 상품명으로 상품을 식별합니다."""
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+    alpha = df.get("알파코드", pd.Series("", index=df.index)).map(clean_identifier_value)
+    shora = df.get("쇼라코드", pd.Series("", index=df.index)).map(clean_identifier_value)
+    names = df.get("상품명", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+    return pd.Series(
+        [
+            f"A:{a}|S:{s}" if a or s else (f"N:{name}" if name else "")
+            for a, s, name in zip(alpha, shora, names)
+        ],
+        index=df.index,
+        dtype="object",
+    )
+
+
+def _product_mix_top30_keys(products: pd.DataFrame) -> set[str]:
+    """전체 데이터 기간 누적 주문금액 상위 30개 상품 키를 반환합니다."""
+    if products is None or products.empty:
+        return set()
+    work = products.copy()
+    work["_mix_product_key"] = _product_mix_product_keys(work)
+    work["_mix_amount"] = pd.to_numeric(
+        work.get("주문금액", pd.Series(0, index=work.index)), errors="coerce"
+    ).fillna(0)
+    work = work[work["_mix_product_key"].ne("")]
+    if work.empty:
+        return set()
+    totals = work.groupby("_mix_product_key", as_index=True)["_mix_amount"].sum()
+    return set(totals.nlargest(30).index.astype(str).tolist())
+
+
+def _product_mix_period_metrics(
+    product_rows: pd.DataFrame,
+    send_rows: pd.DataFrame,
+    top30_keys: set[str],
+) -> dict:
+    """한 월 또는 한 주차의 상품 구성·발송 효율 지표를 계산합니다."""
+    product_rows = product_rows.copy() if isinstance(product_rows, pd.DataFrame) else pd.DataFrame()
+    send_rows = send_rows.copy() if isinstance(send_rows, pd.DataFrame) else pd.DataFrame()
+    total_products = int(len(product_rows))
+
+    send_count_col = first_col(send_rows, ["발송 성공 건수", "총 발송 건수"]) if not send_rows.empty else None
+    click_col = first_col(send_rows, ["클릭 수(uniq)", "클릭 수"]) if not send_rows.empty else None
+    sent = (
+        float(pd.to_numeric(send_rows[send_count_col], errors="coerce").fillna(0).sum())
+        if send_count_col else 0.0
+    )
+    clicks = (
+        float(pd.to_numeric(send_rows[click_col], errors="coerce").fillna(0).sum())
+        if click_col else 0.0
+    )
+    send_amount = (
+        float(pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0).sum())
+        if not send_rows.empty and "주문금액" in send_rows.columns else 0.0
+    )
+    product_amount = (
+        float(pd.to_numeric(product_rows.get("주문금액", 0), errors="coerce").fillna(0).sum())
+        if not product_rows.empty and "주문금액" in product_rows.columns else 0.0
+    )
+    order_amount = send_amount if not send_rows.empty and "주문금액" in send_rows.columns else product_amount
+
+    counts = {
+        "재편성": 0,
+        "유사신규": 0,
+        "신규": 0,
+        "300만원 이상 상품": 0,
+        "100만원 미만 상품": 0,
+        "최저가 미확보 상품": 0,
+        "TOP30 상품 포함": 0,
+    }
+    if not product_rows.empty:
+        operation_labels = _weekly_normalize_operation_labels(product_rows)
+        if operation_labels is not None:
+            operation_labels = operation_labels.reindex(product_rows.index).fillna("").astype(str).str.strip()
+            rerun_mask = operation_labels.str.contains("재편성", na=False)
+            similar_mask = operation_labels.str.contains("유사신규", na=False) & ~rerun_mask
+            new_mask = (
+                operation_labels.str.contains("신규", na=False)
+                & ~operation_labels.str.contains("유사신규", na=False)
+                & ~rerun_mask
+            )
+            counts["재편성"] = int(rerun_mask.sum())
+            counts["유사신규"] = int(similar_mask.sum())
+            counts["신규"] = int(new_mask.sum())
+
+        amounts = pd.to_numeric(
+            product_rows.get("주문금액", pd.Series(0, index=product_rows.index)),
+            errors="coerce",
+        ).fillna(0)
+        counts["300만원 이상 상품"] = int(amounts.ge(3_000_000).sum())
+        counts["100만원 미만 상품"] = int(amounts.lt(1_000_000).sum())
+
+        lowest = pd.to_numeric(
+            product_rows.get("발송일 최저가", pd.Series(pd.NA, index=product_rows.index)),
+            errors="coerce",
+        )
+        benefit = pd.to_numeric(
+            product_rows.get("멤버십혜택가", pd.Series(pd.NA, index=product_rows.index)),
+            errors="coerce",
+        )
+        if lowest.notna().any() and benefit.notna().any():
+            counts["최저가 미확보 상품"] = int((lowest.gt(0) & benefit.gt(lowest)).sum())
+        else:
+            status_col = first_col(product_rows, ["최저가 확보", "최저가 여부"])
+            if status_col:
+                status = product_rows[status_col].fillna("").astype(str).str.strip()
+                counts["최저가 미확보 상품"] = int(
+                    (status.eq("X") | status.str.contains("미확보", na=False)).sum()
+                )
+
+        product_keys = _product_mix_product_keys(product_rows)
+        counts["TOP30 상품 포함"] = int(product_keys.isin(top30_keys).sum())
+
+    result = {
+        "CTR": (clicks / sent * 100) if sent > 0 else pd.NA,
+        "SPM": (order_amount / sent) if sent > 0 else pd.NA,
+        "발송건수": sent,
+        "주문금액": order_amount,
+        "전체 상품수": total_products,
+    }
+    for label, count in counts.items():
+        result[f"{label}_개수"] = int(count)
+        result[f"{label}_비중"] = (count / total_products * 100) if total_products else pd.NA
+    return result
+
+
+def _build_product_mix_comparison(
+    products: pd.DataFrame,
+    sends: pd.DataFrame,
+    selected_month: str | None = None,
+) -> dict:
+    """월별 전체 비교와 선택 월의 주차별 비교 데이터를 함께 생성합니다."""
+    product_data = products.copy() if isinstance(products, pd.DataFrame) else pd.DataFrame()
+    send_data = sends.copy() if isinstance(sends, pd.DataFrame) else pd.DataFrame()
+    empty = {
+        "months": [], "selected_month": "", "monthly": pd.DataFrame(),
+        "weeks": [], "weekly": pd.DataFrame(),
+    }
+    if product_data.empty or "_date" not in product_data.columns:
+        return empty
+
+    product_data["_mix_date"] = pd.to_datetime(product_data["_date"], errors="coerce").dt.normalize()
+    product_data = product_data[product_data["_mix_date"].notna()].copy()
+    if product_data.empty:
+        return empty
+    product_data["_mix_month"] = product_data["_mix_date"].dt.strftime("%Y-%m")
+    product_data["_mix_year"] = product_data["_mix_date"].dt.year.astype(int)
+
+    if not send_data.empty and "_date" in send_data.columns:
+        send_data["_mix_date"] = pd.to_datetime(send_data["_date"], errors="coerce").dt.normalize()
+        send_data = send_data[send_data["_mix_date"].notna()].copy()
+        send_data["_mix_month"] = send_data["_mix_date"].dt.strftime("%Y-%m")
+    else:
+        send_data = pd.DataFrame()
+
+    months = sorted(product_data["_mix_month"].dropna().astype(str).unique().tolist())
+    if not months:
+        return empty
+    selected_month = str(selected_month or "").strip()
+    if selected_month not in months:
+        selected_month = months[-1]
+
+    top30_keys = _product_mix_top30_keys(product_data)
+    multiple_years = len({month[:4] for month in months}) > 1
+    monthly_rows = []
+    for month in months:
+        month_products = product_data[product_data["_mix_month"].eq(month)].copy()
+        month_sends = (
+            send_data[send_data["_mix_month"].eq(month)].copy()
+            if not send_data.empty else pd.DataFrame()
+        )
+        metrics = _product_mix_period_metrics(month_products, month_sends, top30_keys)
+        year_text, month_text = month.split("-")
+        metrics["구간"] = month
+        metrics["표시명"] = (
+            f"{year_text[2:]}년 {int(month_text)}월" if multiple_years else f"{int(month_text)}월"
+        )
+        monthly_rows.append(metrics)
+
+    selected_products = product_data[product_data["_mix_month"].eq(selected_month)].copy()
+    weekly_rows = []
+    selected_week_labels = (
+        selected_products["주차"].fillna("").astype(str).str.strip()
+        if "주차" in selected_products.columns
+        else pd.Series("", index=selected_products.index, dtype="object")
+    )
+    if selected_week_labels.ne("").any():
+        selected_products["_mix_week"] = selected_week_labels
+        selected_products = selected_products[selected_products["_mix_week"].ne("")]
+        week_order = (
+            selected_products.groupby(["_mix_year", "_mix_week"], as_index=False)["_mix_date"]
+            .min().sort_values("_mix_date", kind="stable")
+        )
+        for _, week_info in week_order.iterrows():
+            year = int(week_info["_mix_year"])
+            week = str(week_info["_mix_week"])
+            week_products = product_data[
+                product_data["_mix_year"].eq(year)
+                & product_data.get("주차", pd.Series("", index=product_data.index)).fillna("").astype(str).str.strip().eq(week)
+            ].copy()
+            week_start, week_end = _weekly_period_bounds(year, week, week_products)
+            if not send_data.empty and pd.notna(week_start) and pd.notna(week_end):
+                week_sends = send_data[
+                    send_data["_mix_date"].between(week_start, week_end, inclusive="both")
+                ].copy()
+            else:
+                week_sends = pd.DataFrame()
+            metrics = _product_mix_period_metrics(week_products, week_sends, top30_keys)
+            metrics["구간"] = f"{year}-{week}"
+            metrics["표시명"] = week
+            weekly_rows.append(metrics)
+    else:
+        selected_products["_mix_week_start"] = (
+            selected_products["_mix_date"]
+            - pd.to_timedelta(selected_products["_mix_date"].dt.weekday, unit="D")
+        )
+        for week_start in sorted(selected_products["_mix_week_start"].dropna().unique()):
+            week_start = pd.Timestamp(week_start).normalize()
+            week_end = week_start + pd.Timedelta(days=6)
+            week_products = product_data[
+                product_data["_mix_date"].between(week_start, week_end, inclusive="both")
+            ].copy()
+            week_sends = (
+                send_data[send_data["_mix_date"].between(week_start, week_end, inclusive="both")].copy()
+                if not send_data.empty else pd.DataFrame()
+            )
+            metrics = _product_mix_period_metrics(week_products, week_sends, top30_keys)
+            metrics["구간"] = week_start.strftime("%Y-%m-%d")
+            metrics["표시명"] = week_start.strftime("%m%d주차")
+            weekly_rows.append(metrics)
+
+    monthly = pd.DataFrame(monthly_rows)
+    weekly = pd.DataFrame(weekly_rows)
+    return {
+        "months": months,
+        "selected_month": selected_month,
+        "monthly": monthly,
+        "weeks": weekly.get("구간", pd.Series(dtype="object")).astype(str).tolist(),
+        "weekly": weekly,
+    }
+
+
+def _product_mix_comparison_html(
+    summary: pd.DataFrame,
+    column_keys: list[str],
+    selected_key: str = "",
+    clickable_months: bool = False,
+) -> str:
+    """상품구성비교 월별·주차별 데이터를 동일한 가로형 표로 렌더링합니다."""
+    if summary is None or summary.empty or not column_keys:
+        return '<div class="product-mix-empty">비교 데이터가 없습니다.</div>'
+    lookup = summary.set_index("구간").to_dict("index")
+
+    def _number(value, kind: str) -> str:
+        try:
+            if pd.isna(value):
+                return "-"
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if kind == "ctr":
+            return f"{numeric:.1f}%"
+        if kind == "spm":
+            return f"{numeric:.1f}"
+        if kind == "send":
+            return f"{numeric:,.0f}건"
+        if kind == "money":
+            return f"{numeric / 10_000:,.0f}만원"
+        return f"{numeric:,.0f}"
+
+    metric_rows = [
+        ("CTR", "CTR", "ctr"),
+        ("SPM", "SPM", "spm"),
+        ("발송건수", "발송건수", "send"),
+        ("주문금액", "주문금액", "money"),
+        ("재편성", "재편성", "count_share"),
+        ("유사신규", "유사신규", "count_share"),
+        ("신규", "신규", "count_share"),
+        ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
+        ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
+        ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
+        ("TOP30 상품 포함", "TOP30 상품 포함", "count_share"),
+    ]
+
+    header_cells = []
+    for key in column_keys:
+        item = lookup.get(key, {})
+        label = _html.escape(str(item.get("표시명", key)))
+        selected_class = " selected" if key == selected_key else ""
+        if clickable_months:
+            safe_key = _html.escape(str(key), quote=True)
+            content = f'<a href="?menu=product-mix&amp;mix_month={safe_key}" target="_self">{label}</a>'
+        else:
+            content = label
+        header_cells.append(f'<th class="period-col{selected_class}">{content}</th>')
+
+    body_rows = []
+    for label, column, kind in metric_rows:
+        cells = []
+        for key in column_keys:
+            item = lookup.get(key, {})
+            selected_class = " selected" if key == selected_key else ""
+            if kind == "count_share":
+                count = int(float(item.get(f"{column}_개수", 0) or 0))
+                share = item.get(f"{column}_비중", pd.NA)
+                share_text = "-" if pd.isna(share) else f"{float(share):.1f}%"
+                value = f'{count:,}개 <span class="share">({share_text})</span>'
+            else:
+                value = _number(item.get(column, pd.NA), kind)
+            cells.append(f'<td class="period-col{selected_class}">{value}</td>')
+        body_rows.append(
+            f'<tr><th class="metric-name">{_html.escape(label)}</th>{"".join(cells)}</tr>'
+        )
+
+    min_width = max(760, 205 + len(column_keys) * 132)
+    return (
+        '<style>'
+        '.product-mix-wrap{width:100%;overflow-x:auto;border:1px solid #dfe4ec;border-radius:11px;'
+        'background:#fff;box-shadow:0 2px 8px rgba(25,42,70,.035);margin:2px 0 12px}'
+        f'.product-mix-table{{width:100%;border-collapse:separate;border-spacing:0;min-width:{min_width}px;'
+        'table-layout:fixed;font-size:13px;color:#111827}'
+        '.product-mix-table th,.product-mix-table td{padding:9px 10px;text-align:center;'
+        'border-right:1px solid #e7eaf0;border-bottom:1px solid #e7eaf0;white-space:nowrap}'
+        '.product-mix-table thead th{background:#eef2f7;color:#334155;font-weight:900}'
+        '.product-mix-table thead a{color:#334155;text-decoration:underline;text-underline-offset:3px;cursor:pointer}'
+        '.product-mix-table .metric-name{position:sticky;left:0;z-index:2;background:#f8fafc;'
+        'text-align:left;font-weight:850;width:205px}'
+        '.product-mix-table thead .metric-name{z-index:3;background:#eef2f7}'
+        '.product-mix-table .period-col.selected{background:#f1edff;font-weight:900;color:#4b31c2}'
+        '.product-mix-table thead .period-col.selected a{color:#4b31c2}'
+        '.product-mix-table .share{font-size:11px;color:#64748b;font-weight:700}'
+        '.product-mix-table tr:last-child th,.product-mix-table tr:last-child td{border-bottom:0}'
+        '.product-mix-table th:last-child,.product-mix-table td:last-child{border-right:0}'
+        '.product-mix-empty{padding:13px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;color:#64748b}'
+        '</style>'
+        '<div class="product-mix-wrap"><table class="product-mix-table">'
+        f'<thead><tr><th class="metric-name">구분</th>{"".join(header_cells)}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody></table></div>'
+    )
+
+
 def _build_product_history_view_fast(products: pd.DataFrame, group_keys: list[str], selected_values: tuple) -> pd.DataFrame:
     history_mask = pd.Series(True, index=products.index)
     for key, value in zip(group_keys, selected_values):
@@ -12892,7 +13235,7 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
 
 
 
-_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "타겟별베스트상품", "SEG분석", "편성 프로그램"]
+_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "타겟별베스트상품", "상품구성비교", "SEG분석", "편성 프로그램"]
 _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
@@ -12900,6 +13243,7 @@ _menu_slug_to_name = {
     "product": "상품구분",
     "target": "타겟분석",
     "target-best": "타겟별베스트상품",
+    "product-mix": "상품구성비교",
     "seg-effect": "SEG분석",
     "planning": "편성 프로그램",
 }
@@ -12929,6 +13273,8 @@ try:
                 del st.query_params[_qp_key]
     if menu != "일일실적" and "date" in st.query_params:
         del st.query_params["date"]
+    if menu != "상품구성비교" and "mix_month" in st.query_params:
+        del st.query_params["mix_month"]
 except Exception:
     pass
 
@@ -15271,6 +15617,75 @@ elif menu == "타겟별베스트상품":
                         hide_index=True,
                         height=min(900, 42 + len(view) * 35),
                     )
+
+elif menu == "상품구성비교":
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품구성비교 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">상품구성비교</div>', unsafe_allow_html=True)
+    st.caption(
+        "개수·비중은 해당 기간 전체 편성 상품 행 기준 · "
+        "최저가 미확보는 발송일 최저가보다 멤버십 혜택가가 높은 상품 · "
+        "TOP30은 전체 데이터 기간 누적 주문금액 상위 30개 상품 기준"
+    )
+
+    product_mix_selected_query = _get_query_param("mix_month").strip()
+    product_mix_data_version = st.session_state.get("data_version")
+    if not product_mix_data_version:
+        product_mix_data_version = f"session:{id(products)}:{len(products)}:{id(sends)}:{len(sends)}"
+    product_mix_bundle = _menu_cache_get(
+        "product_mix_comparison",
+        (str(product_mix_data_version), product_mix_selected_query),
+        lambda: _build_product_mix_comparison(
+            products, sends, product_mix_selected_query
+        ),
+        max_entries=16,
+    )
+
+    product_mix_months = product_mix_bundle.get("months", [])
+    product_mix_selected = product_mix_bundle.get("selected_month", "")
+    product_mix_monthly = product_mix_bundle.get("monthly", pd.DataFrame())
+    if not product_mix_months or product_mix_monthly.empty:
+        st.info("상품구성비교에 사용할 월별 상품 데이터가 없습니다.")
+    else:
+        st.markdown(
+            '<div class="subsection-title">월별 상품 구성 비교</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("월 머릿말을 누르면 해당 월의 주차별 비교표가 아래에 표시됩니다.")
+        st.markdown(
+            _product_mix_comparison_html(
+                product_mix_monthly,
+                product_mix_months,
+                selected_key=product_mix_selected,
+                clickable_months=True,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        selected_month_row = product_mix_monthly[
+            product_mix_monthly["구간"].astype(str).eq(product_mix_selected)
+        ]
+        selected_month_label = (
+            str(selected_month_row.iloc[0].get("표시명", product_mix_selected))
+            if not selected_month_row.empty else product_mix_selected
+        )
+        st.markdown(
+            f'<div class="subsection-title">{_html.escape(selected_month_label)} 주차별 상품 구성 비교</div>',
+            unsafe_allow_html=True,
+        )
+        product_mix_weekly = product_mix_bundle.get("weekly", pd.DataFrame())
+        product_mix_weeks = product_mix_bundle.get("weeks", [])
+        if product_mix_weekly.empty or not product_mix_weeks:
+            st.info(f"{selected_month_label}에 표시할 주차 데이터가 없습니다.")
+        else:
+            st.markdown(
+                _product_mix_comparison_html(
+                    product_mix_weekly,
+                    product_mix_weeks,
+                    selected_key="",
+                    clickable_months=False,
+                ),
+                unsafe_allow_html=True,
+            )
 
 elif menu == "SEG분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 SEG분석 화면으로 바로 연결됩니다.")
