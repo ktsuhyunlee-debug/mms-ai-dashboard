@@ -221,18 +221,52 @@ html, body, [class*="css"] {
 .weekly-delta-down { color: #2f6fec !important; }
 .weekly-delta-flat { color: #111827 !important; }
 
+/* 주간실적 1·2번째 줄: 현재값과 전주 대비를 가로 배치해 카드 높이 축소 */
+.weekly-kpi-card {
+    min-height: 78px;
+    padding: 12px 14px;
+}
+
+.weekly-kpi-card .metric-label {
+    margin-bottom: 6px;
+}
+
+.weekly-kpi-value-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.weekly-kpi-value-row .metric-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: clamp(18px, 1.45vw, 23px);
+    white-space: nowrap;
+}
+
+.weekly-kpi-value-row .metric-delta {
+    flex: 0 0 auto;
+    margin-top: 0;
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: right;
+    white-space: nowrap;
+}
+
 /* 주간실적 3번째 줄: 성별·연령 타겟별 CTR / SPM */
 .weekly-target-card {
-    min-height: 118px;
+    min-height: 92px;
     margin-top: 14px;
-    padding: 16px 17px;
+    padding: 12px 14px;
 }
 
 .weekly-target-card .metric-label {
-    color: #111827;
-    font-size: 13px;
-    font-weight: 800;
-    margin-bottom: 12px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 650;
+    margin-bottom: 8px;
 }
 
 .weekly-target-metrics {
@@ -247,7 +281,7 @@ html, body, [class*="css"] {
 
 .weekly-target-metric + .weekly-target-metric {
     border-left: 1px solid var(--border);
-    padding-left: 16px;
+    padding-left: 12px;
 }
 
 .weekly-target-metric-name {
@@ -259,10 +293,26 @@ html, body, [class*="css"] {
 
 .weekly-target-metric-value {
     color: #111827;
-    font-size: 22px;
+    font-size: 19px;
     font-weight: 800;
     letter-spacing: -0.4px;
     line-height: 1.2;
+}
+
+.weekly-target-metric-value-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 5px;
+    min-width: 0;
+}
+
+.weekly-target-metric-delta {
+    flex: 0 0 auto;
+    font-size: 9px;
+    line-height: 1.15;
+    text-align: right;
+    white-space: nowrap;
 }
 
 /* 주간실적 KPI 하단 구성비 카드 */
@@ -13845,9 +13895,11 @@ elif menu == "주간실적":
     for i, (label, value, delta) in enumerate(cards):
         with card_cols[i % 5]:
             st.markdown(
-                f'<div class="metric-card"><div class="metric-label">{label}</div>'
+                f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
+                '<div class="weekly-kpi-value-row">'
                 f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta {weekly_delta_class(delta)}">전주 대비 {delta}</div></div>',
+                f'<div class="metric-delta {weekly_delta_class(delta)}">전주 대비 {delta}</div>'
+                '</div></div>',
                 unsafe_allow_html=True,
             )
         if i == 4:
@@ -13855,8 +13907,10 @@ elif menu == "주간실적":
 
     # 3번째 줄: 성별·연령 타겟별 CTR / SPM 4개 카드
     target_card_cols = st.columns(4)
-    for target_col, target_metric in zip(
-        target_card_cols, _weekly_target_ctr_spm_cards(sw)
+    target_metrics = _weekly_target_ctr_spm_cards(sw)
+    prev_target_metrics = _weekly_target_ctr_spm_cards(prev_sw)
+    for target_col, target_metric, prev_target_metric in zip(
+        target_card_cols, target_metrics, prev_target_metrics
     ):
         target_ctr_display = (
             f'{float(target_metric["ctr"])*100:.1f}%'
@@ -13868,6 +13922,25 @@ elif menu == "주간실적":
             if target_metric["spm"] is not None
             else "-"
         )
+        target_ctr_delta = (
+            weekly_delta(
+                float(target_metric["ctr"]),
+                float(prev_target_metric["ctr"]),
+                pp=True,
+            )
+            if target_metric["ctr"] is not None
+            and prev_target_metric["ctr"] is not None
+            else "-"
+        )
+        target_spm_delta = (
+            weekly_delta(
+                float(target_metric["spm"]),
+                float(prev_target_metric["spm"]),
+            )
+            if target_metric["spm"] is not None
+            and prev_target_metric["spm"] is not None
+            else "-"
+        )
         with target_col:
             st.markdown(
                 '<div class="metric-card weekly-target-card">'
@@ -13875,11 +13948,17 @@ elif menu == "주간실적":
                 '<div class="weekly-target-metrics">'
                 '<div class="weekly-target-metric">'
                 '<div class="weekly-target-metric-name">CTR</div>'
+                '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">전주 대비 {target_ctr_delta}</div>'
+                '</div>'
                 '</div>'
                 '<div class="weekly-target-metric">'
                 '<div class="weekly-target-metric-name">SPM</div>'
+                '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">전주 대비 {target_spm_delta}</div>'
+                '</div>'
                 '</div></div></div>',
                 unsafe_allow_html=True,
             )
