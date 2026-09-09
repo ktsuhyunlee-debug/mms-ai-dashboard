@@ -113,6 +113,28 @@ html, body, [class*="css"] {
     padding-top: 1.5rem;
 }
 
+.sidebar-navigation-title {
+    color: #111827;
+    font-size: 15px;
+    font-weight: 850;
+    letter-spacing: -0.2px;
+    margin: 18px 0 9px;
+}
+
+.sidebar-menu-group-title {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    margin: 10px 0 6px;
+}
+
+.sidebar-menu-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 12px 0 10px;
+}
+
 .app-header {
     display: flex;
     align-items: center;
@@ -13235,7 +13257,11 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
 
 
 
-_menu_options = ["홈", "일일실적", "주간실적", "상품구분", "타겟분석", "타겟별베스트상품", "상품구성비교", "SEG분석", "편성 프로그램"]
+_menu_options = [
+    "홈", "일일실적", "주간실적",
+    "상품구성비교", "상품구분", "타겟별베스트상품",
+    "타겟분석", "SEG분석", "편성 프로그램",
+]
 _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
@@ -13249,15 +13275,61 @@ _menu_slug_to_name = {
 }
 _menu_name_to_slug = {v: k for k, v in _menu_slug_to_name.items()}
 
+_menu_groups = [
+    ("성과 현황", [
+        ("홈", "홈"),
+        ("일일실적", "일일실적"),
+        ("주간실적", "주간실적"),
+    ]),
+    ("상품 분석", [
+        ("상품 구성 비교", "상품구성비교"),
+        ("상품별 성과", "상품구분"),
+        ("타겟별 베스트", "타겟별베스트상품"),
+    ]),
+    ("타겟 분석", [
+        ("타겟분석", "타겟분석"),
+        ("SEG분석", "SEG분석"),
+    ]),
+    ("운영", [
+        ("편성 프로그램", "편성 프로그램"),
+    ]),
+]
+
 _query_menu = _get_query_param("menu").strip().lower()
 _query_menu_name = _menu_slug_to_name.get(_query_menu, "홈")
-_menu_default_index = _menu_options.index(_query_menu_name) if _query_menu_name in _menu_options else 0
+if _query_menu in _menu_slug_to_name:
+    st.session_state.dashboard_active_menu = _query_menu_name
+elif st.session_state.get("dashboard_active_menu") not in _menu_options:
+    st.session_state.dashboard_active_menu = "홈"
 
-menu = st.sidebar.radio(
-    "메뉴",
-    _menu_options,
-    index=_menu_default_index,
+menu = st.session_state.dashboard_active_menu
+st.sidebar.markdown(
+    '<div class="sidebar-navigation-title">메뉴</div>',
+    unsafe_allow_html=True,
 )
+for _group_index, (_group_title, _group_items) in enumerate(_menu_groups):
+    st.sidebar.markdown(
+        f'<div class="sidebar-menu-group-title">{_group_title}</div>',
+        unsafe_allow_html=True,
+    )
+    for _display_name, _internal_name in _group_items:
+        if st.sidebar.button(
+            _display_name,
+            key=f"dashboard_nav_{_menu_name_to_slug.get(_internal_name, _internal_name)}",
+            use_container_width=True,
+            type="primary" if menu == _internal_name else "secondary",
+        ):
+            st.session_state.dashboard_active_menu = _internal_name
+            try:
+                st.query_params["menu"] = _menu_name_to_slug.get(_internal_name, "home")
+            except Exception:
+                pass
+            st.rerun()
+    if _group_index < len(_menu_groups) - 1:
+        st.sidebar.markdown(
+            '<div class="sidebar-menu-divider"></div>',
+            unsafe_allow_html=True,
+        )
 
 # 현재 메뉴를 URL에 반영하여 주소를 그대로 공유하면 해당 메뉴로 직접 진입.
 try:
@@ -14809,8 +14881,8 @@ elif menu == "주간실적":
 # 상품구분
 # ─────────────────────────────────────────────────────────────────────────────
 elif menu == "상품구분":
-    st.markdown('<div class="section-title">상품구분</div>', unsafe_allow_html=True)
-    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품구분 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">상품별 성과</div>', unsafe_allow_html=True)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품별 성과 화면으로 바로 연결됩니다.")
 
     st.markdown('<div class="subsection-title">상품 등급 기준</div>', unsafe_allow_html=True)
     st.caption("평균 주문금액 기준")
@@ -14994,8 +15066,8 @@ elif menu == "상품구분":
 
 
 elif menu == "타겟별베스트상품":
-    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟별베스트상품 화면으로 바로 연결됩니다.")
-    st.markdown('<div class="section-title">타겟별베스트상품</div>', unsafe_allow_html=True)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 타겟별 베스트 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">타겟별 베스트</div>', unsafe_allow_html=True)
     st.caption("선택 기간의 실제 발송 상품을 남성3040 / 남성5060 / 여성3040 / 여성5060별로 구분해 주문금액 높은 순으로 보여줍니다.")
 
     product_dates = pd.to_datetime(products.get("_date"), errors="coerce").dropna()
@@ -15408,7 +15480,7 @@ elif menu == "타겟별베스트상품":
             for key in widget_keys:
                 del st.session_state[key]
             st.session_state.target_best_analysis_notice = (
-                "타겟별베스트상품 분석 조건을 초기화했습니다."
+                "타겟별 베스트 분석 조건을 초기화했습니다."
             )
             st.rerun()
 
@@ -15422,7 +15494,7 @@ elif menu == "타겟별베스트상품":
                 "exclude_ranges": [dict(item) for item in target_best_draft["exclude_ranges"]],
             }
             st.session_state.target_best_analysis_notice = (
-                "타겟별베스트상품 분석 조건을 적용했습니다."
+                "타겟별 베스트 분석 조건을 적용했습니다."
             )
             st.rerun()
 
@@ -15619,8 +15691,8 @@ elif menu == "타겟별베스트상품":
                     )
 
 elif menu == "상품구성비교":
-    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품구성비교 화면으로 바로 연결됩니다.")
-    st.markdown('<div class="section-title">상품구성비교</div>', unsafe_allow_html=True)
+    st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품 구성 비교 화면으로 바로 연결됩니다.")
+    st.markdown('<div class="section-title">상품 구성 비교</div>', unsafe_allow_html=True)
     st.caption(
         "개수·비중은 해당 기간 전체 편성 상품 행 기준 · "
         "최저가 미확보는 발송일 최저가보다 멤버십 혜택가가 높은 상품 · "
@@ -15644,7 +15716,7 @@ elif menu == "상품구성비교":
     product_mix_selected = product_mix_bundle.get("selected_month", "")
     product_mix_monthly = product_mix_bundle.get("monthly", pd.DataFrame())
     if not product_mix_months or product_mix_monthly.empty:
-        st.info("상품구성비교에 사용할 월별 상품 데이터가 없습니다.")
+        st.info("상품 구성 비교에 사용할 월별 상품 데이터가 없습니다.")
     else:
         st.markdown(
             '<div class="subsection-title">월별 상품 구성 비교</div>',
