@@ -12250,21 +12250,6 @@ def _factor_operation_table(
     return pd.DataFrame(rows)
 
 
-def _factor_decomposition(current: dict, previous: dict) -> pd.DataFrame:
-    ps, pc, pv, pa = [float(previous.get(key, 0) or 0) for key in ["발송건수", "CTR", "CVR", "객단가"]]
-    cs, cc, cv, ca = [float(current.get(key, 0) or 0) for key in ["발송건수", "CTR", "CVR", "객단가"]]
-    values = [
-        ("발송건수 영향", (cs - ps) * pc * pv * pa),
-        ("CTR 영향", cs * (cc - pc) * pv * pa),
-        ("CVR 영향", cs * cc * (cv - pv) * pa),
-        ("객단가 영향", cs * cc * cv * (ca - pa)),
-    ]
-    explained = sum(value for _, value in values)
-    actual_delta = float(current.get("주문금액", 0)) - float(previous.get("주문금액", 0))
-    values.append(("기타·집계차이", actual_delta - explained))
-    return pd.DataFrame(values, columns=["요인", "주문금액 영향"])
-
-
 def _factor_driver_table(current: dict, previous: dict) -> pd.DataFrame:
     def _number(value):
         try:
@@ -12276,34 +12261,63 @@ def _factor_driver_table(current: dict, previous: dict) -> pd.DataFrame:
 
     def _rel(cur, prev):
         cur_value, prev_value = _number(cur), _number(prev)
-        return (cur_value - prev_value) / abs(prev_value) if prev_value else 0.0
+        if prev_value:
+            return (cur_value - prev_value) / abs(prev_value)
+        return 1.0 if cur_value > 0 else 0.0
 
-    driver_specs = [
-        ("CTR", previous.get("CTR", 0) * 100, current.get("CTR", 0) * 100, _rel(current.get("CTR", 0), previous.get("CTR", 0)), "%"),
-        ("CVR", previous.get("CVR", 0) * 100, current.get("CVR", 0) * 100, _rel(current.get("CVR", 0), previous.get("CVR", 0)), "%"),
-        ("객단가", previous.get("객단가", 0), current.get("객단가", 0), _rel(current.get("객단가", 0), previous.get("객단가", 0)), "원"),
-        ("발송건수", previous.get("발송건수", 0), current.get("발송건수", 0), _rel(current.get("발송건수", 0), previous.get("발송건수", 0)), "건"),
-        ("300만원 이상 상품 비중", previous.get("300만원 이상 상품_비중", 0), current.get("300만원 이상 상품_비중", 0), (_number(current.get("300만원 이상 상품_비중")) - _number(previous.get("300만원 이상 상품_비중"))) / 100, "%"),
-        ("100만원 미만 상품 비중", previous.get("100만원 미만 상품_비중", 0), current.get("100만원 미만 상품_비중", 0), -(_number(current.get("100만원 미만 상품_비중")) - _number(previous.get("100만원 미만 상품_비중"))) / 100, "%"),
-        ("최저가 미확보 상품 비중", previous.get("최저가 미확보 상품_비중", 0), current.get("최저가 미확보 상품_비중", 0), -(_number(current.get("최저가 미확보 상품_비중")) - _number(previous.get("최저가 미확보 상품_비중"))) / 100, "%"),
-        ("TOP30 상품 포함 비중", previous.get("TOP30 상품 포함_비중", 0), current.get("TOP30 상품 포함_비중", 0), (_number(current.get("TOP30 상품 포함_비중")) - _number(previous.get("TOP30 상품 포함_비중"))) / 100, "%"),
-    ]
+    def _judgment(score):
+        return "상승 요인" if score > 0.005 else (
+            "하락 요인" if score < -0.005 else "영향 제한적"
+        )
+
     rows = []
-    for label, prev, cur, score, unit in driver_specs:
-        if unit == "%":
-            before_text, current_text = f"{_number(prev):.1f}%", f"{_number(cur):.1f}%"
-        elif unit == "원":
-            before_text, current_text = f"{_number(prev):,.0f}원", f"{_number(cur):,.0f}원"
+    for label, key, unit in [
+        ("객단가", "객단가", "원"),
+        ("발송건수", "발송건수", "건"),
+        ("클릭수", "클릭수", "건"),
+        ("CTR", "CTR", "%"),
+    ]:
+        prev_value, cur_value = _number(previous.get(key)), _number(current.get(key))
+        score = _rel(cur_value, prev_value)
+        if unit == "원":
+            prev_text, cur_text = f"{prev_value:,.0f}원", f"{cur_value:,.0f}원"
+            delta_text = f"{cur_value - prev_value:+,.0f}원 ({score * 100:+.1f}%)"
+        elif unit == "건":
+            prev_text, cur_text = f"{prev_value:,.0f}건", f"{cur_value:,.0f}건"
+            delta_text = f"{cur_value - prev_value:+,.0f}건 ({score * 100:+.1f}%)"
         else:
-            before_text, current_text = f"{_number(prev):,.0f}건", f"{_number(cur):,.0f}건"
+            prev_text, cur_text = f"{prev_value * 100:.1f}%", f"{cur_value * 100:.1f}%"
+            delta_text = f"{(cur_value - prev_value) * 100:+.1f}%p"
         rows.append({
-            "요인": label, "비교 기간": before_text, "기준 기간": current_text,
-            "영향도": float(score),
-            "판단": "상승 요인" if score > 0.005 else ("하락 요인" if score < -0.005 else "영향 제한적"),
+            "요인": label,
+            "비교 기간": prev_text,
+            "기준 기간": cur_text,
+            "증감": delta_text,
+            "판단": _judgment(score),
+            "_score": score,
         })
-    out = pd.DataFrame(rows)
-    out["_abs"] = out["영향도"].abs()
-    return out.sort_values("_abs", ascending=False).drop(columns="_abs").reset_index(drop=True)
+
+    for label, inverse in [
+        ("최저가 미확보 상품", True),
+        ("300만원 이상 상품", False),
+        ("100만원 미만 상품", True),
+    ]:
+        prev_count = int(_number(previous.get(f"{label}_개수")))
+        cur_count = int(_number(current.get(f"{label}_개수")))
+        prev_share = _number(previous.get(f"{label}_비중"))
+        cur_share = _number(current.get(f"{label}_비중"))
+        share_delta = cur_share - prev_share
+        score = (-1 if inverse else 1) * share_delta / 100
+        rows.append({
+            "요인": label,
+            "비교 기간": f"{prev_count:,}개 ({prev_share:.1f}%)",
+            "기준 기간": f"{cur_count:,}개 ({cur_share:.1f}%)",
+            "증감": f"{cur_count - prev_count:+,}개 / {share_delta:+.1f}%p",
+            "판단": _judgment(score),
+            "_score": score,
+        })
+
+    return pd.DataFrame(rows)
 
 
 def _factor_trend_table(
@@ -12377,7 +12391,6 @@ def _build_factor_analysis_bundle(
         "compare_period": compare_period,
         "current_metrics": current_metrics,
         "previous_metrics": previous_metrics,
-        "decomposition": _factor_decomposition(current_metrics, previous_metrics),
         "drivers": _factor_driver_table(current_metrics, previous_metrics),
         "products": _factor_product_history_table(
             filtered_products,
@@ -15632,70 +15645,67 @@ elif menu == "실적요인분석":
         "하락" if amount_change is not None and amount_change < -0.005 else "유지"
     )
     driver_table = factor_bundle["drivers"]
-    driver_kind = "상승 요인" if amount_direction == "상승" else "하락 요인"
-    matching_drivers = driver_table[driver_table["판단"].eq(driver_kind)].head(2)
+    driver_kind = (
+        "상승 요인" if amount_direction == "상승"
+        else ("하락 요인" if amount_direction == "하락" else None)
+    )
+    matching_drivers = (
+        driver_table[driver_table["판단"].eq(driver_kind)].copy()
+        if driver_kind else driver_table.copy()
+    )
+    matching_drivers["_abs_score"] = matching_drivers["_score"].abs()
+    matching_drivers = matching_drivers.sort_values("_abs_score", ascending=False).head(2)
     driver_names = matching_drivers["요인"].tolist()
     driver_summary = "·".join(driver_names) if driver_names else "복합 요인"
     st.markdown(
         '<div class="factor-diagnosis">'
         f'<div class="factor-diagnosis-title">종합 진단 · 실적 {amount_direction}</div>'
         f'주문금액은 비교 기간 대비 {_factor_delta_text(amount_change)} 변동했습니다. '
-        f'<b>{_html.escape(driver_summary)}</b>의 영향이 상대적으로 크게 확인됩니다.'
+        f'같은 방향으로 변화한 주요 지표는 <b>{_html.escape(driver_summary)}</b>입니다.'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="subsection-title">주문금액 변동 분해 · 비교 조건</div>', unsafe_allow_html=True)
-    decomp_col, condition_col = st.columns([1.35, 0.8])
-    with decomp_col:
-        decomp_view = factor_bundle["decomposition"].copy()
-        decomp_view["주문금액 영향"] = decomp_view["주문금액 영향"].map(
-            lambda value: f"{float(value) / 10_000:+,.0f}만원"
-        )
-        selectable_dataframe(
-            decomp_view,
-            key=f"factor_decomposition_{hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:8]}",
-            use_container_width=True,
-            hide_index=True,
-        )
-    with condition_col:
-        send_delta = _factor_change(factor_current["발송건수"], factor_previous["발송건수"])
-        factor_current_days = int(
-            (factor_current_period["end"] - factor_current_period["start"]).days + 1
-        )
-        factor_compare_days = int(
-            (factor_compare_period["end"] - factor_compare_period["start"]).days + 1
-        )
-        if factor_current["발송횟수"] == 0 or factor_previous["발송횟수"] == 0:
-            factor_comparison_status = "주의 · 발송 데이터 없음"
-        elif factor_current_days != factor_compare_days:
-            factor_comparison_status = "주의 · 기간 일수 다름"
-        elif factor_ranges_overlap:
-            factor_comparison_status = "주의 · 기간 일부 겹침"
-        elif min(factor_current["발송횟수"], factor_previous["발송횟수"]) * 2 < max(
-            factor_current["발송횟수"], factor_previous["발송횟수"]
-        ):
-            factor_comparison_status = "확인 필요 · 발송횟수 차이 큼"
-        else:
-            factor_comparison_status = "양호"
-        condition_items = [
-            (
-                "기준기간",
-                f'{factor_current_period["start"]:%Y-%m-%d} ~ {factor_current_period["end"]:%Y-%m-%d}',
-            ),
-            (
-                "비교기간",
-                f'{factor_compare_period["start"]:%Y-%m-%d} ~ {factor_compare_period["end"]:%Y-%m-%d}',
-            ),
-            ("비교일수", f"{factor_compare_days}일 → {factor_current_days}일"),
-            ("비교상태", factor_comparison_status),
-            ("발송유형", factor_send_type),
-            ("프로모션", factor_promotion_mode),
-            ("발송횟수", f'{factor_previous["발송횟수"]:,}회 → {factor_current["발송횟수"]:,}회'),
-            ("발송모수", _factor_delta_text(send_delta)),
-            ("CTR 집계", "동일 원천 데이터 기준"),
-        ]
-        for condition_name, condition_value in condition_items:
+    st.markdown('<div class="subsection-title">비교 조건</div>', unsafe_allow_html=True)
+    send_delta = _factor_change(factor_current["발송건수"], factor_previous["발송건수"])
+    factor_current_days = int(
+        (factor_current_period["end"] - factor_current_period["start"]).days + 1
+    )
+    factor_compare_days = int(
+        (factor_compare_period["end"] - factor_compare_period["start"]).days + 1
+    )
+    if factor_current["발송횟수"] == 0 or factor_previous["발송횟수"] == 0:
+        factor_comparison_status = "주의 · 발송 데이터 없음"
+    elif factor_current_days != factor_compare_days:
+        factor_comparison_status = "주의 · 기간 일수 다름"
+    elif factor_ranges_overlap:
+        factor_comparison_status = "주의 · 기간 일부 겹침"
+    elif min(factor_current["발송횟수"], factor_previous["발송횟수"]) * 2 < max(
+        factor_current["발송횟수"], factor_previous["발송횟수"]
+    ):
+        factor_comparison_status = "확인 필요 · 발송횟수 차이 큼"
+    else:
+        factor_comparison_status = "양호"
+    condition_items = [
+        (
+            "기준기간",
+            f'{factor_current_period["start"]:%Y-%m-%d} ~ {factor_current_period["end"]:%Y-%m-%d}',
+        ),
+        (
+            "비교기간",
+            f'{factor_compare_period["start"]:%Y-%m-%d} ~ {factor_compare_period["end"]:%Y-%m-%d}',
+        ),
+        ("비교일수", f"{factor_compare_days}일 → {factor_current_days}일"),
+        ("비교상태", factor_comparison_status),
+        ("발송유형", factor_send_type),
+        ("프로모션", factor_promotion_mode),
+        ("발송횟수", f'{factor_previous["발송횟수"]:,}회 → {factor_current["발송횟수"]:,}회'),
+        ("발송모수", _factor_delta_text(send_delta)),
+        ("CTR 집계", "동일 원천 데이터 기준"),
+    ]
+    condition_columns = st.columns(3)
+    for condition_index, (condition_name, condition_value) in enumerate(condition_items):
+        with condition_columns[condition_index % 3]:
             st.markdown(
                 '<div class="factor-condition">'
                 f'<span class="factor-condition-name">{_html.escape(str(condition_name))}</span>'
@@ -15705,13 +15715,18 @@ elif menu == "실적요인분석":
             )
 
     st.markdown('<div class="subsection-title">주요 실적 요인</div>', unsafe_allow_html=True)
-    driver_view = driver_table.copy()
-    driver_view["영향도"] = driver_view["영향도"].map(lambda value: f"{float(value) * 100:+.1f}%")
+    driver_view = driver_table.drop(columns=["_score"], errors="ignore").copy()
     selectable_dataframe(
         driver_view,
         key=f"factor_drivers_{hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:8]}",
         use_container_width=True,
         hide_index=True,
+    )
+    st.caption(
+        f'상품 개수·비중의 분모는 상품 편성 행 수입니다 '
+        f'· 비교 기간 {int(factor_previous.get("전체 상품수", 0) or 0):,}개 '
+        f'· 기준 기간 {int(factor_current.get("전체 상품수", 0) or 0):,}개. '
+        "최저가 미확보·100만원 미만 상품은 감소할수록 개선으로 판단합니다."
     )
 
     (
