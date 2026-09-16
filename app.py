@@ -11799,6 +11799,47 @@ def _factor_default_compare_index(catalog: list[dict], current_index: int, mode:
     return max(0, current_index - 1)
 
 
+def _factor_custom_period(start, end, label_prefix="") -> dict:
+    """직접 지정한 시작일·종료일을 실적 요인 분석용 기간으로 변환합니다."""
+    start, end = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    day_count = int((end - start).days + 1)
+    date_label = f"{start:%Y-%m-%d} ~ {end:%Y-%m-%d}"
+    return {
+        "key": f"D|{start:%Y-%m-%d}|{end:%Y-%m-%d}",
+        "label": f"{label_prefix}{date_label} · {day_count}일",
+        "start": start,
+        "end": end,
+        "year": int(start.year),
+        "period": date_label,
+    }
+
+
+def _factor_custom_catalog(current_start, current_end, compare_start, compare_end):
+    """직접 기간 비교와 동일 길이 최근 추이에 사용할 기간 목록을 생성합니다."""
+    current_start = pd.Timestamp(current_start).normalize()
+    current_end = pd.Timestamp(current_end).normalize()
+    period_days = max(int((current_end - current_start).days + 1), 1)
+    catalog = []
+    for offset in range(5, -1, -1):
+        period_start = current_start - pd.Timedelta(days=period_days * offset)
+        period_end = period_start + pd.Timedelta(days=period_days - 1)
+        catalog.append(_factor_custom_period(period_start, period_end))
+
+    compare_period = _factor_custom_period(compare_start, compare_end, "비교 · ")
+    keys = [item["key"] for item in catalog]
+    if compare_period["key"] in keys:
+        catalog[keys.index(compare_period["key"])] = compare_period
+    else:
+        catalog.insert(0, compare_period)
+
+    current_key = _factor_custom_period(current_start, current_end)["key"]
+    current_index = next(idx for idx, item in enumerate(catalog) if item["key"] == current_key)
+    compare_index = next(
+        idx for idx, item in enumerate(catalog) if item["key"] == compare_period["key"]
+    )
+    return catalog, current_index, compare_index
+
+
 def _factor_period_rows(df: pd.DataFrame, period: dict) -> pd.DataFrame:
     if df is None or df.empty or "_date" not in df.columns:
         return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
@@ -11963,32 +12004,57 @@ def _factor_first_numeric(group: pd.DataFrame, column: str, default=0.0) -> floa
 def _factor_product_history_table(
     all_products: pd.DataFrame,
     current_products: pd.DataFrame,
+    compare_products: pd.DataFrame,
     current_start,
     current_end,
+    compare_start,
+    compare_end,
 ) -> pd.DataFrame:
     columns = [
-        "알파코드", "쇼라코드", "상품명", "구분", "현재 실적", "직전 실적",
-        "최고 실적", "과거 평균", "현재가", "발송일 최저가", "직전가격",
-        "최고 실적 당시 가격", "실적 증감", "가격 증감", "최근 3회", "실적 영향",
+        "알파코드", "쇼라코드", "상품명", "구분", "현재 실적", "비교기간 실적",
+        "직전 실적", "최고 실적", "과거 평균", "실적 증감", "실적 영향금액",
+        "현재가", "비교기간 가격", "발송일 최저가", "직전가격",
+        "최고 실적 당시 가격", "가격 증감", "최근 3회", "실적 영향",
     ]
-    if current_products is None or current_products.empty:
+    current_products = (
+        current_products.copy() if isinstance(current_products, pd.DataFrame) else pd.DataFrame()
+    )
+    compare_products = (
+        compare_products.copy() if isinstance(compare_products, pd.DataFrame) else pd.DataFrame()
+    )
+    if current_products.empty and compare_products.empty:
         return pd.DataFrame(columns=columns)
     history = all_products.copy()
     history["_fa_key"] = _product_mix_product_keys(history)
     history["_fa_date"] = pd.to_datetime(history.get("_date"), errors="coerce")
     history = history[history["_fa_key"].ne("") & history["_fa_date"].notna()].copy()
-    current = current_products.copy()
-    current["_fa_key"] = _product_mix_product_keys(current)
+    current_products["_fa_key"] = _product_mix_product_keys(current_products)
+    compare_products["_fa_key"] = _product_mix_product_keys(compare_products)
+    current_keys = current_products.loc[current_products["_fa_key"].ne(""), "_fa_key"].tolist()
+    compare_keys = compare_products.loc[compare_products["_fa_key"].ne(""), "_fa_key"].tolist()
+    product_keys = list(dict.fromkeys(current_keys + compare_keys))
     rows = []
-    for key, cur_group in current[current["_fa_key"].ne("")].groupby("_fa_key", sort=False):
+    analysis_end = max(pd.Timestamp(current_end), pd.Timestamp(compare_end))
+    for key in product_keys:
+        cur_group = current_products[current_products["_fa_key"].eq(key)].copy()
+        compare_group = compare_products[compare_products["_fa_key"].eq(key)].copy()
+        source_group = cur_group if not cur_group.empty else compare_group
         hist = history[
             history["_fa_key"].eq(key)
-            & history["_fa_date"].le(pd.Timestamp(current_end))
+            & history["_fa_date"].le(analysis_end)
         ].sort_values("_fa_date", kind="stable")
         prior = hist[hist["_fa_date"].lt(pd.Timestamp(current_start))].copy()
         current_amount = _factor_numeric_sum(cur_group, "주문금액")
+        compare_amount = _factor_numeric_sum(compare_group, "주문금액")
         prior_amount = _factor_first_numeric(prior, "주문금액", 0) if not prior.empty else 0.0
-        current_price = _factor_first_numeric(cur_group.sort_values("_date"), "멤버십혜택가", 0)
+        current_price = (
+            _factor_first_numeric(cur_group.sort_values("_date"), "멤버십혜택가", 0)
+            if not cur_group.empty else 0.0
+        )
+        compare_price = (
+            _factor_first_numeric(compare_group.sort_values("_date"), "멤버십혜택가", 0)
+            if not compare_group.empty else 0.0
+        )
         prior_price = _factor_first_numeric(prior, "멤버십혜택가", 0) if not prior.empty else 0.0
         hist_amounts = pd.to_numeric(hist.get("주문금액", 0), errors="coerce").fillna(0)
         if not hist.empty and not hist_amounts.empty:
@@ -12000,32 +12066,42 @@ def _factor_product_history_table(
             best_amount, best_price = current_amount, current_price
         past_average = _factor_numeric_sum(prior, "주문금액") / len(prior) if len(prior) else 0.0
         recent_values = pd.to_numeric(hist.get("주문금액", 0), errors="coerce").fillna(0).tail(3).tolist()
-        perf_change = (current_amount - prior_amount) / abs(prior_amount) if prior_amount else None
-        price_change = current_price - prior_price if prior_price else None
-        if prior.empty:
-            impact = "신규·비교불가"
+        impact_amount = current_amount - compare_amount
+        perf_change = impact_amount / abs(compare_amount) if compare_amount else None
+        price_change = current_price - compare_price if current_price and compare_price else None
+        if cur_group.empty and not compare_group.empty:
+            impact = "현재 미편성 영향"
+        elif compare_group.empty and not cur_group.empty:
+            impact = "현재 신규 기여"
         elif perf_change is not None and perf_change >= 0.05:
             impact = "상승 기여"
         elif perf_change is not None and perf_change <= -0.05:
             impact = "하락 영향"
         else:
             impact = "성과 유지"
-        alpha = clean_identifier_value(cur_group.get("알파코드", pd.Series([""])).iloc[-1]) if "알파코드" in cur_group.columns else ""
-        shora = clean_identifier_value(cur_group.get("쇼라코드", pd.Series([""])).iloc[-1]) if "쇼라코드" in cur_group.columns else ""
-        name = str(cur_group.get("상품명", pd.Series([""])).iloc[-1]).strip()
-        lowest = _factor_first_numeric(cur_group.sort_values("_date"), "발송일 최저가", 0)
+        alpha = clean_identifier_value(source_group["알파코드"].iloc[-1]) if "알파코드" in source_group.columns else ""
+        shora = clean_identifier_value(source_group["쇼라코드"].iloc[-1]) if "쇼라코드" in source_group.columns else ""
+        name = str(source_group.get("상품명", pd.Series([""])).iloc[-1]).strip()
+        lowest = (
+            _factor_first_numeric(cur_group.sort_values("_date"), "발송일 최저가", 0)
+            if not cur_group.empty else 0.0
+        )
         rows.append({
             "알파코드": alpha or "-", "쇼라코드": shora or "-", "상품명": name,
-            "구분": _factor_operation_label(cur_group), "현재 실적": current_amount,
+            "구분": _factor_operation_label(cur_group) if not cur_group.empty else "비교기간만 편성",
+            "현재 실적": current_amount, "비교기간 실적": compare_amount,
             "직전 실적": prior_amount if not prior.empty else pd.NA, "최고 실적": best_amount,
-            "과거 평균": past_average if not prior.empty else pd.NA, "현재가": current_price,
+            "과거 평균": past_average if not prior.empty else pd.NA,
+            "실적 증감": perf_change, "실적 영향금액": impact_amount,
+            "현재가": current_price if current_price else pd.NA,
+            "비교기간 가격": compare_price if compare_price else pd.NA,
             "발송일 최저가": lowest if lowest else pd.NA,
             "직전가격": prior_price if prior_price else pd.NA,
             "최고 실적 당시 가격": best_price if best_price else pd.NA,
-            "실적 증감": perf_change, "가격 증감": price_change,
+            "가격 증감": price_change,
             "최근 3회": " → ".join(f"{v / 10_000:,.0f}만" for v in recent_values) if recent_values else "-",
             "실적 영향": impact,
-            "_sort": current_amount,
+            "_sort": abs(impact_amount),
         })
     return pd.DataFrame(rows).sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
 
@@ -12304,7 +12380,13 @@ def _build_factor_analysis_bundle(
         "decomposition": _factor_decomposition(current_metrics, previous_metrics),
         "drivers": _factor_driver_table(current_metrics, previous_metrics),
         "products": _factor_product_history_table(
-            filtered_products, current_products, current_period["start"], current_period["end"]
+            filtered_products,
+            current_products,
+            previous_products,
+            current_period["start"],
+            current_period["end"],
+            compare_period["start"],
+            compare_period["end"],
         ),
         "composition": _factor_composition_table(current_metrics, previous_metrics),
         "targets": target_table,
@@ -15316,7 +15398,7 @@ elif menu == "실적요인분석":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 실적 요인 분석 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">실적 요인 분석</div>', unsafe_allow_html=True)
     st.caption(
-        "선택한 주간·월간을 비교 기간과 동일 조건으로 대조해 상승·하락 요인을 확인합니다. "
+        "선택한 주간·월간·직접 지정 기간을 비교 기간과 동일 조건으로 대조해 상승·하락 요인을 확인합니다. "
         "상품별 CTR은 제공되지 않아 상품은 주문금액·가격, CTR은 발송 회차·타겟·SEG 기준으로 분석합니다."
     )
 
@@ -15345,29 +15427,8 @@ elif menu == "실적요인분석":
     control_1, control_2, control_3, control_4, control_5 = st.columns([0.8, 1.35, 1.15, 0.8, 1.0])
     with control_1:
         factor_unit = st.selectbox(
-            "분석 단위", ["주간", "월간"], key="factor_analysis_unit"
+            "분석 단위", ["주간", "월간", "직접 기간"], key="factor_analysis_unit"
         )
-    factor_catalog = _factor_period_catalog(products, factor_unit)
-    if len(factor_catalog) < 2:
-        st.info("비교할 수 있는 기간 데이터가 2개 이상 필요합니다.")
-        st.stop()
-
-    factor_labels = [item["label"] for item in factor_catalog]
-    with control_2:
-        factor_current_label = st.selectbox(
-            "기준 기간", factor_labels, index=len(factor_labels) - 1,
-            key=f"factor_current_{factor_unit}",
-        )
-    factor_current_index = factor_labels.index(factor_current_label)
-
-    with control_3:
-        factor_compare_mode = st.selectbox(
-            "비교 기준", ["직전 기간", "전년 동일 시즌", "직접 선택"],
-            key=f"factor_compare_mode_{factor_unit}",
-        )
-    factor_default_compare = _factor_default_compare_index(
-        factor_catalog, factor_current_index, factor_compare_mode
-    )
     with control_4:
         factor_send_type = st.selectbox(
             "발송 유형", ["전체", "MMS", "RCS"], index=1,
@@ -15379,25 +15440,130 @@ elif menu == "실적요인분석":
             key=f"factor_promotion_{factor_unit}",
         )
 
-    factor_compare_label = st.selectbox(
-        "비교 기간",
-        factor_labels,
-        index=factor_default_compare,
-        key=(
-            f"factor_compare_period_{factor_unit}_{factor_current_index}_"
-            f"{factor_compare_mode}"
-        ),
-        disabled=factor_compare_mode != "직접 선택",
-    )
-    factor_compare_index = factor_labels.index(factor_compare_label)
+    factor_date_values = pd.to_datetime(
+        products.get("_date", pd.Series(dtype="datetime64[ns]")), errors="coerce"
+    ).dropna()
+    if factor_date_values.empty:
+        st.info("실적 요인 분석에 사용할 발송일 데이터가 없습니다.")
+        st.stop()
+    factor_data_min = factor_date_values.min().normalize()
+    factor_data_max = factor_date_values.max().normalize()
+
+    if factor_unit == "직접 기간":
+        factor_default_current_start = max(
+            factor_data_min, factor_data_max - pd.Timedelta(days=6)
+        )
+        with control_2:
+            factor_current_dates = st.date_input(
+                "기준 기간",
+                value=(factor_default_current_start.date(), factor_data_max.date()),
+                min_value=factor_data_min.date(),
+                max_value=factor_data_max.date(),
+                key="factor_custom_current_range",
+            )
+        with control_3:
+            factor_compare_mode = st.selectbox(
+                "비교 기준", ["직전 동일 일수", "전년 동일 기간", "직접 지정"],
+                key="factor_compare_mode_직접기간",
+            )
+        if not isinstance(factor_current_dates, (list, tuple)) or len(factor_current_dates) != 2:
+            st.info("기준 기간의 시작일과 종료일을 모두 선택해주세요.")
+            st.stop()
+        factor_current_start = pd.Timestamp(factor_current_dates[0]).normalize()
+        factor_current_end = pd.Timestamp(factor_current_dates[1]).normalize()
+        factor_period_days = max((factor_current_end - factor_current_start).days + 1, 1)
+
+        if factor_compare_mode == "직전 동일 일수":
+            factor_compare_end = factor_current_start - pd.Timedelta(days=1)
+            factor_compare_start = factor_compare_end - pd.Timedelta(days=factor_period_days - 1)
+        elif factor_compare_mode == "전년 동일 기간":
+            factor_compare_start = factor_current_start - pd.DateOffset(years=1)
+            factor_compare_end = factor_current_end - pd.DateOffset(years=1)
+        else:
+            factor_direct_default_end = factor_current_start - pd.Timedelta(days=1)
+            if factor_direct_default_end < factor_data_min:
+                factor_direct_default_start = factor_data_min
+                factor_direct_default_end = min(
+                    factor_data_max,
+                    factor_direct_default_start + pd.Timedelta(days=factor_period_days - 1),
+                )
+            else:
+                factor_direct_default_start = max(
+                    factor_data_min,
+                    factor_direct_default_end - pd.Timedelta(days=factor_period_days - 1),
+                )
+            factor_compare_dates = st.date_input(
+                "비교 기간",
+                value=(factor_direct_default_start.date(), factor_direct_default_end.date()),
+                min_value=factor_data_min.date(),
+                max_value=factor_data_max.date(),
+                key=(
+                    "factor_custom_compare_range_"
+                    f"{factor_current_start:%Y%m%d}_{factor_current_end:%Y%m%d}"
+                ),
+            )
+            if not isinstance(factor_compare_dates, (list, tuple)) or len(factor_compare_dates) != 2:
+                st.info("비교 기간의 시작일과 종료일을 모두 선택해주세요.")
+                st.stop()
+            factor_compare_start = pd.Timestamp(factor_compare_dates[0]).normalize()
+            factor_compare_end = pd.Timestamp(factor_compare_dates[1]).normalize()
+
+        # 직접 선택 기간과 같은 길이의 이전 5개 구간을 최근 추이에 사용합니다.
+        factor_catalog, factor_current_index, factor_compare_index = _factor_custom_catalog(
+            factor_current_start,
+            factor_current_end,
+            factor_compare_start,
+            factor_compare_end,
+        )
+    else:
+        factor_catalog = _factor_period_catalog(products, factor_unit)
+        if len(factor_catalog) < 2:
+            st.info("비교할 수 있는 기간 데이터가 2개 이상 필요합니다.")
+            st.stop()
+
+        factor_labels = [item["label"] for item in factor_catalog]
+        with control_2:
+            factor_current_label = st.selectbox(
+                "기준 기간", factor_labels, index=len(factor_labels) - 1,
+                key=f"factor_current_{factor_unit}",
+            )
+        factor_current_index = factor_labels.index(factor_current_label)
+        with control_3:
+            factor_compare_mode = st.selectbox(
+                "비교 기준", ["직전 기간", "전년 동일 시즌", "직접 선택"],
+                key=f"factor_compare_mode_{factor_unit}",
+            )
+        factor_default_compare = _factor_default_compare_index(
+            factor_catalog, factor_current_index, factor_compare_mode
+        )
+        factor_compare_label = st.selectbox(
+            "비교 기간",
+            factor_labels,
+            index=factor_default_compare,
+            key=(
+                f"factor_compare_period_{factor_unit}_{factor_current_index}_"
+                f"{factor_compare_mode}"
+            ),
+            disabled=factor_compare_mode != "직접 선택",
+        )
+        factor_compare_index = factor_labels.index(factor_compare_label)
+
+    factor_current_period = factor_catalog[factor_current_index]
+    factor_compare_period = factor_catalog[factor_compare_index]
     if factor_compare_index == factor_current_index:
         st.warning("기준 기간과 비교 기간이 같습니다. 다른 비교 기간을 선택해주세요.")
         st.stop()
+    factor_ranges_overlap = not (
+        factor_compare_period["end"] < factor_current_period["start"]
+        or factor_compare_period["start"] > factor_current_period["end"]
+    )
+    if factor_ranges_overlap:
+        st.warning("기준 기간과 비교 기간이 일부 겹칩니다. 중복 일자의 실적이 양쪽에 함께 반영됩니다.")
 
     factor_signature = (
         factor_unit,
-        factor_catalog[factor_current_index]["key"],
-        factor_catalog[factor_compare_index]["key"],
+        factor_current_period["key"],
+        factor_compare_period["key"],
         factor_send_type,
         factor_promotion_mode,
     )
@@ -15494,7 +15660,35 @@ elif menu == "실적요인분석":
         )
     with condition_col:
         send_delta = _factor_change(factor_current["발송건수"], factor_previous["발송건수"])
+        factor_current_days = int(
+            (factor_current_period["end"] - factor_current_period["start"]).days + 1
+        )
+        factor_compare_days = int(
+            (factor_compare_period["end"] - factor_compare_period["start"]).days + 1
+        )
+        if factor_current["발송횟수"] == 0 or factor_previous["발송횟수"] == 0:
+            factor_comparison_status = "주의 · 발송 데이터 없음"
+        elif factor_current_days != factor_compare_days:
+            factor_comparison_status = "주의 · 기간 일수 다름"
+        elif factor_ranges_overlap:
+            factor_comparison_status = "주의 · 기간 일부 겹침"
+        elif min(factor_current["발송횟수"], factor_previous["발송횟수"]) * 2 < max(
+            factor_current["발송횟수"], factor_previous["발송횟수"]
+        ):
+            factor_comparison_status = "확인 필요 · 발송횟수 차이 큼"
+        else:
+            factor_comparison_status = "양호"
         condition_items = [
+            (
+                "기준기간",
+                f'{factor_current_period["start"]:%Y-%m-%d} ~ {factor_current_period["end"]:%Y-%m-%d}',
+            ),
+            (
+                "비교기간",
+                f'{factor_compare_period["start"]:%Y-%m-%d} ~ {factor_compare_period["end"]:%Y-%m-%d}',
+            ),
+            ("비교일수", f"{factor_compare_days}일 → {factor_current_days}일"),
+            ("비교상태", factor_comparison_status),
             ("발송유형", factor_send_type),
             ("프로모션", factor_promotion_mode),
             ("발송횟수", f'{factor_previous["발송횟수"]:,}회 → {factor_current["발송횟수"]:,}회'),
@@ -15536,20 +15730,24 @@ elif menu == "실적요인분석":
 
     with factor_product_tab:
         st.caption(
-            "알파코드·쇼라코드 기준 동일 상품 이력 비교 · 실적 증감은 현재 대비 직전 실적 · "
-            "가격 증감은 현재가 대비 직전가격"
+            "알파코드·쇼라코드 기준 동일 상품 이력 비교 · 실적·가격 증감은 선택한 비교 기간 대비 · "
+            "현재 빠진 비교 기간 상품도 하락 영향 상품으로 함께 표시"
         )
         factor_products_view = factor_bundle["products"].copy()
         if factor_products_view.empty:
             st.info("선택 기간에 표시할 발송 상품이 없습니다.")
         else:
             for column in [
-                "현재 실적", "직전 실적", "최고 실적", "과거 평균", "현재가",
-                "발송일 최저가", "직전가격", "최고 실적 당시 가격",
+                "현재 실적", "비교기간 실적", "직전 실적", "최고 실적", "과거 평균",
+                "현재가", "비교기간 가격", "발송일 최저가",
+                "직전가격", "최고 실적 당시 가격",
             ]:
                 factor_products_view[column] = factor_products_view[column].map(
                     lambda value: "-" if pd.isna(value) else f"{float(value):,.0f}원"
                 )
+            factor_products_view["실적 영향금액"] = factor_products_view["실적 영향금액"].map(
+                lambda value: f"{float(value):+,.0f}원"
+            )
             factor_products_view["실적 증감"] = factor_products_view["실적 증감"].map(
                 lambda value: "-" if pd.isna(value) else f"{float(value) * 100:+.1f}%"
             )
