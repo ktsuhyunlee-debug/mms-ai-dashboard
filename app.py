@@ -15581,7 +15581,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis",
+        "performance_factor_analysis_v2",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -15644,7 +15644,10 @@ elif menu == "실적요인분석":
     amount_direction = "상승" if amount_change is not None and amount_change > 0.005 else (
         "하락" if amount_change is not None and amount_change < -0.005 else "유지"
     )
-    driver_table = factor_bundle["drivers"]
+    driver_table = factor_bundle.get("drivers", pd.DataFrame()).copy()
+    # 코드 배포 직후 이전 세션 캐시가 남아 있어도 신규 표 구조로 즉시 재계산합니다.
+    if driver_table.empty or "_score" not in driver_table.columns:
+        driver_table = _factor_driver_table(factor_current, factor_previous)
     driver_kind = (
         "상승 요인" if amount_direction == "상승"
         else ("하락 요인" if amount_direction == "하락" else None)
