@@ -9700,15 +9700,39 @@ def _build_daily_menu_bundle(
                 sort_cols.append(_tie_col)
         sday = sday.sort_values(sort_cols, na_position="last")
 
-    sections = []
-    # 선택일의 실제 발송 순서대로 01, 02, 03 ... 이미지 슬롯을 부여합니다.
-    # 숫자가 낮을수록 앞 시간대이며 소재 수에는 제한이 없습니다.
-    for asset_slot, (_, send_row) in enumerate(sday.iterrows(), start=1):
-        raw_time_value = send_row.get("시간대", "")
-        time_value = _v4482_time_key(raw_time_value)
-        material = str(send_row.get("소재", "") or "").strip()
+    # 같은 시간·소재를 타겟별로 나눠 발송한 경우 하나의 소재 화면으로 묶습니다.
+    # 소재가 비어 있을 때만 캠페인명을 보조키로 사용해 서로 다른 발송의 오병합을 방지합니다.
+    grouped_sends = []
+    group_positions = {}
+    for _, raw_send_row in sday.iterrows():
+        time_value = _v4482_time_key(raw_send_row.get("시간대", ""))
+        material = str(raw_send_row.get("소재", "") or "").strip()
         if material.lower() in {"nan", "nat", "none"}:
             material = ""
+        campaign_name = str(raw_send_row.get("캠페인명", "") or "").strip()
+        fallback_key = campaign_name if not material else ""
+        group_key = (time_value, material, fallback_key)
+        if group_key not in group_positions:
+            group_positions[group_key] = len(grouped_sends)
+            grouped_sends.append({
+                "time_value": time_value,
+                "material": material,
+                "send_rows": [],
+                "campaign_names": [],
+            })
+        group = grouped_sends[group_positions[group_key]]
+        group["send_rows"].append(raw_send_row.to_dict())
+        if campaign_name and campaign_name not in group["campaign_names"]:
+            group["campaign_names"].append(campaign_name)
+
+    sections = []
+    # 그룹화된 실제 소재 순서대로 01, 02, 03 ... 이미지 슬롯을 부여합니다.
+    for asset_slot, group in enumerate(grouped_sends, start=1):
+        time_value = group["time_value"]
+        material = group["material"]
+        send_rows = group["send_rows"]
+        campaign_names = group["campaign_names"]
+        send_row = pd.Series(send_rows[0]) if send_rows else pd.Series(dtype="object")
 
         matched = pday.copy()
         if "소재" in matched.columns and material:
@@ -9751,6 +9775,8 @@ def _build_daily_menu_bundle(
 
         sections.append({
             "send_row": send_row.to_dict(),
+            "send_rows": send_rows,
+            "campaign_names": campaign_names,
             "time_value": time_value,
             "material": material,
             "asset_slot": asset_slot,
@@ -10581,6 +10607,13 @@ def _target_age_table(age_stats: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def _daily_campaign_variant(value) -> str:
+    """캠페인명 시작값(v1_, v2_ ...)을 일일 발송 통계 구분값으로 반환합니다."""
+    campaign_name = str(value or "").strip()
+    matched = re.match(r"^(v\d+)(?:_|$)", campaign_name, flags=re.IGNORECASE)
+    return matched.group(1).lower() if matched else ""
+
+
 def _daily_response_time_key(value) -> str:
     s = str(value or "").strip()
     if not s:
@@ -10595,7 +10628,13 @@ def _daily_response_time_key(value) -> str:
     return s
 
 
-def _daily_response_select_rows(raw_df: pd.DataFrame, selected_date, campaign_name: str, time_value: str) -> pd.DataFrame:
+def _daily_response_select_rows(
+    raw_df: pd.DataFrame,
+    selected_date,
+    campaign_name: str,
+    time_value: str,
+    allow_time_fallback: bool = True,
+) -> pd.DataFrame:
     if raw_df is None or not isinstance(raw_df, pd.DataFrame) or raw_df.empty or "_date" not in raw_df.columns:
         return pd.DataFrame()
     day = pd.Timestamp(selected_date).normalize()
@@ -10609,7 +10648,7 @@ def _daily_response_select_rows(raw_df: pd.DataFrame, selected_date, campaign_na
         if not exact.empty:
             return exact.copy()
 
-    if time_value and "시간대" in d.columns:
+    if allow_time_fallback and time_value and "시간대" in d.columns:
         target_time = _daily_response_time_key(time_value)
         by_time = d[d["시간대"].map(_daily_response_time_key).eq(target_time)]
         if not by_time.empty:
@@ -10620,13 +10659,36 @@ def _daily_response_select_rows(raw_df: pd.DataFrame, selected_date, campaign_na
 def _daily_material_response_bundle(
     selected_date,
     time_value: str,
-    campaign_name: str,
+    campaign_name: str | list[str],
     material_age_raw: pd.DataFrame,
     material_region_raw: pd.DataFrame,
 ) -> dict:
     """현재 캠페인의 소재 반응 원본을 한 번 묶어 KPI/차트/표에서 공통 사용합니다."""
-    age_selected = _daily_response_select_rows(material_age_raw, selected_date, campaign_name, time_value)
-    region_selected = _daily_response_select_rows(material_region_raw, selected_date, campaign_name, time_value)
+    campaign_names = (
+        [str(value).strip() for value in campaign_name if str(value).strip()]
+        if isinstance(campaign_name, (list, tuple, set))
+        else [str(campaign_name or "").strip()]
+    )
+    campaign_names = list(dict.fromkeys(value for value in campaign_names if value))
+
+    def _select_group_rows(raw_df: pd.DataFrame) -> pd.DataFrame:
+        selected_parts = [
+            _daily_response_select_rows(
+                raw_df, selected_date, name, time_value, allow_time_fallback=False
+            )
+            for name in campaign_names
+        ]
+        selected_parts = [part for part in selected_parts if not part.empty]
+        if selected_parts:
+            return pd.concat(selected_parts, axis=0).loc[
+                lambda frame: ~frame.index.duplicated(keep="first")
+            ].copy()
+        return _daily_response_select_rows(
+            raw_df, selected_date, "", time_value, allow_time_fallback=True
+        )
+
+    age_selected = _select_group_rows(material_age_raw)
+    region_selected = _select_group_rows(material_region_raw)
     if age_selected.empty and region_selected.empty:
         return {
             "available": False,
@@ -14376,7 +14438,7 @@ elif menu == "일일실적":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 날짜의 일일실적으로 바로 연결됩니다.")
 
     daily_bundle = _menu_cache_get(
-        "daily_menu_bundle",
+        "daily_menu_bundle_v2",
         (str(selected_date),),
         lambda: _build_daily_menu_bundle(products, sends, lowest, selected_date),
         max_entries=10,
@@ -14391,6 +14453,12 @@ elif menu == "일일실적":
     # 오전/오후 또는 소재 단위 분석은 선택일 기준 캐시된 결과를 사용
     for section in daily_bundle["sections"]:
         send_row = pd.Series(section["send_row"])
+        section_send_rows = section.get("send_rows") or [section["send_row"]]
+        send_rows_df = pd.DataFrame(section_send_rows)
+        campaign_names = section.get("campaign_names") or [
+            str(send_row.get("캠페인명", "") or "").strip()
+        ]
+        campaign_names = [name for name in campaign_names if name]
         time_value = section["time_value"]
         material = section["material"]
         asset_slot = int(section.get("asset_slot", 1) or 1)
@@ -14402,26 +14470,38 @@ elif menu == "일일실적":
         st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
 
         asset_key = daily_asset_key(selected_date, time_value, slot_index=asset_slot)
-        campaign_name = str(send_row.get("캠페인명", "")).strip()
+        campaign_name = campaign_names[0] if campaign_names else str(
+            send_row.get("캠페인명", "") or ""
+        ).strip()
 
         response_bundle = _daily_material_response_bundle(
-            selected_date, time_value, campaign_name, material_age_raw, material_region_raw
+            selected_date,
+            time_value,
+            campaign_names or campaign_name,
+            material_age_raw,
+            material_region_raw,
         )
         response_summary = response_bundle.get("summary", {})
         response_available = bool(response_bundle.get("available"))
 
-        raw_send_col = first_col(pd.DataFrame([send_row]), ["발송 성공 건수", "총 발송 건수"])
-        raw_click_col = first_col(pd.DataFrame([send_row]), ["클릭 수(uniq)", "클릭 수"])
-        raw_send_success = float(send_row.get(raw_send_col, 0) or 0) if raw_send_col else 0.0
-        raw_click_uniq = float(send_row.get(raw_click_col, 0) or 0) if raw_click_col else 0.0
+        raw_send_col = first_col(send_rows_df, ["발송 성공 건수", "총 발송 건수"])
+        raw_click_col = first_col(send_rows_df, ["클릭 수(uniq)", "클릭 수"])
+        raw_send_success = (
+            float(pd.to_numeric(send_rows_df[raw_send_col], errors="coerce").fillna(0).sum())
+            if raw_send_col else 0.0
+        )
+        raw_click_uniq = (
+            float(pd.to_numeric(send_rows_df[raw_click_col], errors="coerce").fillna(0).sum())
+            if raw_click_col else 0.0
+        )
         campaign_send_success = float(response_summary.get("success", 0) or 0) if response_available else raw_send_success
         campaign_click_uniq = float(response_summary.get("uniq", 0) or 0) if response_available else raw_click_uniq
         campaign_uctr = float(response_summary.get("uctr", 0) or 0) if response_available else (campaign_click_uniq / campaign_send_success if campaign_send_success else 0.0)
 
         if matched.empty:
-            campaign_orders = float(send_row.get("주문건수", 0) or 0)
-            campaign_qty = float(send_row.get("주문수량", 0) or 0)
-            campaign_amount = float(send_row.get("주문금액", 0) or 0)
+            campaign_orders = _factor_numeric_sum(send_rows_df, "주문건수")
+            campaign_qty = _factor_numeric_sum(send_rows_df, "주문수량")
+            campaign_amount = _factor_numeric_sum(send_rows_df, "주문금액")
         else:
             campaign_orders = float(pd.to_numeric(matched["주문건수"], errors="coerce").fillna(0).sum()) if "주문건수" in matched.columns else 0.0
             campaign_qty = float(pd.to_numeric(matched["주문수량"], errors="coerce").fillna(0).sum()) if "주문수량" in matched.columns else 0.0
@@ -14447,6 +14527,11 @@ elif menu == "일일실적":
         st.markdown(f'<div class="daily-campaign-kpi-grid">{campaign_cards_html}</div>', unsafe_allow_html=True)
 
         image_paths = find_daily_images(asset_key, campaign_name)
+        if not image_paths:
+            for alternate_campaign in campaign_names[1:]:
+                image_paths = find_daily_images(asset_key, alternate_campaign)
+                if image_paths:
+                    break
         message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
@@ -14524,7 +14609,10 @@ elif menu == "일일실적":
         """
         st.markdown(asset_pair_html, unsafe_allow_html=True)
 
-        key_token = hashlib.md5(f"{selected_date}|{time_value}|{campaign_name}".encode("utf-8")).hexdigest()[:10]
+        campaign_key_text = "|".join(campaign_names) if campaign_names else campaign_name
+        key_token = hashlib.md5(
+            f"{selected_date}|{time_value}|{material}|{campaign_key_text}".encode("utf-8")
+        ).hexdigest()[:10]
         render_daily_material_response_analysis(
             selected_date=selected_date,
             time_value=time_value,
@@ -14536,26 +14624,39 @@ elif menu == "일일실적":
         )
 
         # 발송 통계: 상세 표에서는 CTR을 함께 표시
-        # 표시 순서: 성별 → 연령 → SEG → 소재 → URL → 발송건수 → 클릭수 → CTR → CVR → 객단가 → SPM
-        send_col = first_col(pd.DataFrame([send_row]), ["발송 성공 건수", "총 발송 건수"])
-        click_col = first_col(pd.DataFrame([send_row]), ["클릭 수(uniq)", "클릭 수"])
-        send_count = float(send_row.get(send_col, 0)) if send_col else 0
-        click_count = float(send_row.get(click_col, 0)) if click_col else 0
-        orders = float(send_row.get("주문건수", 0))
-        amount = float(send_row.get("주문금액", 0))
-        send_view = pd.DataFrame([{
-            "성별": send_row.get("성별", ""),
-            "연령": send_row.get("연령", ""),
-            "SEG": send_row.get("SEG", ""),
-            "소재": material,
-            "URL": send_row.get("URL", ""),
-            "발송건수": fmt_num(send_count),
-            "클릭수": fmt_num(click_count),
-            "CTR": fmt_pct(click_count / send_count if send_count else 0),
-            "CVR": fmt_pct(orders / click_count if click_count else 0),
-            "객단가": fmt_num(amount / orders if orders else 0),
-            "SPM": f"{(amount/send_count if send_count else 0):.1f}",
-        }])
+        # 표시 순서: 구분(v1/v2) → 성별 → 연령 → SEG → 소재 → URL → 발송건수 → 클릭수 → CTR → CVR → 객단가 → SPM
+        send_col = first_col(send_rows_df, ["발송 성공 건수", "총 발송 건수"])
+        click_col = first_col(send_rows_df, ["클릭 수(uniq)", "클릭 수"])
+
+        def _daily_stat_number(value) -> float:
+            return float(
+                pd.to_numeric(pd.Series([value]), errors="coerce").fillna(0).iloc[0]
+            )
+
+        send_view_rows = []
+        for _, target_send_row in send_rows_df.iterrows():
+            send_count = _daily_stat_number(target_send_row.get(send_col, 0)) if send_col else 0.0
+            click_count = _daily_stat_number(target_send_row.get(click_col, 0)) if click_col else 0.0
+            orders = _daily_stat_number(target_send_row.get("주문건수", 0))
+            amount = _daily_stat_number(target_send_row.get("주문금액", 0))
+            row_material = str(target_send_row.get("소재", "") or "").strip()
+            if row_material.lower() in {"nan", "nat", "none", ""}:
+                row_material = material
+            send_view_rows.append({
+                "구분": _daily_campaign_variant(target_send_row.get("캠페인명", "")),
+                "성별": target_send_row.get("성별", ""),
+                "연령": target_send_row.get("연령", ""),
+                "SEG": target_send_row.get("SEG", ""),
+                "소재": row_material,
+                "URL": target_send_row.get("URL", ""),
+                "발송건수": fmt_num(send_count),
+                "클릭수": fmt_num(click_count),
+                "CTR": fmt_pct(click_count / send_count if send_count else 0),
+                "CVR": fmt_pct(orders / click_count if click_count else 0),
+                "객단가": fmt_num(amount / orders if orders else 0),
+                "SPM": f"{(amount / send_count if send_count else 0):.1f}",
+            })
+        send_view = pd.DataFrame(send_view_rows)
         st.markdown('<div class="subsection-title">발송 통계</div>', unsafe_allow_html=True)
         _daily_send_view = clean_identifier_columns(send_view)
         selectable_dataframe(
