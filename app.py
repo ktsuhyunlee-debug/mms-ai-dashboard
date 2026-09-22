@@ -1010,16 +1010,62 @@ def product_grade(amount: float) -> str:
 
 
 def parse_yyyymmdd_date(series: pd.Series) -> pd.Series:
-    """20260716 같은 숫자·문자 날짜와 일반 날짜를 안전하게 변환합니다."""
+    """20260716·260716 같은 숫자/문자 날짜와 일반 날짜를 안전하게 변환합니다."""
     text = series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    compact_mask = text.str.fullmatch(r"\d{8}")
+    compact8_mask = text.str.fullmatch(r"\d{8}")
+    compact6_mask = text.str.fullmatch(r"\d{6}")
     parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-    parsed.loc[compact_mask] = pd.to_datetime(
-        text.loc[compact_mask], format="%Y%m%d", errors="coerce"
+    parsed.loc[compact8_mask] = pd.to_datetime(
+        text.loc[compact8_mask], format="%Y%m%d", errors="coerce"
     )
-    parsed.loc[~compact_mask] = pd.to_datetime(
-        series.loc[~compact_mask], errors="coerce"
+    parsed.loc[compact6_mask] = pd.to_datetime(
+        text.loc[compact6_mask], format="%y%m%d", errors="coerce"
     )
+    other_mask = ~(compact8_mask | compact6_mask)
+    parsed.loc[other_mask] = pd.to_datetime(
+        series.loc[other_mask], errors="coerce"
+    )
+    return parsed
+
+
+def parse_year_day_date(year_series: pd.Series, day_series: pd.Series) -> pd.Series:
+    """소재 시트의 연도+일자를 실제 발송일로 결합합니다."""
+    parsed = pd.Series(pd.NaT, index=day_series.index, dtype="datetime64[ns]")
+    for idx, (year_value, day_value) in zip(day_series.index, zip(year_series, day_series)):
+        year_text = re.sub(r"\D", "", str(year_value) if pd.notna(year_value) else "")
+        try:
+            year = int(year_text[:4])
+        except (TypeError, ValueError):
+            year = 0
+        if year < 1900 or year > 2200:
+            continue
+
+        if isinstance(day_value, (pd.Timestamp, datetime)) and not pd.isna(day_value):
+            day_ts = pd.Timestamp(day_value)
+            parsed.loc[idx] = pd.Timestamp(year=year, month=day_ts.month, day=day_ts.day)
+            continue
+
+        day_text = str(day_value).strip() if pd.notna(day_value) else ""
+        day_text = re.sub(r"\.0+$", "", day_text)
+        if not day_text or day_text.lower() in {"nan", "nat", "none"}:
+            continue
+        digits = re.sub(r"\D", "", day_text)
+        candidate = pd.NaT
+        if len(digits) == 8:
+            candidate = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
+        elif len(digits) == 6:
+            candidate = pd.to_datetime(digits, format="%y%m%d", errors="coerce")
+        elif 1 <= len(digits) <= 4 and re.fullmatch(r"\d+(?:\.0+)?", day_text):
+            mmdd = digits.zfill(4)
+            candidate = pd.to_datetime(f"{year}{mmdd}", format="%Y%m%d", errors="coerce")
+        else:
+            cleaned = (
+                day_text.replace("년", "-").replace("월", "-").replace("일", "")
+                .replace("/", "-").replace(".", "-")
+            )
+            candidate = pd.to_datetime(f"{year}-{cleaned}", errors="coerce")
+        if pd.notna(candidate):
+            parsed.loc[idx] = pd.Timestamp(candidate).normalize()
     return parsed
 
 
@@ -1030,6 +1076,8 @@ def normalize_product(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("상품 시트에서 발송일/날짜/일자 열을 찾을 수 없습니다.")
     d["_date"] = parse_yyyymmdd_date(d[date_col])
     d = d[d["_date"].notna()].copy()
+    time_col = first_col(d, ["시간대", "발송시간", "시간"])
+    d["시간대"] = d[time_col].map(_v4482_time_key) if time_col else ""
     for c in ["정상가", "멤버십혜택가", "할인율", "전시순서", "주문건수", "주문수량", "주문금액", "발송일 최저가"]:
         if c in d.columns:
             d[c] = num(d[c])
@@ -1105,7 +1153,7 @@ def normalize_material_age_raw(df: pd.DataFrame | None) -> pd.DataFrame:
         "클릭수(Uniq)": first_col(d, ["클릭수(Uniq)", "클릭 수(Uniq)", "클릭수(uniq)", "클릭 수(uniq)"]),
         "CTR(Uniq)": first_col(d, ["CTR(Uniq)", "CTR(uniq)", "반응율(uniq)", "반응율(Uniq)"]),
     }
-    if cmap["캠페인명"] is None or cmap["발송일"] is None:
+    if cmap["발송일"] is None:
         return pd.DataFrame(columns=cols)
     out = pd.DataFrame(index=d.index)
     for key in ["캠페인명", "발송일", "시간대", "성별", "연령"]:
@@ -1125,7 +1173,7 @@ def normalize_material_age_raw(df: pd.DataFrame | None) -> pd.DataFrame:
     for key in ["성공률", "CTR", "CTR(Uniq)"]:
         src = cmap.get(key)
         out[key] = _normalize_response_percent(d[src]) if src else 0.0
-    valid = out["캠페인명"].ne("") & out["_date"].notna() & out["연령"].ne("")
+    valid = out["_date"].notna() & out["연령"].ne("")
     valid &= ~out["연령"].str.contains(r"합계|총\s*합계", regex=True, na=False)
     return out.loc[valid, cols].reset_index(drop=True)
 
@@ -1153,7 +1201,7 @@ def normalize_material_region_raw(df: pd.DataFrame | None) -> pd.DataFrame:
         "클릭수(Uniq)": first_col(d, ["클릭수(Uniq)", "클릭 수(Uniq)", "클릭수(uniq)", "클릭 수(uniq)"]),
         "CTR(Uniq)": first_col(d, ["CTR(Uniq)", "CTR(uniq)", "반응율(uniq)", "반응율(Uniq)"]),
     }
-    if cmap["캠페인명"] is None or cmap["발송일"] is None:
+    if cmap["발송일"] is None:
         return pd.DataFrame(columns=cols)
     out = pd.DataFrame(index=d.index)
     for key in ["캠페인명", "발송일", "시간대", "시도", "시군구"]:
@@ -1169,17 +1217,24 @@ def normalize_material_region_raw(df: pd.DataFrame | None) -> pd.DataFrame:
     for key in ["성공률", "CTR", "CTR(Uniq)"]:
         src = cmap.get(key)
         out[key] = _normalize_response_percent(d[src]) if src else 0.0
-    valid = out["캠페인명"].ne("") & out["_date"].notna()
+    valid = out["_date"].notna()
     valid &= ~out["시군구"].str.contains(r"합계|총\s*합계", regex=True, na=False)
     return out.loc[valid, cols].reset_index(drop=True)
 
 def normalize_send(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    date_col = first_col(d, ["발송일시2", "발송일", "날짜", "일자"])
-    if date_col is None:
-        raise ValueError("소재 시트에서 발송일시2/발송일/날짜/일자 열을 찾을 수 없습니다.")
-    d["_date"] = parse_yyyymmdd_date(d[date_col])
+    year_col = first_col(d, ["연도", "년도", "Year", "year"])
+    day_col = first_col(d, ["일자"])
+    date_col = first_col(d, ["발송일", "날짜", "발송일시2"])
+    if year_col and day_col:
+        d["_date"] = parse_year_day_date(d[year_col], d[day_col])
+    elif date_col:
+        d["_date"] = parse_yyyymmdd_date(d[date_col])
+    else:
+        raise ValueError("소재 시트에서 연도/일자 또는 발송일 열을 찾을 수 없습니다.")
     d = d[d["_date"].notna()].copy()
+    time_col = first_col(d, ["시간대", "발송시간", "시간"])
+    d["시간대"] = d[time_col].map(_v4482_time_key) if time_col else ""
     for c in [
         "상품수", "URL", "총 발송 건수", "발송 성공 건수",
         "클릭 수", "클릭 수(uniq)", "반응율", "반응율(uniq)",
@@ -1194,53 +1249,36 @@ def normalize_send(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_message(df: pd.DataFrame | None) -> pd.DataFrame:
-    """문구 시트 정규화.
-    캠페인명 예: 260722_1000_쇼핑라운지_멤특1_크리넥스
-    → 날짜/시간/소재를 파생해 일일실적 매칭에 활용.
-    """
+    """문구 시트의 발송일·시간대를 실제 문구 연결키로 정규화합니다."""
     if df is None or df.empty:
-        return pd.DataFrame(columns=["캠페인명", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
+        return pd.DataFrame(columns=["캠페인명", "발송일", "시간대", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
 
     d = df.copy()
     campaign_col = first_col(d, ["캠페인명", "캠페인", "Campaign", "campaign"])
+    date_col = first_col(d, ["발송일", "날짜", "일자"])
+    time_col = first_col(d, ["시간대", "발송시간", "시간"])
+    material_col = first_col(d, ["소재", "소재명"])
     message_col = first_col(d, ["MMS문구", "MMS 문구", "발송문구", "문구"])
 
-    if campaign_col is None or message_col is None:
-        return pd.DataFrame(columns=["캠페인명", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
+    if date_col is None or time_col is None or message_col is None:
+        return pd.DataFrame(columns=["캠페인명", "발송일", "시간대", "MMS문구", "_msg_date", "_msg_time", "_msg_material"])
 
-    out = d[[campaign_col, message_col]].copy()
-    out.columns = ["캠페인명", "MMS문구"]
-    out["캠페인명"] = out["캠페인명"].fillna("").astype(str).str.strip()
+    out = pd.DataFrame(index=d.index)
+    out["캠페인명"] = d[campaign_col].fillna("").astype(str).str.strip() if campaign_col else ""
+    out["발송일"] = d[date_col]
+    out["시간대"] = d[time_col].map(_v4482_time_key)
+    out["MMS문구"] = d[message_col]
     out["MMS문구"] = out["MMS문구"].apply(
         clean_mms_message if "clean_mms_message" in globals() else lambda x: str(x)
     )
-
-    def _parse_campaign(name):
-        s = str(name or "").strip()
-        parts = s.split("_")
-        date_key, time_key, material = "", "", ""
-        if parts:
-            m = re.fullmatch(r"(\d{6})", parts[0])
-            if m:
-                raw = m.group(1)
-                date_key = f"20{raw[:2]}-{raw[2:4]}-{raw[4:6]}"
-        if len(parts) >= 2 and re.fullmatch(r"\d{3,4}", parts[1] or ""):
-            tm = parts[1].zfill(4)
-            time_key = f"{tm[:2]}:{tm[2:]}"
-        # 쇼핑라운지 다음 토큰을 소재로 사용
-        if "쇼핑라운지" in parts:
-            i = parts.index("쇼핑라운지")
-            if i + 1 < len(parts):
-                material = parts[i + 1].strip()
-        elif len(parts) >= 4:
-            material = parts[3].strip()
-        return pd.Series([date_key, time_key, material])
-
-    parsed = out["캠페인명"].apply(_parse_campaign)
-    parsed.columns = ["_msg_date", "_msg_time", "_msg_material"]
-    out = pd.concat([out, parsed], axis=1)
-
-    out = out[out["캠페인명"].ne("")].drop_duplicates("캠페인명", keep="last")
+    out["_msg_date"] = parse_yyyymmdd_date(out["발송일"]).dt.strftime("%Y-%m-%d")
+    out["_msg_time"] = out["시간대"]
+    out["_msg_material"] = (
+        d[material_col].fillna("").astype(str).str.strip() if material_col else ""
+    )
+    out = out[
+        out["_msg_date"].notna() & out["_msg_time"].ne("") & out["MMS문구"].ne("")
+    ].drop_duplicates(["_msg_date", "_msg_time", "_msg_material"], keep="last")
     return out.reset_index(drop=True)
 
 def normalize_lowest(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -2354,17 +2392,54 @@ def _v4482_time_key(v):
         if 0 <= x < 1:
             mins=int(round(x*1440)) % 1440
             return f"{mins//60:02d}:{mins%60:02d}"
+        if x.is_integer():
+            compact = str(int(x)).zfill(4)
+            hour, minute = int(compact[:-2]), int(compact[-2:])
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return f"{hour:02d}:{minute:02d}"
     s=str(v).strip()
     if s.lower() in {"", "nan", "nat", "none"}:
         return ""
-    m=re.search(r"(\\d{1,2}):(\\d{2})(?::\\d{2})?", s)
+    # 10:00 / 10시 / 10시 30분 형식
+    m=re.search(r"(?<!\d)(\d{1,2})\s*(?::|시)\s*(\d{1,2})?", s)
     if m:
-        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    # 1000 / 1200 / 1600 및 숫자로 저장된 Excel 시간값
+    compact_match = re.fullmatch(r"(\d{3,4})(?:\.0+)?", s)
+    if compact_match:
+        compact = compact_match.group(1).zfill(4)
+        hour, minute = int(compact[:-2]), int(compact[-2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    try:
+        numeric_value = float(s)
+        if 0 <= numeric_value < 1:
+            mins = int(round(numeric_value * 1440)) % 1440
+            return f"{mins//60:02d}:{mins%60:02d}"
+    except (TypeError, ValueError):
+        pass
     try:
         z=pd.to_datetime(s, errors="coerce")
         return z.strftime("%H:%M") if pd.notna(z) else ""
     except Exception:
         return ""
+
+
+def _daily_row_time(row) -> str:
+    """각 시트의 실제 시간대 열만 공통 HH:MM 값으로 반환합니다."""
+    return _v4482_time_key(row.get("시간대", ""))
+
+
+def _daily_time_minutes(value) -> int:
+    """정렬 가능한 분 단위 시간값. 미확인 시간은 하루 끝으로 보냅니다."""
+    time_key = _v4482_time_key(value)
+    if not time_key:
+        return 24 * 60
+    hour, minute = time_key.split(":", 1)
+    return int(hour) * 60 + int(minute)
 
 def _v4489_target_aware_recovery(cumulative: pd.DataFrame) -> dict:
     """타겟 변경으로 발생한 일시적 저성과와 다음 회차 회복을 구분합니다."""
@@ -2563,7 +2638,7 @@ def generate_insight_report(row: pd.Series, history: pd.DataFrame, issue: dict |
         week_value = str(row.get("주차", "")).strip()
         week_rows = cumulative[cumulative["주차"].astype(str).eq(week_value)].copy()
         if not week_rows.empty:
-            unique_keys = [c for c in ["_date", "시간대", "캠페인명", "소재", "성별", "연령", "SEG"] if c in week_rows.columns]
+            unique_keys = [c for c in ["_date", "시간대", "소재", "성별", "연령", "SEG"] if c in week_rows.columns]
             week_unique = week_rows.drop_duplicates(unique_keys) if unique_keys else week_rows
             if len(week_unique) >= 2 and (week_unique["주문금액"] >= 3_000_000).all():
                 add(96, "성과", f"금주 총 {len(week_unique)}회 편성, 모든 운영에서 300만원 이상 주문금액 기록", "주차 내 고유 발송 기준", "높음")
@@ -3128,27 +3203,20 @@ def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str
 
     matched = pw.copy()
 
-    # 1) 발송일 일치
+    # 상품 시트 발송일 + 시간대와 소재 시트 발송일 + 시간대를 정확히 연결합니다.
     send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
     if pd.notna(send_date) and "_date" in matched.columns:
         product_dates = pd.to_datetime(matched["_date"], errors="coerce").dt.normalize()
-        date_match = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
-        if not date_match.empty:
-            matched = date_match
+        matched = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
 
-    # 2) 캠페인명이 양쪽에 있으면 정확 일치를 최우선
-    send_campaign_col = first_col(pd.DataFrame([send_row]), ["캠페인명", "캠페인"])
-    product_campaign_col = first_col(matched, ["캠페인명", "캠페인"])
-    if send_campaign_col and product_campaign_col:
-        campaign_value = str(send_row.get(send_campaign_col, "") or "").strip()
-        if campaign_value and campaign_value.lower() not in {"nan", "none", "nat"}:
-            campaign_match = matched[
-                matched[product_campaign_col].fillna("").astype(str).str.strip().eq(campaign_value)
-            ]
-            if not campaign_match.empty:
-                matched = campaign_match
+    send_time = _v4482_time_key(send_row.get("시간대", "")) if "_v4482_time_key" in globals() else str(send_row.get("시간대", "")).strip()
+    if send_time and "시간대" in matched.columns:
+        if "_v4482_time_key" in globals():
+            time_keys = matched["시간대"].map(_v4482_time_key)
+            matched = matched[time_keys.eq(send_time)]
+        else:
+            matched = matched[matched["시간대"].fillna("").astype(str).str.strip().eq(send_time)]
 
-    # 3) 소재 + 시간대로 보조 매칭
     material = str(send_row.get("소재", "") or "").strip()
     if material and material.lower() not in {"nan", "none", "nat"} and "소재" in matched.columns:
         material_match = matched[
@@ -3156,16 +3224,6 @@ def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str
         ]
         if not material_match.empty:
             matched = material_match
-
-    send_time = _v4482_time_key(send_row.get("시간대", "")) if "_v4482_time_key" in globals() else str(send_row.get("시간대", "")).strip()
-    if send_time and "시간대" in matched.columns:
-        if "_v4482_time_key" in globals():
-            time_keys = matched["시간대"].map(_v4482_time_key)
-            time_match = matched[time_keys.eq(send_time)]
-        else:
-            time_match = matched[matched["시간대"].fillna("").astype(str).str.strip().eq(send_time)]
-        if not time_match.empty:
-            matched = time_match
 
     if matched.empty:
         return "상품 상세 없음"
@@ -8723,15 +8781,10 @@ def _daily_image_natural_key(path: Path):
     return tuple(int(part) if part.isdigit() else part for part in parts)
 
 
-def find_daily_images(asset_key: str, campaign_name: str = "") -> list[Path]:
-    """한 발송 소재에 연결된 모든 이미지를 반환합니다.
-
-    우선순위
-    1) 캠페인명 정확 파일 및 캠페인명_01, _02 ... 파생 이미지
-    2) YYYYMMDD_01, _02 ... 소재순번 파일 및 그 뒤의 캐러셀 이미지
+def find_daily_images(asset_key: str) -> list[Path]:
+    """실제 발송일과 시간순 슬롯키에 연결된 모든 이미지를 반환합니다.
 
     예: 20260819_03.jpg / 20260819_03_01.jpg / 20260819_03_02.jpg
-    또는 캠페인명.jpg / 캠페인명_01.jpg / 캠페인명_02.jpg
     """
     if not IMAGE_DIR.exists():
         return []
@@ -8741,17 +8794,6 @@ def find_daily_images(asset_key: str, campaign_name: str = "") -> list[Path]:
         path for path in IMAGE_DIR.iterdir()
         if path.is_file() and path.suffix.lower() in valid_suffixes
     ]
-
-    campaign_name = str(campaign_name or "").strip()
-    if campaign_name:
-        campaign_matches = [
-            path for path in image_files
-            if path.stem == campaign_name
-            or path.stem.startswith(campaign_name + "_")
-            or path.stem.startswith(campaign_name + "-")
-        ]
-        if campaign_matches:
-            return sorted(campaign_matches, key=_daily_image_natural_key)
 
     asset_key = str(asset_key or "").strip()
     if asset_key:
@@ -8785,47 +8827,34 @@ def extract_mms_message(
     send_row: pd.Series,
     messages_df: pd.DataFrame | None = None,
 ) -> str:
-    """일일실적 MMS 문구 추출.
-    1) 문구 시트의 날짜+소재(+시간) 파생키
-    2) 캠페인명 정확/부분일치
-    3) 연결 상품 로우 MMS문구
-    4) send_row 자체 문구
-    """
+    """문구 시트의 발송일+시간대를 기준으로 MMS 문구를 연결합니다."""
     candidate_cols = ["MMS문구", "MMS 문구", "발송문구", "문구"]
     material = str(send_row.get("소재", "") or "").strip()
-    campaign_name = str(send_row.get("캠페인명", "") or "").strip()
-    send_time = _v4482_time_key(send_row.get("시간대", ""))
+    send_time = _daily_row_time(send_row)
 
-    # 연결된 상품의 날짜/시간을 fallback으로 활용
+    # 소재 시트의 실제 발송일을 최우선으로 사용합니다.
     date_key = ""
-    if isinstance(matched, pd.DataFrame) and not matched.empty:
+    send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
+    if pd.notna(send_date):
+        date_key = pd.Timestamp(send_date).strftime("%Y-%m-%d")
+    elif isinstance(matched, pd.DataFrame) and not matched.empty:
         if "_date" in matched.columns:
             dt = pd.to_datetime(matched["_date"].iloc[0], errors="coerce")
             if pd.notna(dt):
                 date_key = dt.strftime("%Y-%m-%d")
-        if not send_time and "시간대" in matched.columns:
-            vals = [_v4482_time_key(v) for v in matched["시간대"].tolist()]
-            vals = [v for v in vals if v]
-            if vals:
-                send_time = vals[0]
 
-    if messages_df is not None and not messages_df.empty:
+    if messages_df is not None and not messages_df.empty and date_key and send_time:
         work = messages_df.copy()
 
-        # 1. 날짜 + 소재 기준을 최우선. 7/22처럼 소재 시트 시간대가 NaN이어도 정확 매칭.
+        # 문구 시트 발송일 + 시간대를 모두 정확히 일치시킵니다.
         if "_msg_date" in work.columns and date_key:
-            cur = work[work["_msg_date"].astype(str).eq(date_key)]
-            if not cur.empty:
-                work = cur
+            work = work[work["_msg_date"].astype(str).eq(date_key)]
+
+        if "_msg_time" in work.columns and send_time:
+            work = work[work["_msg_time"].map(_v4482_time_key).eq(send_time)]
 
         if "_msg_material" in work.columns and material:
             cur = work[work["_msg_material"].fillna("").astype(str).str.strip().eq(material)]
-            if not cur.empty:
-                work = cur
-
-        # 시간은 유효할 때만 보조 필터
-        if "_msg_time" in work.columns and send_time:
-            cur = work[work["_msg_time"].astype(str).eq(send_time)]
             if not cur.empty:
                 work = cur
 
@@ -8835,33 +8864,7 @@ def extract_mms_message(
             if vals:
                 return vals[-1]
 
-        # 2. 캠페인명 정확 일치 또는 소재 포함 부분 일치 fallback
-        work = messages_df.copy()
-        if campaign_name and "캠페인명" in work.columns:
-            exact = work[work["캠페인명"].astype(str).str.strip().eq(campaign_name)]
-            if not exact.empty:
-                cleaned = clean_mms_message(exact.iloc[-1]["MMS문구"])
-                if cleaned:
-                    return cleaned
-
-        if material and "캠페인명" in work.columns:
-            partial = work[
-                work["캠페인명"].astype(str).str.contains(
-                    re.escape(f"_{material}_"), regex=True, na=False
-                )
-            ]
-            if partial.empty:
-                partial = work[
-                    work["캠페인명"].astype(str).str.contains(
-                        re.escape(f"_{material}"), regex=True, na=False
-                    )
-                ]
-            if not partial.empty:
-                cleaned = clean_mms_message(partial.iloc[-1]["MMS문구"])
-                if cleaned:
-                    return cleaned
-
-    # 3. 상품 로우의 MMS문구
+    # 과거 파일 호환: 각 로우에 문구가 직접 들어 있는 경우만 보조 사용합니다.
     for col in candidate_cols:
         if isinstance(matched, pd.DataFrame) and col in matched.columns:
             for value in matched[col].tolist():
@@ -9687,43 +9690,35 @@ def _build_daily_menu_bundle(
     sday = sends.loc[send_dates.eq(selected_ts)].copy()
     pday = merge_lowest_price(pday, lowest)
 
-    if "시간대" in sday.columns:
-        # Excel time/문자열/시간 객체를 모두 HH:MM으로 정규화해 실제 시간순으로 정렬합니다.
-        sday["_sort_time_key"] = sday["시간대"].map(_v4482_time_key)
-        sday["_sort_time"] = pd.to_datetime(
-            "2000-01-01 " + sday["_sort_time_key"].replace("", pd.NA).astype("string"),
-            errors="coerce",
-        )
-        sort_cols = ["_sort_time"]
-        for _tie_col in ["소재", "캠페인명"]:
+    if not sday.empty:
+        # 소재 시트 시간대가 '1000'·'10시' 형식이어도
+        # 10:00 → 12:00 → 16:00의 실제 시간 오름차순으로 고정합니다.
+        sday["_sort_time_key"] = sday.apply(_daily_row_time, axis=1)
+        sday["_sort_time_minutes"] = sday["_sort_time_key"].map(_daily_time_minutes)
+        sort_cols = ["_sort_time_minutes"]
+        for _tie_col in ["소재"]:
             if _tie_col in sday.columns:
                 sort_cols.append(_tie_col)
-        sday = sday.sort_values(sort_cols, na_position="last")
+        sday = sday.sort_values(sort_cols, kind="stable", na_position="last")
 
-    # 같은 시간·소재를 타겟별로 나눠 발송한 경우 하나의 소재 화면으로 묶습니다.
-    # 소재가 비어 있을 때만 캠페인명을 보조키로 사용해 서로 다른 발송의 오병합을 방지합니다.
+    # 소재 시트의 실제 발송시간·소재가 같은 타겟 분할행은 하나의 소재 화면으로 묶습니다.
     grouped_sends = []
     group_positions = {}
     for _, raw_send_row in sday.iterrows():
-        time_value = _v4482_time_key(raw_send_row.get("시간대", ""))
+        time_value = _daily_row_time(raw_send_row)
         material = str(raw_send_row.get("소재", "") or "").strip()
         if material.lower() in {"nan", "nat", "none"}:
             material = ""
-        campaign_name = str(raw_send_row.get("캠페인명", "") or "").strip()
-        fallback_key = campaign_name if not material else ""
-        group_key = (time_value, material, fallback_key)
+        group_key = (time_value, material)
         if group_key not in group_positions:
             group_positions[group_key] = len(grouped_sends)
             grouped_sends.append({
                 "time_value": time_value,
                 "material": material,
                 "send_rows": [],
-                "campaign_names": [],
             })
         group = grouped_sends[group_positions[group_key]]
         group["send_rows"].append(raw_send_row.to_dict())
-        if campaign_name and campaign_name not in group["campaign_names"]:
-            group["campaign_names"].append(campaign_name)
 
     sections = []
     # 그룹화된 실제 소재 순서대로 01, 02, 03 ... 이미지 슬롯을 부여합니다.
@@ -9731,22 +9726,24 @@ def _build_daily_menu_bundle(
         time_value = group["time_value"]
         material = group["material"]
         send_rows = group["send_rows"]
-        campaign_names = group["campaign_names"]
         send_row = pd.Series(send_rows[0]) if send_rows else pd.Series(dtype="object")
 
         matched = pday.copy()
+
+        # 상품 시트 발송일·시간대와 소재 시트 발송일·시간대를 정확히 연결합니다.
+        if not matched.empty:
+            if time_value:
+                product_time_keys = matched.apply(_daily_row_time, axis=1)
+                matched = matched[product_time_keys.eq(time_value)]
+            else:
+                matched = matched.iloc[0:0].copy()
+
         if "소재" in matched.columns and material:
             material_match = matched[
                 matched["소재"].fillna("").astype(str).str.strip().eq(material)
             ]
             if not material_match.empty:
                 matched = material_match
-
-        if "시간대" in matched.columns and time_value:
-            time_keys = matched["시간대"].map(_v4482_time_key)
-            time_match = matched[time_keys.eq(time_value)]
-            if not time_match.empty:
-                matched = time_match
 
         if not matched.empty and not time_value and "시간대" in matched.columns:
             matched_times = [
@@ -9776,7 +9773,6 @@ def _build_daily_menu_bundle(
         sections.append({
             "send_row": send_row.to_dict(),
             "send_rows": send_rows,
-            "campaign_names": campaign_names,
             "time_value": time_value,
             "material": material,
             "asset_slot": asset_slot,
@@ -9805,7 +9801,7 @@ def _encode_daily_image_cached(path_text: str, modified_ns: int) -> tuple[str, s
 
 
 def _weekly_send_carousel_match_products(send_row: pd.Series, pw: pd.DataFrame) -> pd.DataFrame:
-    """선택 주차의 한 발송행에 연결되는 상품 로우를 일자→캠페인→소재→시간 순으로 찾습니다."""
+    """상품 시트와 소재 시트의 실제 발송일·시간대로 상품을 연결합니다."""
     if pw is None or pw.empty:
         return pd.DataFrame()
 
@@ -9814,18 +9810,13 @@ def _weekly_send_carousel_match_products(send_row: pd.Series, pw: pd.DataFrame) 
     send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
     if pd.notna(send_date) and "_date" in matched.columns:
         product_dates = pd.to_datetime(matched["_date"], errors="coerce").dt.normalize()
-        date_match = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
-        if not date_match.empty:
-            matched = date_match
+        matched = matched[product_dates.eq(pd.Timestamp(send_date).normalize())]
 
-    campaign_value = str(send_row.get("캠페인명", "") or "").strip()
-    product_campaign_col = first_col(matched, ["캠페인명", "캠페인"])
-    if campaign_value and campaign_value.lower() not in {"nan", "none", "nat"} and product_campaign_col:
-        campaign_match = matched[
-            matched[product_campaign_col].fillna("").astype(str).str.strip().eq(campaign_value)
-        ]
-        if not campaign_match.empty:
-            matched = campaign_match
+    send_time = _daily_row_time(send_row)
+    if send_time and "시간대" in matched.columns:
+        matched = matched[matched["시간대"].map(_v4482_time_key).eq(send_time)]
+    elif not send_time:
+        matched = matched.iloc[0:0].copy()
 
     material = str(send_row.get("소재", "") or "").strip()
     if material and material.lower() not in {"nan", "none", "nat"} and "소재" in matched.columns:
@@ -9834,12 +9825,6 @@ def _weekly_send_carousel_match_products(send_row: pd.Series, pw: pd.DataFrame) 
         ]
         if not material_match.empty:
             matched = material_match
-
-    send_time = _v4482_time_key(send_row.get("시간대", ""))
-    if send_time and "시간대" in matched.columns:
-        time_match = matched[matched["시간대"].map(_v4482_time_key).eq(send_time)]
-        if not time_match.empty:
-            matched = time_match
 
     sort_cols = [c for c in ["전시순서", "상품명"] if c in matched.columns]
     if sort_cols:
@@ -9923,7 +9908,7 @@ def _build_weekly_send_carousel_items(
         errors="coerce",
     )
     sort_cols = ["_carousel_date", "_carousel_time"]
-    for tie_col in ["소재", "캠페인명"]:
+    for tie_col in ["소재"]:
         if tie_col in send_rows.columns:
             sort_cols.append(tie_col)
     send_rows = send_rows.sort_values(sort_cols, kind="stable", na_position="last").copy()
@@ -9935,13 +9920,12 @@ def _build_weekly_send_carousel_items(
         send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
         slot = int(send_row.get("_carousel_asset_slot", 1) or 1)
         time_value = _v4482_time_key(send_row.get("시간대", ""))
-        campaign_name = str(send_row.get("캠페인명", "") or "").strip()
         material = str(send_row.get("소재", "") or "").strip()
         if material.lower() in {"nan", "none", "nat"}:
             material = ""
 
         asset_key = daily_asset_key(send_date, time_value, slot_index=slot)
-        image_paths = find_daily_images(asset_key, campaign_name)
+        image_paths = find_daily_images(asset_key)
         message_text = extract_mms_message(matched, send_row, messages_df)
         product_view = _weekly_send_carousel_product_view(matched)
 
@@ -9959,7 +9943,6 @@ def _build_weekly_send_carousel_items(
             "date": send_date,
             "time": time_value,
             "material": material,
-            "campaign_name": campaign_name,
             "target": " ".join(target_parts),
             "asset_key": asset_key,
             "image_paths": image_paths,
@@ -10051,7 +10034,7 @@ def render_weekly_send_carousel(
         else:
             image_body = (
                 '<div class="asset-empty">images 폴더에<br>'
-                + _html.escape(f"{item['asset_key']} 또는 캠페인명으로 연결되는 이미지가 없습니다.")
+                + _html.escape(f"{item['asset_key']}로 연결되는 이미지가 없습니다.")
                 + '</div>'
             )
         st.markdown(
@@ -10631,9 +10614,7 @@ def _daily_response_time_key(value) -> str:
 def _daily_response_select_rows(
     raw_df: pd.DataFrame,
     selected_date,
-    campaign_name: str,
     time_value: str,
-    allow_time_fallback: bool = True,
 ) -> pd.DataFrame:
     if raw_df is None or not isinstance(raw_df, pd.DataFrame) or raw_df.empty or "_date" not in raw_df.columns:
         return pd.DataFrame()
@@ -10642,53 +10623,23 @@ def _daily_response_select_rows(
     if d.empty:
         return d
 
-    campaign = str(campaign_name or "").strip().replace(r"\_", "_")
-    if campaign and "캠페인명" in d.columns:
-        exact = d[_normalize_campaign_text(d["캠페인명"]).eq(campaign)]
-        if not exact.empty:
-            return exact.copy()
-
-    if allow_time_fallback and time_value and "시간대" in d.columns:
+    if not time_value:
+        return pd.DataFrame()
+    if "시간대" in d.columns:
         target_time = _daily_response_time_key(time_value)
-        by_time = d[d["시간대"].map(_daily_response_time_key).eq(target_time)]
-        if not by_time.empty:
-            return by_time.copy()
-    return pd.DataFrame()
+        d = d[d["시간대"].map(_daily_response_time_key).eq(target_time)]
+    return d.copy()
 
 
 def _daily_material_response_bundle(
     selected_date,
     time_value: str,
-    campaign_name: str | list[str],
     material_age_raw: pd.DataFrame,
     material_region_raw: pd.DataFrame,
 ) -> dict:
-    """현재 캠페인의 소재 반응 원본을 한 번 묶어 KPI/차트/표에서 공통 사용합니다."""
-    campaign_names = (
-        [str(value).strip() for value in campaign_name if str(value).strip()]
-        if isinstance(campaign_name, (list, tuple, set))
-        else [str(campaign_name or "").strip()]
-    )
-    campaign_names = list(dict.fromkeys(value for value in campaign_names if value))
-
-    def _select_group_rows(raw_df: pd.DataFrame) -> pd.DataFrame:
-        selected_parts = [
-            _daily_response_select_rows(
-                raw_df, selected_date, name, time_value, allow_time_fallback=False
-            )
-            for name in campaign_names
-        ]
-        selected_parts = [part for part in selected_parts if not part.empty]
-        if selected_parts:
-            return pd.concat(selected_parts, axis=0).loc[
-                lambda frame: ~frame.index.duplicated(keep="first")
-            ].copy()
-        return _daily_response_select_rows(
-            raw_df, selected_date, "", time_value, allow_time_fallback=True
-        )
-
-    age_selected = _select_group_rows(material_age_raw)
-    region_selected = _select_group_rows(material_region_raw)
+    """실제 발송일·시간대의 소재 반응 원본을 KPI/차트/표에서 공통 사용합니다."""
+    age_selected = _daily_response_select_rows(material_age_raw, selected_date, time_value)
+    region_selected = _daily_response_select_rows(material_region_raw, selected_date, time_value)
     if age_selected.empty and region_selected.empty:
         return {
             "available": False,
@@ -10712,7 +10663,6 @@ def _daily_material_response_bundle(
 def render_daily_material_response_analysis(
     selected_date,
     time_value: str,
-    campaign_name: str,
     material_age_raw: pd.DataFrame,
     material_region_raw: pd.DataFrame,
     key_prefix: str,
@@ -10720,7 +10670,7 @@ def render_daily_material_response_analysis(
 ) -> None:
     """일일실적에서 성·연령과 지역 반응을 압축 배치합니다. 전체 KPI는 상단 캠페인 카드에서 표시합니다."""
     bundle = response_bundle or _daily_material_response_bundle(
-        selected_date, time_value, campaign_name, material_age_raw, material_region_raw
+        selected_date, time_value, material_age_raw, material_region_raw
     )
     if not bundle.get("available"):
         return
@@ -10917,7 +10867,7 @@ def render_home_material_response_analysis(
     material_region_raw: pd.DataFrame,
     key_prefix: str,
 ) -> None:
-    """Home 분석 조건 적용 후 실제 남은 발송일과 정확히 동일한 날짜만 반응 분포에 사용합니다."""
+    """Home 조건에 남은 소재 시트의 발송일·시간대와 같은 반응 데이터만 사용합니다."""
     if applied_sends is None or applied_sends.empty or "_date" not in applied_sends.columns:
         st.info("적용된 분석 조건에 해당하는 반응 데이터가 없습니다.")
         return
@@ -10930,24 +10880,29 @@ def render_home_material_response_analysis(
         return
 
     applied_date_index = pd.DatetimeIndex(applied_dates)
-    applied_campaign_col = first_col(applied_sends, ["캠페인명", "캠페인", "Campaign", "campaign"])
-    applied_campaigns = set()
-    if applied_campaign_col:
-        applied_campaigns = set(
-            _normalize_campaign_text(applied_sends[applied_campaign_col])
-            .loc[lambda values: values.ne("")]
-            .tolist()
-        )
+    applied_time_series = (
+        applied_sends["시간대"].map(_v4482_time_key)
+        if "시간대" in applied_sends.columns else pd.Series("", index=applied_sends.index)
+    )
+    applied_pairs = set(zip(
+        pd.to_datetime(applied_sends["_date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+        applied_time_series,
+    ))
+    applied_pairs = {(day, time) for day, time in applied_pairs if day and time}
 
     def _home_raw_slice(raw: pd.DataFrame) -> pd.DataFrame:
         if raw is None or raw.empty or "_date" not in raw.columns:
             return pd.DataFrame()
+        if not applied_pairs:
+            return pd.DataFrame()
         raw_dates = pd.to_datetime(raw["_date"], errors="coerce").dt.normalize()
         mask = raw_dates.notna() & raw_dates.isin(applied_date_index)
-        raw_campaign_col = first_col(raw, ["캠페인명", "캠페인", "Campaign", "campaign"])
-        if applied_campaigns and raw_campaign_col:
-            raw_campaigns = _normalize_campaign_text(raw[raw_campaign_col])
-            mask &= raw_campaigns.isin(applied_campaigns)
+        if "시간대" in raw.columns:
+            raw_pairs = pd.Series(list(zip(
+                raw_dates.dt.strftime("%Y-%m-%d"),
+                raw["시간대"].map(_v4482_time_key),
+            )), index=raw.index)
+            mask &= raw_pairs.isin(applied_pairs)
         return raw.loc[mask].copy()
 
     age_selected = _home_raw_slice(material_age_raw)
@@ -11149,36 +11104,32 @@ def _build_target_history_view_fast(
         return pd.DataFrame()
 
     send_count_col = first_col(target_sends, ["발송 성공 건수", "총 발송 건수"])
-    campaign_col_send = first_col(target_sends, ["캠페인명", "캠페인", "소재"])
-    campaign_col_product = first_col(history, ["캠페인명", "캠페인", "소재"])
 
     send_lookup = target_sends.copy()
     send_lookup["_date_key"] = pd.to_datetime(send_lookup["_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    send_lookup["_time_key"] = (
+        send_lookup["시간대"].map(_v4482_time_key)
+        if "시간대" in send_lookup.columns else ""
+    )
     send_lookup["_send_count"] = (
         pd.to_numeric(send_lookup[send_count_col], errors="coerce").fillna(0)
         if send_count_col else 0
     )
-    if campaign_col_send:
-        send_lookup["_campaign_key"] = send_lookup[campaign_col_send].fillna("").astype(str).str.strip()
-        campaign_map = send_lookup.groupby(["_date_key", "_campaign_key"])["_send_count"].sum().to_dict()
-    else:
-        campaign_map = {}
-    date_map = send_lookup.groupby("_date_key")["_send_count"].sum().to_dict()
+    send_time_map = send_lookup.groupby(["_date_key", "_time_key"])["_send_count"].sum().to_dict()
 
     history["발송일"] = pd.to_datetime(history["_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    history["_time_key"] = (
+        history["시간대"].map(_v4482_time_key) if "시간대" in history.columns else ""
+    )
     if "SEG" in history.columns:
         history["SEG"] = history["SEG"].map(clean_identifier_value)
     else:
         history["SEG"] = ""
     price_series = history["멤버십혜택가"] if "멤버십혜택가" in history.columns else pd.Series(0, index=history.index)
     history["행사가"] = pd.to_numeric(price_series, errors="coerce").fillna(0)
-    history["_campaign_key"] = (
-        history[campaign_col_product].fillna("").astype(str).str.strip()
-        if campaign_col_product else ""
-    )
     history["_send_count"] = [
-        campaign_map.get((date_key, campaign_key), date_map.get(date_key, 0))
-        for date_key, campaign_key in zip(history["발송일"], history["_campaign_key"])
+        send_time_map.get((date_key, time_key), 0)
+        for date_key, time_key in zip(history["발송일"], history["_time_key"])
     ]
     amounts = pd.to_numeric(history.get("주문금액", 0), errors="coerce").fillna(0)
     send_counts = pd.to_numeric(history["_send_count"], errors="coerce").fillna(0)
@@ -12201,23 +12152,40 @@ def _factor_composition_table(current: dict, previous: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _factor_message_first_line(material: str, messages_df: pd.DataFrame) -> str:
-    if messages_df is None or messages_df.empty:
+def _factor_message_first_line(
+    send_rows: pd.DataFrame,
+    material: str,
+    messages_df: pd.DataFrame,
+) -> str:
+    if messages_df is None or messages_df.empty or send_rows is None or send_rows.empty:
         return "-"
     material = str(material or "").strip()
+    source = send_rows.copy()
+    source["_message_date"] = pd.to_datetime(source.get("_date"), errors="coerce")
+    source["_message_time"] = (
+        source["시간대"].map(_v4482_time_key) if "시간대" in source.columns else ""
+    )
+    source = source.sort_values(["_message_date", "_message_time"], kind="stable")
+    latest = source.iloc[-1]
+    date_key = latest["_message_date"].strftime("%Y-%m-%d") if pd.notna(latest["_message_date"]) else ""
+    time_key = str(latest.get("_message_time", "") or "")
+    if not date_key or not time_key:
+        return "-"
+
     work = messages_df.copy()
-    campaign_col = first_col(work, ["캠페인명", "캠페인"])
     message_col = first_col(work, ["MMS문구", "MMS 문구", "발송문구", "문구"])
     if not message_col:
         return "-"
-    if material and campaign_col:
-        matched = work[
-            work[campaign_col].fillna("").astype(str).str.contains(
-                re.escape(material), case=False, na=False, regex=True
-            )
+    if "_msg_date" in work.columns and date_key:
+        work = work[work["_msg_date"].astype(str).eq(date_key)]
+    if "_msg_time" in work.columns and time_key:
+        work = work[work["_msg_time"].map(_v4482_time_key).eq(time_key)]
+    if material and "_msg_material" in work.columns:
+        material_match = work[
+            work["_msg_material"].fillna("").astype(str).str.strip().eq(material)
         ]
-        if not matched.empty:
-            work = matched
+        if not material_match.empty:
+            work = material_match
     values = [clean_mms_message(value) for value in work[message_col].tolist()]
     values = [value for value in values if value]
     if not values:
@@ -12254,13 +12222,16 @@ def _factor_material_table(
     rows = []
     for _, row in compared.iterrows():
         material = str(row.get("_fa_material", "") or "-")
+        material_send_rows = current[
+            current["_fa_material"].fillna("").astype(str).eq(material)
+        ]
         ctr_delta = float(row.get("CTR_증감", 0))
         spm_delta = float(row.get("SPM_증감", 0))
         score = ctr_delta * 100 + spm_delta / max(abs(float(row.get("비교_SPM", 0))), 1)
         rows.append({
             "소재": material,
             "대표 타겟": target_lookup.get(material, "-"),
-            "MMS 문구 첫 줄": _factor_message_first_line(material, messages_df),
+            "MMS 문구 첫 줄": _factor_message_first_line(material_send_rows, material, messages_df),
             "CTR": float(row.get("현재_CTR", 0)),
             "CTR 증감(%p)": ctr_delta * 100,
             "SPM": float(row.get("현재_SPM", 0)),
@@ -12639,7 +12610,7 @@ if "products" not in st.session_state:
     st.session_state.synced_at = None
     st.session_state.google_sync_error = None
     st.session_state.lowest = pd.DataFrame()
-    st.session_state.messages = pd.DataFrame(columns=["캠페인명", "MMS문구"])
+    st.session_state.messages = pd.DataFrame(columns=["발송일", "시간대", "캠페인명", "MMS문구"])
     st.session_state.promotions = pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"])
     st.session_state.schedule_exclusion_rules = pd.DataFrame(columns=["구분", "조건값", "제외타겟", "비고"])
     st.session_state.overall_performance = pd.DataFrame(columns=["일자", "주문금액", "_date"])
@@ -12761,7 +12732,9 @@ if st.session_state.products is None or st.session_state.sends is None:
 products = st.session_state.products
 sends = st.session_state.sends
 lowest = st.session_state.get("lowest", pd.DataFrame())
-messages = st.session_state.get("messages", pd.DataFrame(columns=["캠페인명", "MMS문구"]))
+messages = st.session_state.get(
+    "messages", pd.DataFrame(columns=["발송일", "시간대", "캠페인명", "MMS문구"])
+)
 promotions = st.session_state.get("promotions", pd.DataFrame(columns=["프로모션명", "_start_date", "_end_date", "스킴"]))
 schedule_exclusion_rules = st.session_state.get(
     "schedule_exclusion_rules",
@@ -14438,7 +14411,7 @@ elif menu == "일일실적":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 날짜의 일일실적으로 바로 연결됩니다.")
 
     daily_bundle = _menu_cache_get(
-        "daily_menu_bundle_v2",
+        "daily_menu_bundle_v4",
         (str(selected_date),),
         lambda: _build_daily_menu_bundle(products, sends, lowest, selected_date),
         max_entries=10,
@@ -14455,10 +14428,6 @@ elif menu == "일일실적":
         send_row = pd.Series(section["send_row"])
         section_send_rows = section.get("send_rows") or [section["send_row"]]
         send_rows_df = pd.DataFrame(section_send_rows)
-        campaign_names = section.get("campaign_names") or [
-            str(send_row.get("캠페인명", "") or "").strip()
-        ]
-        campaign_names = [name for name in campaign_names if name]
         time_value = section["time_value"]
         material = section["material"]
         asset_slot = int(section.get("asset_slot", 1) or 1)
@@ -14470,14 +14439,10 @@ elif menu == "일일실적":
         st.markdown(f'<div class="section-title">🕒 {part_title}</div>', unsafe_allow_html=True)
 
         asset_key = daily_asset_key(selected_date, time_value, slot_index=asset_slot)
-        campaign_name = campaign_names[0] if campaign_names else str(
-            send_row.get("캠페인명", "") or ""
-        ).strip()
 
         response_bundle = _daily_material_response_bundle(
             selected_date,
             time_value,
-            campaign_names or campaign_name,
             material_age_raw,
             material_region_raw,
         )
@@ -14526,19 +14491,17 @@ elif menu == "일일실적":
         )
         st.markdown(f'<div class="daily-campaign-kpi-grid">{campaign_cards_html}</div>', unsafe_allow_html=True)
 
-        image_paths = find_daily_images(asset_key, campaign_name)
-        if not image_paths:
-            for alternate_campaign in campaign_names[1:]:
-                image_paths = find_daily_images(asset_key, alternate_campaign)
-                if image_paths:
-                    break
+        image_paths = find_daily_images(asset_key)
         message_text = extract_mms_message(matched, send_row, messages)
 
         st.markdown('<div class="subsection-title">발송 소재</div>', unsafe_allow_html=True)
 
         import html
 
-        image_state_key = f"daily_image_index_{selected_date}_{asset_slot}_{hashlib.md5(campaign_name.encode('utf-8')).hexdigest()[:8]}"
+        image_state_key = (
+            f"daily_image_index_{selected_date}_{asset_slot}_"
+            f"{hashlib.md5(f'{time_value}|{material}'.encode('utf-8')).hexdigest()[:8]}"
+        )
         image_count = len(image_paths)
         current_image_index = int(st.session_state.get(image_state_key, 0) or 0)
         if image_count <= 0:
@@ -14586,7 +14549,7 @@ elif menu == "일일실적":
         else:
             image_body = (
                 '<div class="asset-empty">images 폴더에<br>'
-                + html.escape(f"{asset_key} 또는 캠페인명으로 연결되는 이미지가 없습니다.")
+                + html.escape(f"{asset_key}로 연결되는 이미지가 없습니다.")
                 + '</div>'
             )
 
@@ -14609,14 +14572,12 @@ elif menu == "일일실적":
         """
         st.markdown(asset_pair_html, unsafe_allow_html=True)
 
-        campaign_key_text = "|".join(campaign_names) if campaign_names else campaign_name
         key_token = hashlib.md5(
-            f"{selected_date}|{time_value}|{material}|{campaign_key_text}".encode("utf-8")
+            f"{selected_date}|{time_value}|{material}".encode("utf-8")
         ).hexdigest()[:10]
         render_daily_material_response_analysis(
             selected_date=selected_date,
             time_value=time_value,
-            campaign_name=campaign_name,
             material_age_raw=material_age_raw,
             material_region_raw=material_region_raw,
             key_prefix=f"daily_response_{key_token}",
