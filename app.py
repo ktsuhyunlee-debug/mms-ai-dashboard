@@ -3178,22 +3178,116 @@ def merge_lowest_price(product_df: pd.DataFrame, lowest_df: pd.DataFrame | None 
     return d
 
 
+def _weekly_send_type_series(df: pd.DataFrame) -> pd.Series:
+    """주간 그래프에서 MMS/RCS 색상을 구분하기 위한 발송유형을 반환합니다."""
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+
+    def _normalize(value) -> str:
+        raw = str(value or "").strip()
+        upper = raw.upper()
+        if "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw:
+            return "RCS"
+        if "MMS" in upper or "멀티미디어" in raw:
+            return "MMS"
+        return ""
+
+    channel_col = first_col(df, [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+    ])
+    channel = (
+        df[channel_col].map(_normalize)
+        if channel_col else pd.Series("", index=df.index, dtype="object")
+    )
+    text_cols = [
+        col for col in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]
+        if col in df.columns
+    ]
+    if text_cols:
+        fallback = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).map(_normalize)
+        blank = channel.eq("")
+        channel.loc[blank] = fallback.loc[blank]
+    return channel.replace("", "MMS")
+
+
+def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
+    """v1/v2 분할행을 같은 발송일·요일·시간대·발송유형 단위로 합산합니다."""
+    if sw is None or sw.empty:
+        return pd.DataFrame()
+
+    d = sw.copy()
+    d["_graph_date"] = pd.to_datetime(d.get("_date"), errors="coerce").dt.normalize()
+    d["_graph_time"] = (
+        d["시간대"].map(_v4482_time_key)
+        if "시간대" in d.columns else ""
+    )
+    if "요일" in d.columns:
+        d["_graph_weekday"] = d["요일"].fillna("").astype(str).str.strip()
+    else:
+        weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+        d["_graph_weekday"] = d["_graph_date"].dt.dayofweek.map(weekday_map)
+    d["_graph_channel"] = _weekly_send_type_series(d)
+    material_col = first_col(d, ["소재", "소재명"])
+    d["_graph_material"] = (
+        d[material_col].fillna("").astype(str).str.strip() if material_col else ""
+    )
+
+    send_col = first_col(d, ["발송 성공 건수", "총 발송 건수"])
+    click_all_col = first_col(d, ["클릭 수", "클릭 수(uniq)"])
+    click_uniq_col = first_col(d, ["클릭 수(uniq)", "클릭 수"])
+    numeric_sources = {
+        "_graph_send": send_col,
+        "_graph_click_all": click_all_col,
+        "_graph_click_uniq": click_uniq_col,
+        "주문금액": "주문금액" if "주문금액" in d.columns else None,
+        "주문수량": "주문수량" if "주문수량" in d.columns else None,
+        "상품수": "상품수" if "상품수" in d.columns else None,
+    }
+    for target, source in numeric_sources.items():
+        d[target] = (
+            pd.to_numeric(d[source], errors="coerce").fillna(0)
+            if source else 0.0
+        )
+
+    base_keys = ["_graph_date", "_graph_weekday", "_graph_time", "_graph_channel"]
+    # 같은 소재의 v1/v2는 실적·클릭은 합산하고 상품수는 한 번만 반영합니다.
+    by_material = d.groupby(base_keys + ["_graph_material"], as_index=False, dropna=False).agg(
+        _graph_send=("_graph_send", "sum"),
+        _graph_click_all=("_graph_click_all", "sum"),
+        _graph_click_uniq=("_graph_click_uniq", "sum"),
+        주문금액=("주문금액", "sum"),
+        주문수량=("주문수량", "sum"),
+        상품수=("상품수", "max"),
+    )
+    grouped = by_material.groupby(base_keys, as_index=False, dropna=False).agg(
+        _graph_send=("_graph_send", "sum"),
+        _graph_click_all=("_graph_click_all", "sum"),
+        _graph_click_uniq=("_graph_click_uniq", "sum"),
+        주문금액=("주문금액", "sum"),
+        주문수량=("주문수량", "sum"),
+        상품수=("상품수", "sum"),
+    )
+    grouped["요일"] = grouped["_graph_weekday"]
+    grouped["시간대"] = grouped["_graph_time"]
+    grouped["_date"] = grouped["_graph_date"]
+    grouped["클릭 수"] = grouped["_graph_click_all"]
+    grouped["클릭 수(uniq)"] = grouped["_graph_click_uniq"]
+    grouped["반응율"] = safe_div(grouped["_graph_click_all"], grouped["_graph_send"])
+    grouped["반응율(uniq)"] = safe_div(grouped["_graph_click_uniq"], grouped["_graph_send"])
+    grouped = grouped.sort_values(
+        ["_graph_date", "_graph_time", "_graph_channel"], kind="stable"
+    ).reset_index(drop=True)
+    return grouped
+
+
 def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
-    """동일 요일·시간·소재가 여러 발송행이어도 그래프에서 겹치지 않게 고유 라벨을 만듭니다."""
-    bases = [
-        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('소재','')}"
+    """합산 회차의 요일·시간대·발송유형 라벨을 만듭니다."""
+    return [
+        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('_graph_channel','MMS')}"
         for _, r in df.iterrows()
     ]
-    totals = pd.Series(bases).value_counts().to_dict() if bases else {}
-    seen = {}
-    labels = []
-    for base in bases:
-        seen[base] = seen.get(base, 0) + 1
-        if totals.get(base, 0) > 1:
-            labels.append(f"{base}<br>#{seen[base]}")
-        else:
-            labels.append(base)
-    return labels
 
 
 def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str:
@@ -3259,24 +3353,31 @@ def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str
 
 
 def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go.Figure:
-    f = sw.sort_values("_date").copy()
+    f = _weekly_graph_aggregate(sw)
     labels = _weekly_send_chart_labels(f)
     hover_details = [
         _weekly_product_hover_for_send(row, pw)
         for _, row in f.iterrows()
     ]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Bar(
-            x=labels, y=f["주문금액"], name="주문금액",
-            marker_color="#70ad47",
-            text=[fmt_num(v) for v in f["주문금액"]],
-            textposition="inside",
-            customdata=hover_details,
-            hovertemplate="%{customdata}<extra></extra>",
-        ),
-        secondary_y=False,
-    )
+    channel_colors = {"MMS": "#70ad47", "RCS": "#8b5cf6"}
+    for channel in ["MMS", "RCS"]:
+        mask = f["_graph_channel"].eq(channel)
+        if not mask.any():
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=[label for label, keep in zip(labels, mask) if keep],
+                y=f.loc[mask, "주문금액"],
+                name=f"{channel} 주문금액",
+                marker_color=channel_colors[channel],
+                text=[fmt_num(v) for v in f.loc[mask, "주문금액"]],
+                textposition="inside",
+                customdata=[detail for detail, keep in zip(hover_details, mask) if keep],
+                hovertemplate="%{customdata}<extra></extra>",
+            ),
+            secondary_y=False,
+        )
     fig.add_trace(
         go.Scatter(
             x=labels, y=f["주문수량"], name="주문수량",
@@ -3300,19 +3401,24 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(tickformat=",", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 상품 실적", x=0.5, xanchor="center", font=dict(size=23)),
+        title=dict(text="상품 실적", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
-        barmode="overlay",
-        xaxis=dict(automargin=True, tickfont=dict(size=10)),
+        barmode="group",
+        xaxis=dict(
+            automargin=True,
+            tickfont=dict(size=10),
+            categoryorder="array",
+            categoryarray=labels,
+        ),
         legend=dict(orientation="h", y=-.24),
     )
     return fig
 
 
 def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
-    f = sw.sort_values("_date").copy()
+    f = _weekly_graph_aggregate(sw)
     labels = _weekly_send_chart_labels(f)
     click_all = first_col(f, ["클릭 수", "클릭 수(uniq)"])
     click_uniq = first_col(f, ["클릭 수(uniq)", "클릭 수"])
@@ -3320,24 +3426,33 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     ctr_uniq = first_col(f, ["반응율(uniq)", "반응율"])
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Bar(
-            x=labels, y=f[click_all], name="클릭 수",
-            marker_color="#5b9bd5",
-            text=[fmt_num(v) for v in f[click_all]],
-            textposition="inside",
-        ),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=labels, y=f[click_uniq], name="클릭 수(uniq)",
-            marker_color="#a5a5a5",
-            text=[fmt_num(v) for v in f[click_uniq]],
-            textposition="inside",
-        ),
-        secondary_y=False,
-    )
+    click_colors = {
+        "MMS": ("#5b9bd5", "#a5a5a5"),
+        "RCS": ("#8b5cf6", "#c4b5fd"),
+    }
+    for channel in ["MMS", "RCS"]:
+        mask = f["_graph_channel"].eq(channel)
+        if not mask.any():
+            continue
+        channel_labels = [label for label, keep in zip(labels, mask) if keep]
+        fig.add_trace(
+            go.Bar(
+                x=channel_labels, y=f.loc[mask, click_all], name=f"{channel} 클릭 수",
+                marker_color=click_colors[channel][0],
+                text=[fmt_num(v) for v in f.loc[mask, click_all]],
+                textposition="inside",
+            ),
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Bar(
+                x=channel_labels, y=f.loc[mask, click_uniq], name=f"{channel} 클릭 수(uniq)",
+                marker_color=click_colors[channel][1],
+                text=[fmt_num(v) for v in f.loc[mask, click_uniq]],
+                textposition="inside",
+            ),
+            secondary_y=False,
+        )
     fig.add_trace(
         go.Scatter(
             x=labels, y=f[ctr_all] * 100, name="반응율",
@@ -3361,12 +3476,17 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
     fig.update_yaxes(ticksuffix="%", showgrid=False, secondary_y=True)
     fig.update_layout(
-        title=dict(text="MMS 발송 통계", x=0.5, xanchor="center", font=dict(size=23)),
+        title=dict(text="발송 통계", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
         barmode="group",
-        xaxis=dict(automargin=True, tickfont=dict(size=10)),
+        xaxis=dict(
+            automargin=True,
+            tickfont=dict(size=10),
+            categoryorder="array",
+            categoryarray=labels,
+        ),
         legend=dict(orientation="h", y=-.24),
     )
     return fig
@@ -15074,7 +15194,7 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle",
+        "weekly_core_bundle_v2",
         (int(selected_year), str(week)),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
