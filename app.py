@@ -10011,13 +10011,18 @@ def _build_weekly_send_carousel_items(
     sw: pd.DataFrame,
     messages_df: pd.DataFrame | None = None,
 ) -> list[dict]:
-    """선택 주차 발송건을 실제 발송 순서대로 소재·문구·상품표 묶음으로 만듭니다."""
+    """일일실적과 같은 기준으로 주간 소재·문구·상품표 묶음을 만듭니다.
+
+    같은 날짜·시간·소재를 타겟별(v1/v2 포함)로 나눠 발송한 행은 하나의
+    소재 화면으로 묶습니다. 이미지 슬롯도 원본 행 수가 아니라 이 묶음의
+    실제 시간순으로 01, 02, 03 ... 을 부여합니다.
+    """
     if sw is None or sw.empty:
         return []
 
     send_rows = sw.copy()
     send_rows["_carousel_date"] = pd.to_datetime(send_rows.get("_date"), errors="coerce").dt.normalize()
-    send_rows["_carousel_time_key"] = send_rows.get("시간대", pd.Series("", index=send_rows.index)).map(_v4482_time_key)
+    send_rows["_carousel_time_key"] = send_rows.apply(_daily_row_time, axis=1)
     send_rows["_carousel_time"] = pd.to_datetime(
         "2000-01-01 " + send_rows["_carousel_time_key"].replace("", pd.NA).astype("string"),
         errors="coerce",
@@ -10027,38 +10032,76 @@ def _build_weekly_send_carousel_items(
         if tie_col in send_rows.columns:
             sort_cols.append(tie_col)
     send_rows = send_rows.sort_values(sort_cols, kind="stable", na_position="last").copy()
-    send_rows["_carousel_asset_slot"] = send_rows.groupby("_carousel_date", dropna=False).cumcount() + 1
 
-    items = []
-    for _, send_row in send_rows.iterrows():
-        matched = _weekly_send_carousel_match_products(send_row, pw)
-        send_date = pd.to_datetime(send_row.get("_date"), errors="coerce")
-        slot = int(send_row.get("_carousel_asset_slot", 1) or 1)
-        time_value = _v4482_time_key(send_row.get("시간대", ""))
-        material = str(send_row.get("소재", "") or "").strip()
+    # 일일실적과 동일하게 날짜·시간·소재가 같은 타겟 분할행을 한 묶음으로 만듭니다.
+    grouped_sends = []
+    group_positions = {}
+    for _, raw_send_row in send_rows.iterrows():
+        send_date = pd.to_datetime(raw_send_row.get("_carousel_date"), errors="coerce")
+        date_key = send_date.strftime("%Y-%m-%d") if pd.notna(send_date) else ""
+        time_value = str(raw_send_row.get("_carousel_time_key", "") or "").strip()
+        material = str(raw_send_row.get("소재", "") or "").strip()
         if material.lower() in {"nan", "none", "nat"}:
             material = ""
+        group_key = (date_key, time_value, material)
+        if group_key not in group_positions:
+            group_positions[group_key] = len(grouped_sends)
+            grouped_sends.append({
+                "date": send_date,
+                "time_value": time_value,
+                "material": material,
+                "send_rows": [],
+            })
+        grouped_sends[group_positions[group_key]]["send_rows"].append(raw_send_row.to_dict())
+
+    # 각 날짜 안에서 실제 소재 묶음 순서대로 이미지 슬롯을 부여합니다.
+    daily_slots = {}
+    for group in grouped_sends:
+        group_date = group["date"]
+        date_key = group_date.strftime("%Y-%m-%d") if pd.notna(group_date) else ""
+        daily_slots[date_key] = daily_slots.get(date_key, 0) + 1
+        group["asset_slot"] = daily_slots[date_key]
+
+    items = []
+    for group in grouped_sends:
+        grouped_rows = group["send_rows"]
+        send_row = pd.Series(grouped_rows[0]) if grouped_rows else pd.Series(dtype="object")
+        matched = _weekly_send_carousel_match_products(send_row, pw)
+        send_date = group["date"]
+        slot = int(group.get("asset_slot", 1) or 1)
+        time_value = group["time_value"]
+        material = group["material"]
 
         asset_key = daily_asset_key(send_date, time_value, slot_index=slot)
         image_paths = find_daily_images(asset_key)
         message_text = extract_mms_message(matched, send_row, messages_df)
         product_view = _weekly_send_carousel_product_view(matched)
 
-        target_parts = []
-        for key in ["성별", "연령"]:
-            value = clean_identifier_value(send_row.get(key, ""))
-            if value:
-                target_parts.append(value)
-        seg_value = clean_identifier_value(send_row.get("SEG", ""))
-        if seg_value:
-            target_parts.append(f"SEG{seg_value}" if not str(seg_value).upper().startswith("SEG") else str(seg_value))
+        target_labels = []
+        for grouped_row in grouped_rows:
+            target_parts = []
+            for key in ["성별", "연령"]:
+                value = clean_identifier_value(grouped_row.get(key, ""))
+                if value:
+                    target_parts.append(value)
+            seg_value = clean_identifier_value(grouped_row.get("SEG", ""))
+            if seg_value:
+                target_parts.append(
+                    f"SEG{seg_value}"
+                    if not str(seg_value).upper().startswith("SEG")
+                    else str(seg_value)
+                )
+            target_label_text = " ".join(target_parts)
+            if target_label_text and target_label_text not in target_labels:
+                target_labels.append(target_label_text)
 
         items.append({
             "send_row": send_row.to_dict(),
+            "send_rows": grouped_rows,
             "date": send_date,
             "time": time_value,
             "material": material,
-            "target": " ".join(target_parts),
+            "target": " / ".join(target_labels),
             "asset_key": asset_key,
             "image_paths": image_paths,
             "message_text": message_text,
@@ -15212,8 +15255,10 @@ elif menu == "주간실적":
         )
 
     # 발송 단위로 이미지·MMS 문구·상품 실적을 한 화면에서 함께 넘겨봅니다.
+    # 상품 시트의 주차 라벨이 아니라 실제 발송일·시간대로 다시 연결하므로
+    # 해당 연도의 전체 상품행을 넘기고 캐러셀 내부에서 정확히 필터링합니다.
     render_weekly_send_carousel(
-        pw, sw, messages, int(selected_year), str(week)
+        year_products, sw, messages, int(selected_year), str(week)
     )
 
     # 선택 주차 소재 반응 로우를 전체 합산해 성·연령 / 지역 분포를 한 줄로 표시
