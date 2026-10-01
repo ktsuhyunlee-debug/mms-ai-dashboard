@@ -3361,23 +3361,19 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
     ]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     channel_colors = {"MMS": "#70ad47", "RCS": "#8b5cf6"}
-    for channel in ["MMS", "RCS"]:
-        mask = f["_graph_channel"].eq(channel)
-        if not mask.any():
-            continue
-        fig.add_trace(
-            go.Bar(
-                x=[label for label, keep in zip(labels, mask) if keep],
-                y=f.loc[mask, "주문금액"],
-                name=f"{channel} 주문금액",
-                marker_color=channel_colors[channel],
-                text=[fmt_num(v) for v in f.loc[mask, "주문금액"]],
-                textposition="inside",
-                customdata=[detail for detail, keep in zip(hover_details, mask) if keep],
-                hovertemplate="%{customdata}<extra></extra>",
-            ),
-            secondary_y=False,
-        )
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=f["주문금액"],
+            name="주문금액",
+            marker_color=[channel_colors.get(value, "#70ad47") for value in f["_graph_channel"]],
+            text=[fmt_num(v) for v in f["주문금액"]],
+            textposition="inside",
+            customdata=hover_details,
+            hovertemplate="%{customdata}<extra></extra>",
+        ),
+        secondary_y=False,
+    )
     fig.add_trace(
         go.Scatter(
             x=labels, y=f["주문수량"], name="주문수량",
@@ -3406,13 +3402,15 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
         barmode="group",
+        bargap=0.22,
+        bargroupgap=0.08,
         xaxis=dict(
             automargin=True,
             tickfont=dict(size=10),
             categoryorder="array",
             categoryarray=labels,
         ),
-        legend=dict(orientation="h", y=-.24),
+        legend=dict(orientation="h", y=-.24, x=0.5, xanchor="center"),
     )
     return fig
 
@@ -3430,29 +3428,24 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
         "MMS": ("#5b9bd5", "#a5a5a5"),
         "RCS": ("#8b5cf6", "#c4b5fd"),
     }
-    for channel in ["MMS", "RCS"]:
-        mask = f["_graph_channel"].eq(channel)
-        if not mask.any():
-            continue
-        channel_labels = [label for label, keep in zip(labels, mask) if keep]
-        fig.add_trace(
-            go.Bar(
-                x=channel_labels, y=f.loc[mask, click_all], name=f"{channel} 클릭 수",
-                marker_color=click_colors[channel][0],
-                text=[fmt_num(v) for v in f.loc[mask, click_all]],
-                textposition="inside",
-            ),
-            secondary_y=False,
-        )
-        fig.add_trace(
-            go.Bar(
-                x=channel_labels, y=f.loc[mask, click_uniq], name=f"{channel} 클릭 수(uniq)",
-                marker_color=click_colors[channel][1],
-                text=[fmt_num(v) for v in f.loc[mask, click_uniq]],
-                textposition="inside",
-            ),
-            secondary_y=False,
-        )
+    fig.add_trace(
+        go.Bar(
+            x=labels, y=f[click_all], name="클릭 수",
+            marker_color=[click_colors.get(value, click_colors["MMS"])[0] for value in f["_graph_channel"]],
+            text=[fmt_num(v) for v in f[click_all]],
+            textposition="inside",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=labels, y=f[click_uniq], name="클릭 수(uniq)",
+            marker_color=[click_colors.get(value, click_colors["MMS"])[1] for value in f["_graph_channel"]],
+            text=[fmt_num(v) for v in f[click_uniq]],
+            textposition="inside",
+        ),
+        secondary_y=False,
+    )
     fig.add_trace(
         go.Scatter(
             x=labels, y=f[ctr_all] * 100, name="반응율",
@@ -3481,13 +3474,15 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
         margin=dict(l=60, r=70, t=70, b=150),
         plot_bgcolor="#ffffff",
         barmode="group",
+        bargap=0.22,
+        bargroupgap=0.08,
         xaxis=dict(
             automargin=True,
             tickfont=dict(size=10),
             categoryorder="array",
             categoryarray=labels,
         ),
-        legend=dict(orientation="h", y=-.24),
+        legend=dict(orientation="h", y=-.24, x=0.5, xanchor="center"),
     )
     return fig
 
@@ -15194,7 +15189,7 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle_v2",
+        "weekly_core_bundle_v3",
         (int(selected_year), str(week)),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
