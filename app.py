@@ -1670,12 +1670,13 @@ def aggregate_send(data: pd.DataFrame, mode: str) -> pd.DataFrame:
 
     send_col = first_col(d, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(d, ["클릭 수(uniq)", "클릭 수"])
+    d["_send_run_key"] = _send_run_key_series(d)
 
     g = d.groupby("_label", as_index=False).agg(
         연도=("_sort1", "max"),
         _sort1=("_sort1", "max"),
         _sort2=("_sort2", "max"),
-        발송횟수=("_label", "size"),
+        발송횟수=("_send_run_key", "nunique"),
         상품수=("상품수", "sum"),
         URL=("URL", "sum"),
         발송건수=(send_col, "sum"),
@@ -3282,30 +3283,42 @@ def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def _weekly_unique_send_count(sw: pd.DataFrame) -> int:
-    """주간 핵심실적의 발송횟수를 실제 발송일·시간대 기준으로 계산합니다.
+def _send_run_key_series(df: pd.DataFrame) -> pd.Series:
+    """모든 메뉴에서 공통으로 사용하는 실제 발송일·시간대 회차 키입니다.
 
-    같은 날짜와 같은 시간대에 타겟 또는 v1/v2로 분할된 행은 1회로 봅니다.
+    날짜 또는 시간대가 없는 예외 행은 서로 합치지 않아 임의 과소 집계를 막습니다.
     """
-    if sw is None or sw.empty:
-        return 0
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
 
-    date_source = (
-        sw["_date"]
-        if "_date" in sw.columns
-        else pd.Series(pd.NaT, index=sw.index)
+    date_col = first_col(df, ["_date", "발송일", "발송일자", "일자", "날짜"])
+    time_col = first_col(df, ["시간대", "_time", "발송시간", "시간"])
+    dates = (
+        pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+        if date_col else pd.Series(pd.NaT, index=df.index)
     )
-    time_source = (
-        sw["시간대"]
-        if "시간대" in sw.columns
-        else pd.Series("", index=sw.index, dtype="object")
+    times = (
+        df[time_col].map(_v4482_time_key)
+        if time_col else pd.Series("", index=df.index, dtype="object")
     )
-    keys = pd.DataFrame({
-        "_send_date": pd.to_datetime(date_source, errors="coerce").dt.normalize(),
-        "_send_time": time_source.map(_v4482_time_key),
-    }, index=sw.index)
-    keys = keys[keys["_send_date"].notna() & keys["_send_time"].ne("")]
-    return int(keys.drop_duplicates(["_send_date", "_send_time"]).shape[0])
+    valid = dates.notna() & times.ne("")
+    keys = pd.Series(index=df.index, dtype="object")
+    keys.loc[valid] = dates.loc[valid].dt.strftime("%Y-%m-%d") + "|" + times.loc[valid]
+    fallback_positions = pd.Series(range(len(df)), index=df.index).astype(str)
+    keys.loc[~valid] = "ROW|" + fallback_positions.loc[~valid]
+    return keys
+
+
+def _unique_send_count(df: pd.DataFrame) -> int:
+    """같은 실제 발송일·시간대를 1회로 계산합니다."""
+    if df is None or df.empty:
+        return 0
+    return int(_send_run_key_series(df).nunique(dropna=True))
+
+
+def _weekly_unique_send_count(sw: pd.DataFrame) -> int:
+    """기존 주간 호출부 호환용 공통 발송횟수 계산 함수입니다."""
+    return _unique_send_count(sw)
 
 
 def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
@@ -3542,8 +3555,10 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
 def grouped_send_table(sw: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(sw, ["클릭 수(uniq)", "클릭 수"])
-    g = sw.groupby(keys, as_index=False).agg(
-        발송횟수=("소재", "size"),
+    work = sw.copy()
+    work["_send_run_key"] = _send_run_key_series(work)
+    g = work.groupby(keys, as_index=False).agg(
+        발송횟수=("_send_run_key", "nunique"),
         발송건수=(send_col, "sum"),
         클릭수=(click_col, "sum"),
         주문건수=("주문건수", "sum"),
@@ -3763,16 +3778,21 @@ def _category_top_product_hover(
     ):
         return {}
 
-    d = pw[[category_col, "상품명", "주문금액"]].copy()
+    _category_source_cols = [category_col, "상품명", "주문금액"]
+    for _source_col in ["_date", "발송일", "시간대", "_time"]:
+        if _source_col in pw.columns and _source_col not in _category_source_cols:
+            _category_source_cols.append(_source_col)
+    d = pw[_category_source_cols].copy()
     d[category_col] = d[category_col].fillna("미분류").astype(str)
     d["상품명"] = d["상품명"].fillna("상품명 없음").astype(str).str.strip()
     d.loc[d["상품명"].eq(""), "상품명"] = "상품명 없음"
     d["주문금액"] = pd.to_numeric(d["주문금액"], errors="coerce").fillna(0)
+    d["_send_run_key"] = _send_run_key_series(d)
 
     product_stats = (
         d.groupby([category_col, "상품명"], as_index=False, dropna=False)
         .agg(
-            발송횟수=("상품명", "size"),
+            발송횟수=("_send_run_key", "nunique"),
             주문금액=("주문금액", "sum"),
         )
         .sort_values(
@@ -4320,6 +4340,9 @@ def build_weekly_detail_analysis(
             & (sends_all["주차"].astype(str) == prev_week)
         ]
 
+    send_runs = _unique_send_count(sw)
+    prev_send_runs = _unique_send_count(prev_sw)
+
     if not prev_sw.empty:
         psend = float(prev_sw[send_col].sum())
         pclick = float(prev_sw[click_col].sum())
@@ -4331,7 +4354,7 @@ def build_weekly_detail_analysis(
         paov = pamount / porders if porders else 0
         pspm = pamount / psend if psend else 0
         prev_compare = (
-            f"전주 대비 발송횟수 {weekly_delta(len(sw), len(prev_sw))} / "
+            f"전주 대비 발송횟수 {weekly_delta(send_runs, prev_send_runs)} / "
             f"상품수 {len(pw):,}건 {weekly_delta(len(pw), float(prev_sw['상품수'].sum()))} / "
             f"발송건수 {weekly_delta(send_count, psend)} 운영\n"
             f"주문건수 {int(order_count):,}건 {weekly_delta(order_count, porders)} / "
@@ -4344,7 +4367,7 @@ def build_weekly_detail_analysis(
         )
     else:
         prev_compare = (
-            f"발송횟수 {len(sw)}회 / 상품수 {len(pw)}건 / 발송건수 {int(send_count):,}건 운영\n"
+            f"발송횟수 {send_runs}회 / 상품수 {len(pw)}건 / 발송건수 {int(send_count):,}건 운영\n"
             f"주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / "
             f"주문금액 {compact_money(amount)} 기록\n"
             f"CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / "
@@ -6746,7 +6769,7 @@ def _build_weekly_safe_fallback(week, year, pw, sw) -> str:
         spm = amount / send_count if send_count else 0
 
         summary = [
-            f"• 발송횟수 {len(sw) if sw is not None else 0:,}회 / 편성건수 {len(pw) if pw is not None else 0:,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
+            f"• 발송횟수 {_unique_send_count(sw):,}회 / 편성건수 {len(pw) if pw is not None else 0:,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
             f"• 주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
             f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
             ": 상세 인사이트 생성 중 일부 데이터 조건을 확인하지 못해 기본 실적 기준으로 표시",
@@ -7471,6 +7494,8 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
     _prev_pcol = _weekly_product_col(prev_pw)
     unique_products = int(pw[_pcol].nunique()) if _pcol and not pw.empty else len(pw)
     prev_unique_products = int(prev_pw[_prev_pcol].nunique()) if _prev_pcol and not prev_pw.empty else len(prev_pw)
+    send_runs = _unique_send_count(sw)
+    prev_send_runs = _unique_send_count(prev_sw)
 
     if not prev_sw.empty:
         psend = float(prev_sw[send_col].sum())
@@ -7489,14 +7514,14 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         send_delta = (send_count - psend) / abs(psend) if psend else 0
 
         summary = [
-            f"• 발송횟수 {len(sw):,}회({_weekly_plain_delta(len(sw),len(prev_sw))}) / 편성건수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 고유상품 {unique_products:,}개({_weekly_plain_delta(unique_products,prev_unique_products)}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
+            f"• 발송횟수 {send_runs:,}회({_weekly_plain_delta(send_runs,prev_send_runs)}) / 편성건수 {len(pw):,}건({_weekly_plain_delta(len(pw),len(prev_pw))}) / 고유상품 {unique_products:,}개({_weekly_plain_delta(unique_products,prev_unique_products)}) / 발송건수 {int(send_count):,}건({_weekly_plain_delta(send_count,psend)}) 운영",
             f"• 주문건수 {int(order_count):,}건({_weekly_plain_delta(order_count,porders)}) / 주문수량 {int(qty):,}건({_weekly_plain_delta(qty,pqty)}) / 주문금액 {compact_money(amount)}({_weekly_plain_delta(amount,pamount)}) 기록",
             f"• CTR {ctr*100:.1f}%({_weekly_plain_delta(ctr,pctr,True)}) / CVR {cvr*100:.1f}%({_weekly_plain_delta(cvr,pcvr,True)}) / 객단가 {int(aov):,}원({_weekly_plain_delta(aov,paov)}) / SPM {spm:.1f}({_weekly_plain_delta(spm,pspm)}) 기록",
         ]
 
         # 규모 변화와 성과 변화를 정확히 분리해 해석
         _scale_changes = {
-            "발송횟수": len(sw) - len(prev_sw),
+            "발송횟수": send_runs - prev_send_runs,
             "편성건수": len(pw) - len(prev_pw),
             "발송건수": send_count - psend,
         }
@@ -7586,7 +7611,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
 
     else:
         summary = [
-            f"• 발송횟수 {len(sw):,}회 / 편성건수 {len(pw):,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
+            f"• 발송횟수 {send_runs:,}회 / 편성건수 {len(pw):,}건 / 고유상품 {unique_products:,}개 / 발송건수 {int(send_count):,}건 운영",
             f"• 주문건수 {int(order_count):,}건 / 주문수량 {int(qty):,}건 / 주문금액 {compact_money(amount)} 기록",
             f"• CTR {ctr*100:.1f}% / CVR {cvr*100:.1f}% / 객단가 {int(aov):,}원 / SPM {spm:.1f} 기록",
             ": 전주 비교 데이터가 없어 금주 실적을 기준으로 상품·타겟·편성 효율 확인",
@@ -8861,7 +8886,7 @@ def build_weekly_analysis(week, year, pw, sw, products_all, sends_all) -> str:
         if not prev_sw.empty:
             _summary_interpretation = _weekly_build_summary_interpretation(
                 pw=pw, prev_pw=prev_pw,
-                send_runs=len(sw), prev_send_runs=len(prev_sw),
+                send_runs=send_runs, prev_send_runs=prev_send_runs,
                 send_count=send_count, prev_send_count=psend,
                 order_count=order_count, prev_order_count=porders,
                 qty=qty, prev_qty=pqty,
@@ -10304,7 +10329,7 @@ def _build_weekly_core_bundle(
         "weekday_table": grouped_send_table(sw, ["요일"]),
         "time_table": grouped_send_table(sw, ["시간대"]),
         "rank_table": (lambda _rank_src: (
-            _rank_src.groupby(
+            _rank_src.assign(_send_run_key=_send_run_key_series(_rank_src)).groupby(
                 [c for c in ["알파코드", "쇼라코드", "상품명"] if c in _rank_src.columns],
                 as_index=False,
                 dropna=False,
@@ -10320,7 +10345,7 @@ def _build_weekly_core_bundle(
                         ),
                     )
                 } if "재편성" in _rank_src.columns else {}),
-                발송횟수=("상품명", "size"),
+                발송횟수=("_send_run_key", "nunique"),
                 주문건수=("주문건수", "sum"),
                 주문수량=("주문수량", "sum"),
                 주문금액=("주문금액", "sum"),
@@ -11546,7 +11571,7 @@ def _build_target_best_integrated_views(
         sub = sub.sort_values("_date_sort", ascending=False, kind="stable")
         rows = []
         for _, group in sub.groupby("_integrated_key", sort=False, dropna=False):
-            send_count = int(len(group))
+            send_count = _unique_send_count(group)
             order_amount = float(num(group["주문금액"]).sum()) if "주문금액" in group.columns else 0.0
             average_amount = order_amount / send_count if send_count else 0.0
             normal_price = _latest_positive_number(group, "정상가")
@@ -12124,7 +12149,7 @@ def _factor_basic_metrics(
     product_keys = _product_mix_product_keys(product_rows)
     return {
         **mix,
-        "발송횟수": int(len(send_rows)),
+        "발송횟수": _unique_send_count(send_rows),
         "편성건수": int(len(product_rows)),
         "고유상품수": int(product_keys[product_keys.ne("")].nunique()) if not product_keys.empty else 0,
         "발송건수": sent,
@@ -12174,8 +12199,9 @@ def _factor_group_metrics(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     work["_fa_amount"] = pd.to_numeric(
         work.get("주문금액", pd.Series(0, index=work.index)), errors="coerce"
     ).fillna(0)
+    work["_send_run_key"] = _send_run_key_series(work)
     grouped = work.groupby(keys, as_index=False, dropna=False).agg(
-        발송횟수=(keys[0], "size"),
+        발송횟수=("_send_run_key", "nunique"),
         발송건수=("_fa_sent", "sum"),
         클릭수=("_fa_click", "sum"),
         주문건수=("_fa_orders", "sum"),
@@ -12485,7 +12511,7 @@ def _factor_operation_table(
         prev_amount = _factor_numeric_sum(previous_products.loc[previous_order.eq(1)], "주문금액")
         delta = cur_amount - prev_amount
         rows.append({
-            "조건": "전시순서", "구분값": "1번 상품", "발송횟수": int(current_order.eq(1).sum()),
+            "조건": "전시순서", "구분값": "1번 상품", "발송횟수": _unique_send_count(current_products.loc[current_order.eq(1)]),
             "CTR": pd.NA, "CTR 증감(%p)": pd.NA, "SPM": pd.NA, "SPM 증감(원)": pd.NA,
             "주문금액 증감": delta,
             "판단": "상승 기여" if delta > 0 else ("하락 영향" if delta < 0 else "유지"),
@@ -13202,8 +13228,10 @@ def _segv_group_summary(d: pd.DataFrame) -> pd.DataFrame:
     cols = ["성별", "연령", "SEG", "발송횟수", "발송모수", "평균 발송모수", "발송성공건수", "클릭수", "주문건수", "주문금액", "CTR", "SPM", "주문금액/만건", "주문건수/만건"]
     if d is None or d.empty:
         return pd.DataFrame(columns=cols)
-    g = d.groupby(["_gender", "_age", "_seg"], as_index=False, dropna=False).agg(
-        발송횟수=("_sent", "size"),
+    work = d.copy()
+    work["_send_run_key"] = _send_run_key_series(work)
+    g = work.groupby(["_gender", "_age", "_seg"], as_index=False, dropna=False).agg(
+        발송횟수=("_send_run_key", "nunique"),
         발송모수=("_sent", "sum"),
         발송성공건수=("_success", "sum"),
         클릭수=("_click", "sum"),
@@ -13273,8 +13301,10 @@ def _segv_target_compare_table(asis_df: pd.DataFrame, tobe_df: pd.DataFrame) -> 
         ]
         if source is None or source.empty:
             return pd.DataFrame(columns=columns)
-        grouped = source.groupby(["_gender", "_age"], as_index=False, dropna=False).agg(
-            발송횟수=("_sent", "size"),
+        work = source.copy()
+        work["_send_run_key"] = _send_run_key_series(work)
+        grouped = work.groupby(["_gender", "_age"], as_index=False, dropna=False).agg(
+            발송횟수=("_send_run_key", "nunique"),
             발송모수=("_sent", "sum"),
             발송성공건수=("_success", "sum"),
             클릭수=("_click", "sum"),
@@ -14147,9 +14177,10 @@ def _monthly_top_products(product_rows: pd.DataFrame, top_n: int = 10) -> pd.Dat
         if col not in work.columns:
             work[col] = ""
     work["주문금액"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+    work["_send_run_key"] = _send_run_key_series(work)
     group_cols = ["구분", "알파코드", "쇼라코드", "상품명"]
     grouped = work.groupby(group_cols, as_index=False, dropna=False).agg(
-        발송횟수=("상품명", "size"),
+        발송횟수=("_send_run_key", "nunique"),
         주문금액=("주문금액", "sum"),
     )
     grouped["평균금액"] = grouped["주문금액"].div(grouped["발송횟수"].replace(0, pd.NA)).fillna(0)
@@ -14738,7 +14769,7 @@ if menu == "홈":
         _range_signature(applied.get("exclude_ranges", []), include_reason=True),
     )
     monthly_all, weekly_all = _menu_cache_get(
-        "home_applied_aggregates",
+        "home_applied_aggregates_v2",
         home_aggregate_key,
         lambda: _build_home_aggregate_bundle(
             sends,
@@ -14857,7 +14888,7 @@ if menu == "홈":
     # 일별도 상단 분석 조건의 기간을 그대로 사용
     st.markdown('<div class="section-title">일별 실적</div>', unsafe_allow_html=True)
     daily = _menu_cache_get(
-        "home_daily_applied_aggregate",
+        "home_daily_applied_aggregate_v2",
         home_aggregate_key,
         lambda: aggregate_send(home_applied_sends, "Daily"),
         max_entries=12,
@@ -15583,7 +15614,7 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle_v5",
+        "weekly_core_bundle_v6",
         (int(selected_year), str(week)),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
@@ -15727,7 +15758,7 @@ elif menu == "주간실적":
             st.info("버튼을 켜면 주간 인사이트, 재편성 추천, 신규·유사신규 소싱 제안을 불러옵니다.")
         else:
             weekly_analysis = _menu_cache_get(
-                "weekly_analysis_bundle",
+                "weekly_analysis_bundle_v2",
                 (int(selected_year), str(week)),
                 lambda: _build_weekly_analysis_bundle(
                     products, sends, int(selected_year), str(week), pw, sw
@@ -16036,7 +16067,7 @@ elif menu == "월간실적":
         pass
 
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v1",
+        "monthly_performance_bundle_v2",
         (int(monthly_year), int(monthly_month)),
         lambda: _build_monthly_performance_bundle(
             products, sends, overall_performance, int(monthly_year), int(monthly_month)
@@ -16516,7 +16547,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v2",
+        "performance_factor_analysis_v3",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -17541,7 +17572,7 @@ elif menu == "타겟별베스트상품":
         )
 
         target_best_views = _menu_cache_get(
-            "target_best_product_views",
+            "target_best_product_views_v2",
             target_best_signature,
             lambda: (
                 _build_target_best_integrated_views(
@@ -18148,7 +18179,7 @@ elif menu == "타겟분석":
         target_end = sends["_date"].max().date()
 
     target_bundle = _menu_cache_get(
-        "target_menu_bundle",
+        "target_menu_bundle_v2",
         (str(target_start), str(target_end)),
         lambda: _build_target_menu_bundle(products, sends, target_start, target_end),
         max_entries=10,
