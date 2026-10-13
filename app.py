@@ -13991,9 +13991,302 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
     return lines[:4]
 
 
+def _monthly_period_rows(df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
+    """원본 주차 표기와 무관하게 실제 발송일로 선택 월 데이터를 반환합니다."""
+    if df is None or df.empty or "_date" not in df.columns:
+        return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
+    dates = pd.to_datetime(df["_date"], errors="coerce")
+    return df.loc[dates.dt.year.eq(int(year)) & dates.dt.month.eq(int(month))].copy()
+
+
+def _monthly_previous_period(year: int, month: int) -> tuple[int, int]:
+    current = pd.Timestamp(year=int(year), month=int(month), day=1)
+    previous = current - pd.offsets.MonthBegin(1)
+    return int(previous.year), int(previous.month)
+
+
+def _monthly_summary_metrics(product_rows: pd.DataFrame, send_rows: pd.DataFrame) -> dict:
+    send_col = first_col(send_rows, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(send_rows, ["클릭 수(uniq)", "클릭 수"])
+
+    def _sum(frame: pd.DataFrame, column: str | None) -> float:
+        if frame is None or frame.empty or not column or column not in frame.columns:
+            return 0.0
+        return float(pd.to_numeric(frame[column], errors="coerce").fillna(0).sum())
+
+    sent = _sum(send_rows, send_col)
+    clicks = _sum(send_rows, click_col)
+    orders = _sum(send_rows, "주문건수")
+    amount = _sum(send_rows, "주문금액")
+    return {
+        "발송횟수": _weekly_unique_send_count(send_rows),
+        "상품수": int(len(product_rows)) if product_rows is not None else 0,
+        "발송건수": sent,
+        "클릭수": clicks,
+        "주문건수": orders,
+        "주문금액": amount,
+        "CTR": (clicks / sent) if sent else 0.0,
+        "CVR": (orders / clicks) if clicks else 0.0,
+        "객단가": (amount / orders) if orders else 0.0,
+        "SPM": (amount / sent) if sent else 0.0,
+    }
+
+
+def _monthly_target_metrics(send_rows: pd.DataFrame) -> list[dict]:
+    """월간 4개 타겟의 CTR·SPM·주문금액을 반환합니다."""
+    targets = [("남성", "3040"), ("남성", "5060"), ("여성", "3040"), ("여성", "5060")]
+    if send_rows is None or send_rows.empty or not {"성별", "연령"}.issubset(send_rows.columns):
+        return [{"label": f"{g} {a}", "ctr": None, "spm": None, "amount": 0.0} for g, a in targets]
+    send_col = first_col(send_rows, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(send_rows, ["클릭 수(uniq)", "클릭 수"])
+    if not send_col or not click_col:
+        return [{"label": f"{g} {a}", "ctr": None, "spm": None, "amount": 0.0} for g, a in targets]
+
+    work = send_rows.copy()
+    work["_monthly_gender"] = (
+        work["성별"].fillna("").astype(str).str.strip()
+        .replace({"남자": "남성", "남": "남성", "여자": "여성", "여": "여성"})
+    )
+    work["_monthly_age"] = work["연령"].map(clean_identifier_value)
+    result = []
+    for gender, age in targets:
+        rows = work[work["_monthly_gender"].eq(gender) & work["_monthly_age"].eq(age)]
+        sent = float(pd.to_numeric(rows[send_col], errors="coerce").fillna(0).sum())
+        clicks = float(pd.to_numeric(rows[click_col], errors="coerce").fillna(0).sum())
+        amount = float(pd.to_numeric(rows.get("주문금액", 0), errors="coerce").fillna(0).sum())
+        result.append({
+            "label": f"{gender} {age}",
+            "ctr": (clicks / sent) if sent else None,
+            "spm": (amount / sent) if sent else None,
+            "amount": amount,
+        })
+    return result
+
+
+def _monthly_mms_share_stats(
+    send_rows: pd.DataFrame,
+    overall_df: pd.DataFrame | None,
+    year: int,
+    month: int,
+) -> dict:
+    """전체실적 주문금액 대비 MMS 주문금액 비중을 계산합니다."""
+    result = {"amount": 0.0, "total_amount": 0.0, "share": None, "available": False}
+    if send_rows is None or send_rows.empty:
+        return result
+    send_types = _weekly_send_type_series(send_rows)
+    amounts = pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0)
+    result["amount"] = float(amounts.loc[send_types.eq("MMS")].sum())
+
+    if overall_df is None or overall_df.empty or "_date" not in overall_df.columns:
+        return result
+    overall_dates = pd.to_datetime(overall_df["_date"], errors="coerce")
+    mask = overall_dates.dt.year.eq(int(year)) & overall_dates.dt.month.eq(int(month))
+    total = float(pd.to_numeric(overall_df.loc[mask, "주문금액"], errors="coerce").fillna(0).sum())
+    result["total_amount"] = total
+    if total > 0:
+        result["share"] = result["amount"] / total
+        result["available"] = True
+    return result
+
+
+def _monthly_operation_performance(product_rows: pd.DataFrame) -> pd.DataFrame:
+    """재편성·유사신규·신규별 구성과 고·저성과 상품 비중을 생성합니다."""
+    columns = [
+        "구분", "전체", "전체 비중", "300만원 이상", "300만원 이상 비중",
+        "100만원 미만", "100만원 미만 비중", "주문금액", "평균금액",
+    ]
+    if product_rows is None or product_rows.empty:
+        return pd.DataFrame(columns=columns)
+    labels = _weekly_normalize_operation_labels(product_rows)
+    if labels is None:
+        labels = pd.Series("미분류", index=product_rows.index)
+    labels = labels.reindex(product_rows.index).fillna("").astype(str)
+    normalized = pd.Series("미분류", index=product_rows.index, dtype="object")
+    normalized.loc[labels.str.contains("재편성", na=False)] = "재편성"
+    normalized.loc[labels.str.contains("유사신규", na=False) & ~labels.str.contains("재편성", na=False)] = "유사신규"
+    normalized.loc[
+        labels.str.contains("신규", na=False)
+        & ~labels.str.contains("유사신규", na=False)
+        & ~labels.str.contains("재편성", na=False)
+    ] = "신규"
+    amounts = pd.to_numeric(product_rows.get("주문금액", 0), errors="coerce").fillna(0)
+    total = int(len(product_rows))
+    rows = []
+    for name in ["재편성", "유사신규", "신규"]:
+        mask = normalized.eq(name)
+        count = int(mask.sum())
+        high = int((mask & amounts.ge(3_000_000)).sum())
+        low = int((mask & amounts.lt(1_000_000)).sum())
+        amount = float(amounts.loc[mask].sum())
+        rows.append({
+            "구분": name,
+            "전체": count,
+            "전체 비중": (count / total) if total else 0.0,
+            "300만원 이상": high,
+            "300만원 이상 비중": (high / count) if count else 0.0,
+            "100만원 미만": low,
+            "100만원 미만 비중": (low / count) if count else 0.0,
+            "주문금액": amount,
+            "평균금액": (amount / count) if count else 0.0,
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _monthly_top_products(product_rows: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    columns = ["구분", "알파코드", "쇼라코드", "상품명", "발송횟수", "주문금액", "평균금액"]
+    if product_rows is None or product_rows.empty or "상품명" not in product_rows.columns:
+        return pd.DataFrame(columns=columns)
+    work = product_rows.copy()
+    labels = _weekly_normalize_operation_labels(work)
+    work["구분"] = labels.reindex(work.index).fillna("") if labels is not None else ""
+    work["구분"] = work["구분"].map(
+        lambda value: "재편성" if "재편성" in str(value)
+        else ("유사신규" if "유사신규" in str(value) else ("신규" if "신규" in str(value) else "미분류"))
+    )
+    for col in ["알파코드", "쇼라코드"]:
+        if col not in work.columns:
+            work[col] = ""
+    work["주문금액"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+    group_cols = ["구분", "알파코드", "쇼라코드", "상품명"]
+    grouped = work.groupby(group_cols, as_index=False, dropna=False).agg(
+        발송횟수=("상품명", "size"),
+        주문금액=("주문금액", "sum"),
+    )
+    grouped["평균금액"] = grouped["주문금액"].div(grouped["발송횟수"].replace(0, pd.NA)).fillna(0)
+    return grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False]).head(top_n)[columns]
+
+
+def _monthly_small_categories(product_rows: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    columns = ["소카테고리", "상품수", "상품 비중", "주문금액", "주문 비중", "평균금액"]
+    category_col = first_col(product_rows, ["소카", "소카테고리", "소분류", "세부카테고리"])
+    if product_rows is None or product_rows.empty or not category_col:
+        return pd.DataFrame(columns=columns)
+    work = product_rows.copy()
+    work[category_col] = work[category_col].fillna("미분류").astype(str).str.strip().replace("", "미분류")
+    work["주문금액"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+    grouped = work.groupby(category_col, as_index=False, dropna=False).agg(
+        상품수=("상품명", "size"), 주문금액=("주문금액", "sum")
+    )
+    total_count = float(grouped["상품수"].sum())
+    total_amount = float(grouped["주문금액"].sum())
+    grouped["상품 비중"] = grouped["상품수"] / total_count if total_count else 0.0
+    grouped["주문 비중"] = grouped["주문금액"] / total_amount if total_amount else 0.0
+    grouped["평균금액"] = grouped["주문금액"].div(grouped["상품수"].replace(0, pd.NA)).fillna(0)
+    grouped = grouped.rename(columns={category_col: "소카테고리"})
+    return grouped.sort_values("주문금액", ascending=False).head(top_n)[columns]
+
+
+def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
+    columns = ["주차", "기간", "주문금액", "SPM", "CTR", "CVR"]
+    if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
+        return pd.DataFrame(columns=columns)
+    work = send_rows.copy()
+    work["_monthly_date"] = pd.to_datetime(work["_date"], errors="coerce").dt.normalize()
+    work = work[work["_monthly_date"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+    work["_week_start"] = work["_monthly_date"] - pd.to_timedelta(work["_monthly_date"].dt.dayofweek, unit="D")
+    send_col = first_col(work, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(work, ["클릭 수(uniq)", "클릭 수"])
+    work["_sent"] = pd.to_numeric(work[send_col], errors="coerce").fillna(0) if send_col else 0.0
+    work["_click"] = pd.to_numeric(work[click_col], errors="coerce").fillna(0) if click_col else 0.0
+    work["_orders"] = pd.to_numeric(work.get("주문건수", 0), errors="coerce").fillna(0)
+    work["_amount"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+    grouped = work.groupby("_week_start", as_index=False).agg(
+        _sent=("_sent", "sum"), _click=("_click", "sum"),
+        _orders=("_orders", "sum"), 주문금액=("_amount", "sum"),
+        _min_date=("_monthly_date", "min"), _max_date=("_monthly_date", "max"),
+    ).sort_values("_week_start")
+    grouped["주차"] = [f"{idx}주" for idx in range(1, len(grouped) + 1)]
+    grouped["기간"] = grouped.apply(lambda r: f"{r['_min_date'].month}/{r['_min_date'].day}~{r['_max_date'].month}/{r['_max_date'].day}", axis=1)
+    grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
+    grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
+    grouped["CVR"] = grouped["_orders"].div(grouped["_click"].replace(0, pd.NA)).fillna(0)
+    return grouped[columns]
+
+
+def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
+    labels = trend["주차"].tolist() if not trend.empty else []
+    hover_dates = trend["기간"].tolist() if not trend.empty else []
+    amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
+    amount_fig.add_trace(go.Bar(
+        x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
+        name="주문금액(백만원)", marker_color="#2f80ed",
+        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="inside",
+        customdata=hover_dates, hovertemplate="%{customdata}<br>주문금액 %{y:.1f}백만원<extra></extra>",
+    ), secondary_y=False)
+    amount_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
+        mode="lines+markers+text", line=dict(color="#27ae60", width=3),
+        text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
+    ), secondary_y=True)
+    amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
+    amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
+    amount_fig.update_layout(
+        title=dict(text="주차별 주문금액 · SPM", x=.5, xanchor="center"), height=410,
+        margin=dict(l=55, r=60, t=60, b=80), plot_bgcolor="#fff",
+        legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+    )
+
+    rate_fig = go.Figure()
+    rate_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
+        mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
+        text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
+    ))
+    rate_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
+        mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
+        text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
+    ))
+    rate_fig.update_layout(
+        title=dict(text="주차별 CTR · CVR", x=.5, xanchor="center"), height=410,
+        margin=dict(l=55, r=35, t=60, b=80), plot_bgcolor="#fff",
+        yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
+        legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+    )
+    return amount_fig, rate_fig
+
+
+def _build_monthly_performance_bundle(
+    products_df: pd.DataFrame,
+    sends_df: pd.DataFrame,
+    overall_df: pd.DataFrame,
+    year: int,
+    month: int,
+) -> dict:
+    product_rows = _monthly_period_rows(products_df, year, month)
+    send_rows = _monthly_period_rows(sends_df, year, month)
+    prev_year, prev_month = _monthly_previous_period(year, month)
+    prev_products = _monthly_period_rows(products_df, prev_year, prev_month)
+    prev_sends = _monthly_period_rows(sends_df, prev_year, prev_month)
+    trend = _monthly_weekly_trend(send_rows)
+    amount_chart, rate_chart = _monthly_trend_charts(trend)
+    return {
+        "products": product_rows,
+        "sends": send_rows,
+        "previous_products": prev_products,
+        "previous_sends": prev_sends,
+        "metrics": _monthly_summary_metrics(product_rows, send_rows),
+        "previous_metrics": _monthly_summary_metrics(prev_products, prev_sends),
+        "targets": _monthly_target_metrics(send_rows),
+        "previous_targets": _monthly_target_metrics(prev_sends),
+        "mms": _monthly_mms_share_stats(send_rows, overall_df, year, month),
+        "previous_mms": _monthly_mms_share_stats(prev_sends, overall_df, prev_year, prev_month),
+        "operation": _monthly_operation_performance(product_rows),
+        "categories": _monthly_small_categories(product_rows),
+        "top_products": _monthly_top_products(product_rows),
+        "trend": trend,
+        "amount_chart": amount_chart,
+        "rate_chart": rate_chart,
+        "previous_year": prev_year,
+        "previous_month": prev_month,
+    }
+
+
 
 _menu_options = [
-    "홈", "일일실적", "주간실적", "실적요인분석",
+    "홈", "일일실적", "주간실적", "월간실적", "실적요인분석",
     "상품구성비교", "상품구분", "타겟별베스트상품",
     "타겟분석", "SEG분석", "편성 프로그램",
 ]
@@ -14001,6 +14294,7 @@ _menu_slug_to_name = {
     "home": "홈",
     "daily": "일일실적",
     "weekly": "주간실적",
+    "monthly": "월간실적",
     "performance-factor": "실적요인분석",
     "product": "상품구분",
     "target": "타겟분석",
@@ -14016,6 +14310,7 @@ _menu_groups = [
         ("홈", "홈"),
         ("일일실적", "일일실적"),
         ("주간실적", "주간실적"),
+        ("월간실적", "월간실적"),
         ("실적 요인 분석", "실적요인분석"),
     ]),
     ("상품 분석", [
@@ -14083,10 +14378,12 @@ except Exception:
 
 # 메뉴별로 사용하지 않는 세부 query param은 정리
 try:
-    if menu != "주간실적":
-        for _qp_key in ["year", "week"]:
-            if _qp_key in st.query_params:
-                del st.query_params[_qp_key]
+    if menu not in {"주간실적", "월간실적"} and "year" in st.query_params:
+        del st.query_params["year"]
+    if menu != "주간실적" and "week" in st.query_params:
+        del st.query_params["week"]
+    if menu != "월간실적" and "month" in st.query_params:
+        del st.query_params["month"]
     if menu != "일일실적" and "date" in st.query_params:
         del st.query_params["date"]
     if menu != "상품구성비교" and "mix_month" in st.query_params:
@@ -15678,6 +15975,368 @@ elif menu == "주간실적":
             use_container_width=True, hide_index=True, height=680
         )
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 월간실적
+# ─────────────────────────────────────────────────────────────────────────────
+elif menu == "월간실적":
+    st.markdown('<div class="section-title">📅 월간실적</div>', unsafe_allow_html=True)
+
+    _monthly_dates = pd.concat([
+        pd.to_datetime(products.get("_date"), errors="coerce"),
+        pd.to_datetime(sends.get("_date"), errors="coerce"),
+    ], ignore_index=True).dropna()
+    if _monthly_dates.empty:
+        st.info("월간실적을 표시할 발송일 데이터가 없습니다.")
+        st.stop()
+
+    _monthly_years = sorted(_monthly_dates.dt.year.astype(int).unique().tolist(), reverse=True)
+    try:
+        _monthly_query_year = int(_get_query_param("year"))
+    except (TypeError, ValueError):
+        _monthly_query_year = None
+    try:
+        _monthly_query_month = int(_get_query_param("month"))
+    except (TypeError, ValueError):
+        _monthly_query_month = None
+
+    _month_filter_left, _month_filter_right, _month_filter_note = st.columns([1, 1, 3])
+    with _month_filter_left:
+        monthly_year = st.selectbox(
+            "연도 선택",
+            _monthly_years,
+            index=_monthly_years.index(_monthly_query_year) if _monthly_query_year in _monthly_years else 0,
+            key="monthly_selected_year",
+        )
+    _available_months = sorted(
+        _monthly_dates.loc[_monthly_dates.dt.year.eq(int(monthly_year))].dt.month.astype(int).unique().tolist(),
+        reverse=True,
+    )
+    with _month_filter_right:
+        monthly_month = st.selectbox(
+            "월 선택",
+            _available_months,
+            index=_available_months.index(_monthly_query_month) if _monthly_query_month in _available_months else 0,
+            format_func=lambda value: f"{int(value)}월",
+            key="monthly_selected_month",
+        )
+    with _month_filter_note:
+        st.markdown(
+            '<div style="padding-top:2rem;color:#6b7280;font-size:13px;">'
+            '전월 대비 기준 · 발송횟수는 같은 날짜·같은 시간대를 1회로 계산'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    try:
+        st.query_params["menu"] = "monthly"
+        st.query_params["year"] = str(int(monthly_year))
+        st.query_params["month"] = str(int(monthly_month))
+    except Exception:
+        pass
+
+    monthly_bundle = _menu_cache_get(
+        "monthly_performance_bundle_v1",
+        (int(monthly_year), int(monthly_month)),
+        lambda: _build_monthly_performance_bundle(
+            products, sends, overall_performance, int(monthly_year), int(monthly_month)
+        ),
+        max_entries=18,
+    )
+    mp = monthly_bundle["products"].copy()
+    ms = monthly_bundle["sends"].copy()
+    metrics = monthly_bundle["metrics"]
+    prev_metrics = monthly_bundle["previous_metrics"]
+    has_previous = not monthly_bundle["previous_sends"].empty or not monthly_bundle["previous_products"].empty
+
+    if mp.empty and ms.empty:
+        st.info("선택한 월의 상품 또는 소재 데이터가 없습니다.")
+        st.stop()
+
+    st.markdown(
+        """
+        <style>
+          .monthly-target-card{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
+            padding:12px 14px;min-height:132px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+          .monthly-target-title{font-size:15px;font-weight:900;color:#334155;margin-bottom:9px}
+          .monthly-target-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+          .monthly-target-label{font-size:12px;color:#64748b;font-weight:750}
+          .monthly-target-value{font-size:19px;color:#111827;font-weight:900;margin-top:2px}
+          .monthly-target-delta{font-size:12px;font-weight:850;margin-top:3px;white-space:nowrap}
+          .monthly-op-card{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
+            padding:13px 15px;min-height:154px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+          .monthly-op-title{font-size:16px;font-weight:900;color:#111827;margin-bottom:9px}
+          .monthly-op-main{font-size:23px;font-weight:900;color:#111827;margin-bottom:10px}
+          .monthly-op-row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;
+            border-top:1px solid #edf0f4;font-size:13px;color:#475569}
+          .monthly-op-row b{color:#111827}
+          .monthly-insight-card{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
+            padding:13px 15px;min-height:122px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+          .monthly-insight-title{font-size:15px;font-weight:900;margin-bottom:7px;color:#111827}
+          .monthly-insight-line{font-size:13px;line-height:1.6;color:#475569}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    def _monthly_money_display(value: float) -> str:
+        value = float(value or 0)
+        if abs(value) >= 100_000_000:
+            return f"{value / 100_000_000:.2f}억원"
+        if abs(value) >= 10_000:
+            return f"{value / 10_000:,.0f}만원"
+        return f"{value:,.0f}원"
+
+    def _monthly_delta(metric_name: str, pp: bool = False) -> str:
+        if not has_previous:
+            return "-"
+        return weekly_delta(metrics.get(metric_name, 0), prev_metrics.get(metric_name, 0), pp=pp)
+
+    st.markdown('<div class="subsection-title">핵심 실적</div>', unsafe_allow_html=True)
+    monthly_cards = [
+        ("발송횟수", f'{int(metrics["발송횟수"]):,}회', _monthly_delta("발송횟수")),
+        ("상품수", f'{int(metrics["상품수"]):,}건', _monthly_delta("상품수")),
+        ("발송건수", f'{int(metrics["발송건수"]):,}', _monthly_delta("발송건수")),
+        ("주문건수", f'{int(metrics["주문건수"]):,}건', _monthly_delta("주문건수")),
+        ("주문금액", _monthly_money_display(metrics["주문금액"]), _monthly_delta("주문금액")),
+        ("CTR", f'{metrics["CTR"]*100:.1f}%', _monthly_delta("CTR", pp=True)),
+        ("CVR", f'{metrics["CVR"]*100:.1f}%', _monthly_delta("CVR", pp=True)),
+        ("객단가", f'{int(metrics["객단가"]):,}원', _monthly_delta("객단가")),
+        ("SPM", f'{metrics["SPM"]:.1f}', _monthly_delta("SPM")),
+    ]
+    for _monthly_card_row in [monthly_cards[:5], monthly_cards[5:]]:
+        _monthly_card_cols = st.columns(len(_monthly_card_row))
+        for _monthly_card_col, (label, value, delta) in zip(_monthly_card_cols, _monthly_card_row):
+            with _monthly_card_col:
+                st.markdown(
+                    f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
+                    '<div class="weekly-kpi-value-row">'
+                    f'<div class="metric-value">{value}</div>'
+                    f'<div class="metric-delta {weekly_delta_class(delta)}">전월 대비 {delta}</div>'
+                    '</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+    mms = monthly_bundle["mms"]
+    prev_mms = monthly_bundle["previous_mms"]
+    mms_share_text = f'{mms["share"]*100:.1f}%' if mms.get("available") else "-"
+    mms_delta = (
+        weekly_delta(mms["share"], prev_mms["share"], pp=True)
+        if mms.get("available") and prev_mms.get("available") else "-"
+    )
+    _mms_col, _mix_col = st.columns([1, 2])
+    with _mms_col:
+        st.markdown(
+            f'''
+            <div class="metric-card weekly-breakdown-card" style="min-height:170px;">
+              <div class="metric-label">MMS 실적 비중</div>
+              <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 15px;">
+                <div style="font-size:34px;font-weight:900;color:#111827;">{mms_share_text}</div>
+                <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b;margin-top:6px;">
+                <span>MMS 주문금액</span><b style="color:#111827;">{_monthly_money_display(mms["amount"])}</b>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b;margin-top:7px;">
+                <span>전체 주문금액</span><b style="color:#111827;">{_monthly_money_display(mms["total_amount"]) if mms.get("available") else "-"}</b>
+              </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+    with _mix_col:
+        _operation_for_summary = monthly_bundle["operation"]
+        _summary_parts = []
+        for _, row in _operation_for_summary.iterrows():
+            _summary_parts.append(
+                f'<div class="weekly-mix-item"><div class="weekly-mix-name">{row["구분"]}</div>'
+                f'<div class="weekly-mix-value">{row["전체 비중"]*100:.1f}%</div>'
+                f'<div class="weekly-mix-meta">{int(row["전체"]):,}건</div>'
+                f'<div class="weekly-mix-meta">주문금액 {_monthly_money_display(row["주문금액"])}</div></div>'
+            )
+        st.markdown(
+            '<div class="metric-card weekly-breakdown-card" style="min-height:170px;">'
+            '<div class="metric-label">상품 편성 구성 <span style="font-weight:500;color:#6b7280;">(상품 편성건수 기준)</span></div>'
+            '<div class="weekly-mix-grid" style="margin-top:13px;">' + "".join(_summary_parts) + '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="subsection-title">주차별 실적 추이</div>', unsafe_allow_html=True)
+    trend_left, trend_right = st.columns(2)
+    with trend_left:
+        st.plotly_chart(
+            _weekly_black_plotly_text(monthly_bundle["amount_chart"]),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+    with trend_right:
+        st.plotly_chart(
+            _weekly_black_plotly_text(monthly_bundle["rate_chart"]),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+
+    st.markdown('<div class="subsection-title">타겟별 성과</div>', unsafe_allow_html=True)
+    monthly_target_cols = st.columns(4)
+    for target_col, target, prev_target in zip(
+        monthly_target_cols, monthly_bundle["targets"], monthly_bundle["previous_targets"]
+    ):
+        ctr_text = f'{target["ctr"]*100:.1f}%' if target["ctr"] is not None else "-"
+        spm_text = f'{target["spm"]:.1f}' if target["spm"] is not None else "-"
+        ctr_delta = (
+            weekly_delta(target["ctr"], prev_target["ctr"], pp=True)
+            if target["ctr"] is not None and prev_target["ctr"] is not None else "-"
+        )
+        spm_delta = (
+            weekly_delta(target["spm"], prev_target["spm"])
+            if target["spm"] is not None and prev_target["spm"] is not None else "-"
+        )
+        amount_delta = (
+            weekly_delta(target["amount"], prev_target["amount"])
+            if has_previous else "-"
+        )
+        with target_col:
+            st.markdown(
+                f'''
+                <div class="monthly-target-card">
+                  <div class="monthly-target-title">{target["label"]}</div>
+                  <div class="monthly-target-grid">
+                    <div><div class="monthly-target-label">CTR</div><div class="monthly-target-value">{ctr_text}</div>
+                      <div class="monthly-target-delta {weekly_delta_class(ctr_delta)}">{ctr_delta}</div></div>
+                    <div><div class="monthly-target-label">SPM</div><div class="monthly-target-value">{spm_text}</div>
+                      <div class="monthly-target-delta {weekly_delta_class(spm_delta)}">{spm_delta}</div></div>
+                    <div><div class="monthly-target-label">주문금액</div><div class="monthly-target-value" style="font-size:16px;">{_monthly_money_display(target["amount"])}</div>
+                      <div class="monthly-target-delta {weekly_delta_class(amount_delta)}">{amount_delta}</div></div>
+                  </div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div class="subsection-title">상품 구성 · 성과 구간</div>', unsafe_allow_html=True)
+    operation = monthly_bundle["operation"].copy()
+    operation_cols = st.columns(3)
+    for op_col, (_, row) in zip(operation_cols, operation.iterrows()):
+        with op_col:
+            st.markdown(
+                f'''
+                <div class="monthly-op-card">
+                  <div class="monthly-op-title">{row["구분"]}</div>
+                  <div class="monthly-op-main">{int(row["전체"]):,}건 <span style="font-size:15px;color:#64748b;">{row["전체 비중"]*100:.1f}%</span></div>
+                  <div class="monthly-op-row"><span>300만원 이상</span><b>{int(row["300만원 이상"]):,}건 · {row["300만원 이상 비중"]*100:.1f}%</b></div>
+                  <div class="monthly-op-row"><span>100만원 미만</span><b>{int(row["100만원 미만"]):,}건 · {row["100만원 미만 비중"]*100:.1f}%</b></div>
+                  <div class="monthly-op-row"><span>평균 주문금액</span><b>{_monthly_money_display(row["평균금액"])}</b></div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+
+    _operation_view = operation.copy()
+    for _pct_col in ["전체 비중", "300만원 이상 비중", "100만원 미만 비중"]:
+        _operation_view[_pct_col] = _operation_view[_pct_col].map(lambda value: f"{float(value)*100:.1f}%")
+    for _count_col in ["전체", "300만원 이상", "100만원 미만"]:
+        _operation_view[_count_col] = _operation_view[_count_col].map(lambda value: f"{int(value):,}건")
+    for _money_col in ["주문금액", "평균금액"]:
+        _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+    selectable_dataframe(
+        clean_identifier_columns(_operation_view),
+        key=f"monthly_operation_{monthly_year}_{monthly_month}",
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown('<div class="subsection-title">주요 소카테고리</div>', unsafe_allow_html=True)
+    categories = monthly_bundle["categories"].copy()
+    if categories.empty:
+        st.info("선택 월의 소카테고리 데이터가 없습니다.")
+    else:
+        category_chart_col, category_table_col = st.columns([1.05, 1])
+        with category_chart_col:
+            category_chart = go.Figure(go.Bar(
+                x=categories["주문금액"] / 1_000_000,
+                y=categories["소카테고리"], orientation="h",
+                marker_color="#5b8def",
+                text=[f"{value/1_000_000:.1f}백만원" for value in categories["주문금액"]],
+                textposition="outside",
+            ))
+            category_chart.update_layout(
+                title=dict(text="소카테고리 주문금액 TOP10", x=.5, xanchor="center"),
+                height=430, margin=dict(l=30, r=80, t=55, b=45), plot_bgcolor="#fff",
+                xaxis=dict(title="주문금액(백만원)", rangemode="tozero", gridcolor="#e5e7eb"),
+                yaxis=dict(autorange="reversed"), showlegend=False,
+            )
+            st.plotly_chart(_weekly_black_plotly_text(category_chart), use_container_width=True, config={"displayModeBar": False})
+        with category_table_col:
+            category_view = categories.copy()
+            category_view["상품 비중"] = category_view["상품 비중"].map(lambda value: f"{value*100:.1f}%")
+            category_view["주문 비중"] = category_view["주문 비중"].map(lambda value: f"{value*100:.1f}%")
+            category_view["상품수"] = category_view["상품수"].map(lambda value: f"{int(value):,}건")
+            for _money_col in ["주문금액", "평균금액"]:
+                category_view[_money_col] = category_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+            selectable_dataframe(
+                clean_identifier_columns(category_view),
+                key=f"monthly_category_{monthly_year}_{monthly_month}",
+                use_container_width=True, hide_index=True, height=430,
+            )
+
+    st.markdown('<div class="subsection-title">TOP 상품</div>', unsafe_allow_html=True)
+    top_products = monthly_bundle["top_products"].copy()
+    if top_products.empty:
+        st.info("선택 월의 상품 실적 데이터가 없습니다.")
+    else:
+        top_view = clean_identifier_columns(top_products.copy())
+        top_view["발송횟수"] = top_view["발송횟수"].map(lambda value: f"{int(value):,}회")
+        for _money_col in ["주문금액", "평균금액"]:
+            top_view[_money_col] = top_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+        selectable_dataframe(
+            top_view,
+            key=f"monthly_top_products_{monthly_year}_{monthly_month}",
+            use_container_width=True, hide_index=True, height=420,
+        )
+
+    st.markdown('<div class="subsection-title">월간 성과 요약</div>', unsafe_allow_html=True)
+    trend = monthly_bundle["trend"]
+    best_week = trend.loc[trend["주문금액"].idxmax()] if not trend.empty else None
+    worst_week = trend.loc[trend["주문금액"].idxmin()] if not trend.empty else None
+    valid_targets = [item for item in monthly_bundle["targets"] if item.get("amount", 0) > 0]
+    best_target = max(valid_targets, key=lambda item: item["amount"]) if valid_targets else None
+    high_total = int(operation["300만원 이상"].sum()) if not operation.empty else 0
+    low_total = int(operation["100만원 미만"].sum()) if not operation.empty else 0
+    lowest_category = categories.iloc[-1]["소카테고리"] if not categories.empty else "소카테고리"
+
+    insight_cols = st.columns(3)
+    insight_contents = [
+        (
+            "성과 상승 요인",
+            [
+                f'{best_week["주차"]} 주문금액 {_monthly_money_display(best_week["주문금액"])}로 월 최고' if best_week is not None else "주차별 데이터 없음",
+                f'{best_target["label"]} 주문금액 {_monthly_money_display(best_target["amount"])}로 타겟 중 최고' if best_target else "타겟별 데이터 없음",
+                f"300만원 이상 상품 {high_total:,}건 운영",
+            ],
+        ),
+        (
+            "성과 하락 요인",
+            [
+                f'{worst_week["주차"]} 주문금액 {_monthly_money_display(worst_week["주문금액"])}로 월 최저' if worst_week is not None else "주차별 데이터 없음",
+                f"100만원 미만 상품 {low_total:,}건으로 저성과 상품 비중 점검 필요",
+                f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}' if has_previous else "전월 비교 데이터 없음",
+            ],
+        ),
+        (
+            "다음 달 점검 항목",
+            [
+                "재편성·유사신규·신규별 300만원 이상 상품 비중 확대 검토",
+                "100만원 미만 상품의 가격·타겟·운영 간격 재점검",
+                f"{lowest_category} 등 하위 소카테고리 상품 구성 점검",
+            ],
+        ),
+    ]
+    for col, (title, lines) in zip(insight_cols, insight_contents):
+        with col:
+            st.markdown(
+                '<div class="monthly-insight-card">'
+                f'<div class="monthly-insight-title">{title}</div>'
+                + "".join(f'<div class="monthly-insight-line">• {line}</div>' for line in lines)
+                + '</div>',
+                unsafe_allow_html=True,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
