@@ -3430,7 +3430,15 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
         secondary_y=True,
     )
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
-    fig.update_yaxes(tickformat=",", showgrid=False, secondary_y=True)
+    fig.update_yaxes(
+        tickmode="linear",
+        tick0=0,
+        dtick=10,
+        tickformat=",.0f",
+        rangemode="tozero",
+        showgrid=False,
+        secondary_y=True,
+    )
     fig.update_layout(
         title=dict(text="상품 실적", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
@@ -3502,7 +3510,16 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
         secondary_y=True,
     )
     fig.update_yaxes(tickformat=",", gridcolor="#ddd", secondary_y=False)
-    fig.update_yaxes(ticksuffix="%", showgrid=False, secondary_y=True)
+    fig.update_yaxes(
+        tickmode="linear",
+        tick0=0,
+        dtick=1,
+        tickformat=".1f",
+        ticksuffix="%",
+        rangemode="tozero",
+        showgrid=False,
+        secondary_y=True,
+    )
     fig.update_layout(
         title=dict(text="발송 통계", x=0.5, xanchor="center", font=dict(size=23)),
         height=560,
@@ -15269,7 +15286,7 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle_v4",
+        "weekly_core_bundle_v5",
         (int(selected_year), str(week)),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
