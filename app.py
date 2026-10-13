@@ -3282,12 +3282,47 @@ def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def _weekly_unique_send_count(sw: pd.DataFrame) -> int:
+    """주간 핵심실적의 발송횟수를 실제 발송일·시간대 기준으로 계산합니다.
+
+    같은 날짜와 같은 시간대에 타겟 또는 v1/v2로 분할된 행은 1회로 봅니다.
+    """
+    if sw is None or sw.empty:
+        return 0
+
+    date_source = (
+        sw["_date"]
+        if "_date" in sw.columns
+        else pd.Series(pd.NaT, index=sw.index)
+    )
+    time_source = (
+        sw["시간대"]
+        if "시간대" in sw.columns
+        else pd.Series("", index=sw.index, dtype="object")
+    )
+    keys = pd.DataFrame({
+        "_send_date": pd.to_datetime(date_source, errors="coerce").dt.normalize(),
+        "_send_time": time_source.map(_v4482_time_key),
+    }, index=sw.index)
+    keys = keys[keys["_send_date"].notna() & keys["_send_time"].ne("")]
+    return int(keys.drop_duplicates(["_send_date", "_send_time"]).shape[0])
+
+
 def _weekly_send_chart_labels(df: pd.DataFrame) -> list[str]:
-    """합산 회차의 요일·시간대·발송유형 라벨을 만듭니다."""
-    return [
-        f"{r.get('요일','')}<br>{r.get('시간대','')}<br>{r.get('_graph_channel','MMS')}"
-        for _, r in df.iterrows()
-    ]
+    """합산 회차의 일자(요일)·시간대·발송유형 라벨을 만듭니다."""
+    weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    labels = []
+    for _, row in df.iterrows():
+        date_value = pd.to_datetime(row.get("_date"), errors="coerce")
+        if pd.notna(date_value):
+            date_label = f"{date_value.day}({weekday_map.get(date_value.dayofweek, '')})"
+        else:
+            weekday = str(row.get("요일", "") or "").strip().replace("요일", "")
+            date_label = weekday
+        labels.append(
+            f"{date_label}<br>{row.get('시간대','')}<br>{row.get('_graph_channel','MMS')}"
+        )
+    return labels
 
 
 def _weekly_product_hover_for_send(send_row: pd.Series, pw: pd.DataFrame) -> str:
@@ -15007,11 +15042,13 @@ elif menu == "주간실적":
     prev_cvr = prev_orders / prev_click if prev_click else 0
     prev_aov = prev_amount / prev_orders if prev_orders else 0
     prev_spm = prev_amount / prev_send if prev_send else 0
+    weekly_send_runs = _weekly_unique_send_count(sw)
+    prev_weekly_send_runs = _weekly_unique_send_count(prev_sw)
 
     st.markdown('<div class="subsection-title">핵심 실적</div>', unsafe_allow_html=True)
 
     cards = [
-        ("발송횟수", f"{len(sw):,}회", weekly_delta(len(sw), len(prev_sw)) if not prev_sw.empty else "-"),
+        ("발송횟수", f"{weekly_send_runs:,}회", weekly_delta(weekly_send_runs, prev_weekly_send_runs) if not prev_sw.empty else "-"),
         ("상품수", f"{len(pw):,}건", weekly_delta(len(pw), len(prev_pw)) if not prev_pw.empty else "-"),
         ("발송건수", f"{int(send_count):,}", weekly_delta(send_count, prev_send) if prev_sw is not None and not prev_sw.empty else "-"),
         ("주문건수", f"{int(order_count):,}건", weekly_delta(order_count, prev_orders) if not prev_sw.empty else "-"),
@@ -15232,7 +15269,7 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle_v3",
+        "weekly_core_bundle_v4",
         (int(selected_year), str(week)),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
