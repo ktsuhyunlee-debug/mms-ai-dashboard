@@ -12243,116 +12243,110 @@ def _factor_operation_label(group: pd.DataFrame) -> str:
     return values[-1] if values else "-"
 
 
-def _factor_first_numeric(group: pd.DataFrame, column: str, default=0.0) -> float:
-    if column not in group.columns:
-        return float(default)
-    values = pd.to_numeric(group[column], errors="coerce").dropna()
-    return float(values.iloc[-1]) if not values.empty else float(default)
-
-
-def _factor_product_history_table(
+def _factor_period_product_table(
     all_products: pd.DataFrame,
-    current_products: pd.DataFrame,
-    compare_products: pd.DataFrame,
-    current_start,
-    current_end,
-    compare_start,
-    compare_end,
+    period_products: pd.DataFrame,
+    history_end,
 ) -> pd.DataFrame:
+    """선택 기간 상품을 코드·판매가별로 묶어 회차 평균과 전체 이력을 비교합니다."""
     columns = [
-        "알파코드", "쇼라코드", "상품명", "구분", "현재 실적", "비교기간 실적",
-        "직전 실적", "최고 실적", "과거 평균", "실적 증감", "실적 영향금액",
-        "현재가", "비교기간 가격", "발송일 최저가", "직전가격",
-        "최고 실적 당시 가격", "가격 증감", "최근 3회", "실적 영향",
+        "알파코드", "쇼라코드", "상품명", "재편성여부", "운영횟수",
+        "현재실적(판매가)", "최고실적(판매가)", "최저실적(판매가)", "평균실적",
     ]
-    current_products = (
-        current_products.copy() if isinstance(current_products, pd.DataFrame) else pd.DataFrame()
-    )
-    compare_products = (
-        compare_products.copy() if isinstance(compare_products, pd.DataFrame) else pd.DataFrame()
-    )
-    if current_products.empty and compare_products.empty:
+    if period_products is None or period_products.empty:
         return pd.DataFrame(columns=columns)
-    history = all_products.copy()
-    history["_fa_key"] = _product_mix_product_keys(history)
-    history["_fa_date"] = pd.to_datetime(history.get("_date"), errors="coerce")
-    history = history[history["_fa_key"].ne("") & history["_fa_date"].notna()].copy()
-    current_products["_fa_key"] = _product_mix_product_keys(current_products)
-    compare_products["_fa_key"] = _product_mix_product_keys(compare_products)
-    current_keys = current_products.loc[current_products["_fa_key"].ne(""), "_fa_key"].tolist()
-    compare_keys = compare_products.loc[compare_products["_fa_key"].ne(""), "_fa_key"].tolist()
-    product_keys = list(dict.fromkeys(current_keys + compare_keys))
+
+    def _prepare(source: pd.DataFrame) -> pd.DataFrame:
+        work = source.copy()
+        work["_fa_key"] = _product_mix_product_keys(work)
+        work["_fa_date"] = pd.to_datetime(
+            work.get("_date", pd.Series(pd.NaT, index=work.index)), errors="coerce"
+        )
+        price_col = first_col(
+            work,
+            ["멤버십혜택가", "멤버십 혜택가", "판매가", "행사가", "혜택가"],
+        )
+        work["_fa_price"] = (
+            pd.to_numeric(
+                work[price_col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
+            if price_col else 0.0
+        )
+        work["_fa_amount"] = pd.to_numeric(
+            work.get("주문금액", pd.Series(0, index=work.index)), errors="coerce"
+        ).fillna(0)
+        work["_fa_send_run"] = _send_run_key_series(work)
+        return work[work["_fa_key"].ne("")].copy()
+
+    period = _prepare(period_products)
+    history = _prepare(all_products)
+    history = history[
+        history["_fa_date"].notna()
+        & history["_fa_date"].le(pd.Timestamp(history_end))
+    ].copy()
+    if period.empty:
+        return pd.DataFrame(columns=columns)
+
+    history_runs = (
+        history.groupby(
+            ["_fa_key", "_fa_send_run", "_fa_price"],
+            as_index=False,
+            dropna=False,
+        )["_fa_amount"].sum()
+        if not history.empty
+        else pd.DataFrame(columns=["_fa_key", "_fa_send_run", "_fa_price", "_fa_amount"])
+    )
+
+    def _amount_price_text(amount: float, price: float) -> str:
+        price_text = f"{price:,.0f}원" if price > 0 else "-"
+        return f"{amount:,.0f}원 ({price_text})"
+
     rows = []
-    analysis_end = max(pd.Timestamp(current_end), pd.Timestamp(compare_end))
-    for key in product_keys:
-        cur_group = current_products[current_products["_fa_key"].eq(key)].copy()
-        compare_group = compare_products[compare_products["_fa_key"].eq(key)].copy()
-        source_group = cur_group if not cur_group.empty else compare_group
-        hist = history[
-            history["_fa_key"].eq(key)
-            & history["_fa_date"].le(analysis_end)
-        ].sort_values("_fa_date", kind="stable")
-        prior = hist[hist["_fa_date"].lt(pd.Timestamp(current_start))].copy()
-        current_amount = _factor_numeric_sum(cur_group, "주문금액")
-        compare_amount = _factor_numeric_sum(compare_group, "주문금액")
-        prior_amount = _factor_first_numeric(prior, "주문금액", 0) if not prior.empty else 0.0
-        current_price = (
-            _factor_first_numeric(cur_group.sort_values("_date"), "멤버십혜택가", 0)
-            if not cur_group.empty else 0.0
-        )
-        compare_price = (
-            _factor_first_numeric(compare_group.sort_values("_date"), "멤버십혜택가", 0)
-            if not compare_group.empty else 0.0
-        )
-        prior_price = _factor_first_numeric(prior, "멤버십혜택가", 0) if not prior.empty else 0.0
-        hist_amounts = pd.to_numeric(hist.get("주문금액", 0), errors="coerce").fillna(0)
-        if not hist.empty and not hist_amounts.empty:
-            best_pos = hist_amounts.idxmax()
-            best_row = hist.loc[best_pos]
-            best_amount = float(hist_amounts.loc[best_pos])
-            best_price = float(pd.to_numeric(pd.Series([best_row.get("멤버십혜택가", 0)]), errors="coerce").fillna(0).iloc[0])
+    for (product_key, current_price), group in period.groupby(
+        ["_fa_key", "_fa_price"], sort=False, dropna=False
+    ):
+        group = group.sort_values("_fa_date", kind="stable")
+        current_runs = group.groupby("_fa_send_run", dropna=False)["_fa_amount"].sum()
+        operation_count = int(current_runs.size)
+        current_amount = float(current_runs.mean()) if operation_count else 0.0
+
+        product_history = history_runs[history_runs["_fa_key"].eq(product_key)].copy()
+        if product_history.empty:
+            best_amount = lowest_amount = average_amount = current_amount
+            best_price = lowest_price = float(current_price or 0)
         else:
-            best_amount, best_price = current_amount, current_price
-        past_average = _factor_numeric_sum(prior, "주문금액") / len(prior) if len(prior) else 0.0
-        recent_values = pd.to_numeric(hist.get("주문금액", 0), errors="coerce").fillna(0).tail(3).tolist()
-        impact_amount = current_amount - compare_amount
-        perf_change = impact_amount / abs(compare_amount) if compare_amount else None
-        price_change = current_price - compare_price if current_price and compare_price else None
-        if cur_group.empty and not compare_group.empty:
-            impact = "현재 미편성 영향"
-        elif compare_group.empty and not cur_group.empty:
-            impact = "현재 신규 기여"
-        elif perf_change is not None and perf_change >= 0.05:
-            impact = "상승 기여"
-        elif perf_change is not None and perf_change <= -0.05:
-            impact = "하락 영향"
-        else:
-            impact = "성과 유지"
-        alpha = clean_identifier_value(source_group["알파코드"].iloc[-1]) if "알파코드" in source_group.columns else ""
-        shora = clean_identifier_value(source_group["쇼라코드"].iloc[-1]) if "쇼라코드" in source_group.columns else ""
-        name = str(source_group.get("상품명", pd.Series([""])).iloc[-1]).strip()
-        lowest = (
-            _factor_first_numeric(cur_group.sort_values("_date"), "발송일 최저가", 0)
-            if not cur_group.empty else 0.0
-        )
+            best_row = product_history.loc[product_history["_fa_amount"].idxmax()]
+            lowest_row = product_history.loc[product_history["_fa_amount"].idxmin()]
+            best_amount = float(best_row["_fa_amount"])
+            best_price = float(best_row["_fa_price"] or 0)
+            lowest_amount = float(lowest_row["_fa_amount"])
+            lowest_price = float(lowest_row["_fa_price"] or 0)
+            average_amount = float(product_history["_fa_amount"].mean())
+
+        latest = group.iloc[-1]
+        alpha = clean_identifier_value(latest.get("알파코드", ""))
+        shora = clean_identifier_value(latest.get("쇼라코드", ""))
+        name = str(latest.get("상품명", "") or "").strip()
         rows.append({
-            "알파코드": alpha or "-", "쇼라코드": shora or "-", "상품명": name,
-            "구분": _factor_operation_label(cur_group) if not cur_group.empty else "비교기간만 편성",
-            "현재 실적": current_amount, "비교기간 실적": compare_amount,
-            "직전 실적": prior_amount if not prior.empty else pd.NA, "최고 실적": best_amount,
-            "과거 평균": past_average if not prior.empty else pd.NA,
-            "실적 증감": perf_change, "실적 영향금액": impact_amount,
-            "현재가": current_price if current_price else pd.NA,
-            "비교기간 가격": compare_price if compare_price else pd.NA,
-            "발송일 최저가": lowest if lowest else pd.NA,
-            "직전가격": prior_price if prior_price else pd.NA,
-            "최고 실적 당시 가격": best_price if best_price else pd.NA,
-            "가격 증감": price_change,
-            "최근 3회": " → ".join(f"{v / 10_000:,.0f}만" for v in recent_values) if recent_values else "-",
-            "실적 영향": impact,
-            "_sort": abs(impact_amount),
+            "알파코드": alpha or "-",
+            "쇼라코드": shora or "-",
+            "상품명": name or "-",
+            "재편성여부": _factor_operation_label(group),
+            "운영횟수": operation_count,
+            "현재실적(판매가)": _amount_price_text(current_amount, float(current_price or 0)),
+            "최고실적(판매가)": _amount_price_text(best_amount, best_price),
+            "최저실적(판매가)": _amount_price_text(lowest_amount, lowest_price),
+            "평균실적": f"{average_amount:,.0f}원",
+            "_sort": current_amount,
         })
-    return pd.DataFrame(rows).sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("_sort", ascending=False, kind="stable")
+        .drop(columns="_sort")
+        .reset_index(drop=True)[columns]
+    )
 
 
 def _factor_composition_table(current: dict, previous: dict) -> pd.DataFrame:
@@ -12541,22 +12535,29 @@ def _factor_driver_table(current: dict, previous: dict) -> pd.DataFrame:
 
     rows = []
     for label, key, unit in [
-        ("객단가", "객단가", "원"),
+        ("발송횟수", "발송횟수", "회"),
+        ("주문금액", "주문금액", "원"),
         ("발송건수", "발송건수", "건"),
         ("클릭수", "클릭수", "건"),
         ("CTR", "CTR", "%"),
+        ("CVR", "CVR", "%"),
+        ("SPM", "SPM", "소수"),
+        ("객단가", "객단가", "원"),
     ]:
         prev_value, cur_value = _number(previous.get(key)), _number(current.get(key))
         score = _rel(cur_value, prev_value)
         if unit == "원":
             prev_text, cur_text = f"{prev_value:,.0f}원", f"{cur_value:,.0f}원"
             delta_text = f"{cur_value - prev_value:+,.0f}원 ({score * 100:+.1f}%)"
-        elif unit == "건":
-            prev_text, cur_text = f"{prev_value:,.0f}건", f"{cur_value:,.0f}건"
-            delta_text = f"{cur_value - prev_value:+,.0f}건 ({score * 100:+.1f}%)"
-        else:
+        elif unit in {"건", "회"}:
+            prev_text, cur_text = f"{prev_value:,.0f}{unit}", f"{cur_value:,.0f}{unit}"
+            delta_text = f"{cur_value - prev_value:+,.0f}{unit} ({score * 100:+.1f}%)"
+        elif unit == "%":
             prev_text, cur_text = f"{prev_value * 100:.1f}%", f"{cur_value * 100:.1f}%"
             delta_text = f"{(cur_value - prev_value) * 100:+.1f}%p"
+        else:
+            prev_text, cur_text = f"{prev_value:.1f}", f"{cur_value:.1f}"
+            delta_text = f"{cur_value - prev_value:+.1f} ({score * 100:+.1f}%)"
         rows.append({
             "요인": label,
             "비교 기간": prev_text,
@@ -12661,14 +12662,15 @@ def _build_factor_analysis_bundle(
         "current_metrics": current_metrics,
         "previous_metrics": previous_metrics,
         "drivers": _factor_driver_table(current_metrics, previous_metrics),
-        "products": _factor_product_history_table(
+        "current_product_analysis": _factor_period_product_table(
             filtered_products,
             current_products,
+            max(current_period["end"], compare_period["end"]),
+        ),
+        "compare_product_analysis": _factor_period_product_table(
+            filtered_products,
             previous_products,
-            current_period["start"],
-            current_period["end"],
-            compare_period["start"],
-            compare_period["end"],
+            max(current_period["end"], compare_period["end"]),
         ),
         "composition": _factor_composition_table(current_metrics, previous_metrics),
         "targets": target_table,
@@ -16384,13 +16386,6 @@ elif menu == "실적요인분석":
     st.markdown(
         """
         <style>
-          .factor-summary-card{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
-            padding:12px 14px;min-height:92px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
-          .factor-summary-label{font-size:13px;color:#6b7280;font-weight:850;margin-bottom:5px}
-          .factor-summary-row{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
-          .factor-summary-value{font-size:25px;color:#111827;font-weight:900;letter-spacing:-.5px}
-          .factor-summary-delta{font-size:14px;font-weight:900;white-space:nowrap}
-          .factor-up{color:#d11f1f}.factor-down{color:#1e5dcc}.factor-flat{color:#64748b}
           .factor-diagnosis{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
             padding:13px 15px;margin:10px 0 16px;line-height:1.6;box-shadow:0 2px 8px rgba(25,42,70,.035)}
           .factor-diagnosis-title{font-size:15px;font-weight:900;color:#111827;margin-bottom:3px}
@@ -16547,7 +16542,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v3",
+        "performance_factor_analysis_v4",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16580,32 +16575,6 @@ elif menu == "실적요인분석":
             return f"{float(value):+,.0f}원"
         return f"{float(value) * 100:+.1f}%"
 
-    def _factor_delta_class(value):
-        if value is None or pd.isna(value) or abs(float(value)) < 1e-12:
-            return "factor-flat"
-        return "factor-up" if float(value) > 0 else "factor-down"
-
-    factor_kpis = [
-        ("주문금액", f'{factor_current["주문금액"] / 10_000:,.0f}만원', _factor_change(factor_current["주문금액"], factor_previous["주문금액"]), False, False),
-        ("CTR", f'{factor_current["CTR"] * 100:.1f}%', _factor_change(factor_current["CTR"], factor_previous["CTR"], pp=True), True, False),
-        ("SPM", f'{factor_current["SPM"]:.1f}', _factor_change(factor_current["SPM"], factor_previous["SPM"]), False, False),
-        ("CVR", f'{factor_current["CVR"] * 100:.1f}%', _factor_change(factor_current["CVR"], factor_previous["CVR"], pp=True), True, False),
-        ("객단가", f'{factor_current["객단가"]:,.0f}원', _factor_change(factor_current["객단가"], factor_previous["객단가"]), False, False),
-    ]
-    factor_kpi_cols = st.columns(5)
-    for col, (label, value, delta, pp, money) in zip(factor_kpi_cols, factor_kpis):
-        with col:
-            st.markdown(
-                '<div class="factor-summary-card">'
-                f'<div class="factor-summary-label">{label}</div>'
-                '<div class="factor-summary-row">'
-                f'<div class="factor-summary-value">{value}</div>'
-                f'<div class="factor-summary-delta {_factor_delta_class(delta)}">'
-                f'{_factor_delta_text(delta, pp=pp, money=money)}</div>'
-                '</div></div>',
-                unsafe_allow_html=True,
-            )
-
     amount_change = _factor_change(factor_current["주문금액"], factor_previous["주문금액"])
     amount_direction = "상승" if amount_change is not None and amount_change > 0.005 else (
         "하락" if amount_change is not None and amount_change < -0.005 else "유지"
@@ -16618,9 +16587,10 @@ elif menu == "실적요인분석":
         "상승 요인" if amount_direction == "상승"
         else ("하락 요인" if amount_direction == "하락" else None)
     )
+    driver_candidates = driver_table[~driver_table["요인"].eq("주문금액")].copy()
     matching_drivers = (
-        driver_table[driver_table["판단"].eq(driver_kind)].copy()
-        if driver_kind else driver_table.copy()
+        driver_candidates[driver_candidates["판단"].eq(driver_kind)].copy()
+        if driver_kind else driver_candidates
     )
     matching_drivers["_abs_score"] = matching_drivers["_score"].abs()
     matching_drivers = matching_drivers.sort_values("_abs_score", ascending=False).head(2)
@@ -16714,37 +16684,40 @@ elif menu == "실적요인분석":
 
     with factor_product_tab:
         st.caption(
-            "알파코드·쇼라코드 기준 동일 상품 이력 비교 · 실적·가격 증감은 선택한 비교 기간 대비 · "
-            "현재 빠진 비교 기간 상품도 하락 영향 상품으로 함께 표시"
+            "알파코드·쇼라코드·판매가가 같은 상품은 한 행으로 집계합니다. "
+            "동일 상품이 여러 회차 운영된 경우 현재실적은 회차당 평균 주문금액입니다."
         )
-        factor_products_view = factor_bundle["products"].copy()
-        if factor_products_view.empty:
-            st.info("선택 기간에 표시할 발송 상품이 없습니다.")
-        else:
-            for column in [
-                "현재 실적", "비교기간 실적", "직전 실적", "최고 실적", "과거 평균",
-                "현재가", "비교기간 가격", "발송일 최저가",
-                "직전가격", "최고 실적 당시 가격",
-            ]:
-                factor_products_view[column] = factor_products_view[column].map(
-                    lambda value: "-" if pd.isna(value) else f"{float(value):,.0f}원"
+        factor_current_product_tab, factor_compare_product_tab = st.tabs(
+            ["기준기간", "비교기간"]
+        )
+
+        def _render_factor_product_period(tab, bundle_key, period, table_key):
+            with tab:
+                st.caption(f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d}')
+                view = factor_bundle[bundle_key].copy()
+                if view.empty:
+                    st.info("해당 기간에 표시할 발송 상품이 없습니다.")
+                    return
+                selectable_dataframe(
+                    clean_identifier_columns(view),
+                    key=f"factor_products_{table_key}_{factor_key}",
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(760, 42 + len(view) * 35),
                 )
-            factor_products_view["실적 영향금액"] = factor_products_view["실적 영향금액"].map(
-                lambda value: f"{float(value):+,.0f}원"
-            )
-            factor_products_view["실적 증감"] = factor_products_view["실적 증감"].map(
-                lambda value: "-" if pd.isna(value) else f"{float(value) * 100:+.1f}%"
-            )
-            factor_products_view["가격 증감"] = factor_products_view["가격 증감"].map(
-                lambda value: "-" if pd.isna(value) else f"{float(value):+,.0f}원"
-            )
-            selectable_dataframe(
-                clean_identifier_columns(factor_products_view),
-                key=f"factor_products_{factor_key}",
-                use_container_width=True,
-                hide_index=True,
-                height=min(760, 42 + len(factor_products_view) * 35),
-            )
+
+        _render_factor_product_period(
+            factor_current_product_tab,
+            "current_product_analysis",
+            factor_current_period,
+            "current",
+        )
+        _render_factor_product_period(
+            factor_compare_product_tab,
+            "compare_product_analysis",
+            factor_compare_period,
+            "compare",
+        )
 
     with factor_mix_tab:
         factor_mix_view = factor_bundle["composition"].copy()
