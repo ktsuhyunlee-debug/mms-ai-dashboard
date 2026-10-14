@@ -12654,7 +12654,6 @@ def _build_factor_analysis_bundle(
     target_current = _factor_normalize_target_columns(current_sends)
     target_previous = _factor_normalize_target_columns(previous_sends)
     target_table = _factor_compare_groups(target_current, target_previous, ["_fa_gender", "_fa_age"])
-    seg_table = _factor_compare_groups(target_current, target_previous, ["_fa_gender", "_fa_age", "_fa_seg"])
 
     return {
         "current_period": current_period,
@@ -12673,8 +12672,9 @@ def _build_factor_analysis_bundle(
             max(current_period["end"], compare_period["end"]),
         ),
         "composition": _factor_composition_table(current_metrics, previous_metrics),
+        "current_operation_performance": _monthly_operation_performance(current_products),
+        "compare_operation_performance": _monthly_operation_performance(previous_products),
         "targets": target_table,
-        "segments": seg_table,
         "materials": _factor_material_table(current_sends, previous_sends, messages),
         "operations": _factor_operation_table(
             current_sends, previous_sends, current_products, previous_products
@@ -16386,13 +16386,20 @@ elif menu == "실적요인분석":
     st.markdown(
         """
         <style>
-          .factor-diagnosis{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
-            padding:13px 15px;margin:10px 0 16px;line-height:1.6;box-shadow:0 2px 8px rgba(25,42,70,.035)}
-          .factor-diagnosis-title{font-size:15px;font-weight:900;color:#111827;margin-bottom:3px}
           .factor-condition{border:1px solid #e3e7ed;border-radius:9px;background:#fff;
             padding:9px 11px;margin-bottom:7px;display:flex;justify-content:space-between;gap:8px}
           .factor-condition-name{font-size:13px;color:#64748b;font-weight:800}
           .factor-condition-value{font-size:13px;color:#111827;font-weight:900;text-align:right}
+          .factor-mix-card{border:1px solid #dfe4ec;border-radius:11px;background:#fff;
+            padding:13px 15px;min-height:224px;box-shadow:0 2px 8px rgba(25,42,70,.035)}
+          .factor-mix-title{font-size:16px;font-weight:900;color:#111827;margin-bottom:10px}
+          .factor-mix-grid{display:grid;grid-template-columns:minmax(94px,1fr) minmax(92px,1fr) minmax(92px,1fr);
+            align-items:center;font-size:12px}
+          .factor-mix-grid>div{padding:7px 5px;border-top:1px solid #edf0f4}
+          .factor-mix-grid .factor-mix-head{border-top:0;color:#64748b;font-weight:850;padding-top:2px}
+          .factor-mix-grid .factor-mix-period{text-align:right;color:#475569;font-weight:850;line-height:1.35}
+          .factor-mix-grid .factor-mix-label{color:#475569;font-weight:750}
+          .factor-mix-grid .factor-mix-value{text-align:right;color:#111827;font-weight:900;white-space:nowrap}
         </style>
         """,
         unsafe_allow_html=True,
@@ -16542,7 +16549,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v4",
+        "performance_factor_analysis_v5",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16575,35 +16582,10 @@ elif menu == "실적요인분석":
             return f"{float(value):+,.0f}원"
         return f"{float(value) * 100:+.1f}%"
 
-    amount_change = _factor_change(factor_current["주문금액"], factor_previous["주문금액"])
-    amount_direction = "상승" if amount_change is not None and amount_change > 0.005 else (
-        "하락" if amount_change is not None and amount_change < -0.005 else "유지"
-    )
     driver_table = factor_bundle.get("drivers", pd.DataFrame()).copy()
     # 코드 배포 직후 이전 세션 캐시가 남아 있어도 신규 표 구조로 즉시 재계산합니다.
     if driver_table.empty or "_score" not in driver_table.columns:
         driver_table = _factor_driver_table(factor_current, factor_previous)
-    driver_kind = (
-        "상승 요인" if amount_direction == "상승"
-        else ("하락 요인" if amount_direction == "하락" else None)
-    )
-    driver_candidates = driver_table[~driver_table["요인"].eq("주문금액")].copy()
-    matching_drivers = (
-        driver_candidates[driver_candidates["판단"].eq(driver_kind)].copy()
-        if driver_kind else driver_candidates
-    )
-    matching_drivers["_abs_score"] = matching_drivers["_score"].abs()
-    matching_drivers = matching_drivers.sort_values("_abs_score", ascending=False).head(2)
-    driver_names = matching_drivers["요인"].tolist()
-    driver_summary = "·".join(driver_names) if driver_names else "복합 요인"
-    st.markdown(
-        '<div class="factor-diagnosis">'
-        f'<div class="factor-diagnosis-title">종합 진단 · 실적 {amount_direction}</div>'
-        f'주문금액은 비교 기간 대비 {_factor_delta_text(amount_change)} 변동했습니다. '
-        f'같은 방향으로 변화한 주요 지표는 <b>{_html.escape(driver_summary)}</b>입니다.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
 
     st.markdown('<div class="subsection-title">비교 조건</div>', unsafe_allow_html=True)
     send_delta = _factor_change(factor_current["발송건수"], factor_previous["발송건수"])
@@ -16668,56 +16650,114 @@ elif menu == "실적요인분석":
         "최저가 미확보·100만원 미만 상품은 감소할수록 개선으로 판단합니다."
     )
 
+    st.markdown('<div class="subsection-title">상품구성 · 성과구간</div>', unsafe_allow_html=True)
+    current_operation = factor_bundle["current_operation_performance"].copy()
+    compare_operation = factor_bundle["compare_operation_performance"].copy()
+    current_operation_lookup = {
+        str(row["구분"]): row for _, row in current_operation.iterrows()
+    }
+    compare_operation_lookup = {
+        str(row["구분"]): row for _, row in compare_operation.iterrows()
+    }
+
+    def _factor_mix_count_text(row, count_column, share_column):
+        count = int(row.get(count_column, 0) or 0)
+        share = float(row.get(share_column, 0) or 0) * 100
+        return f"{count:,}건 · {share:.1f}%"
+
+    def _factor_mix_money_text(value):
+        value = float(value or 0)
+        if abs(value) >= 100_000_000:
+            return f"{value / 100_000_000:.2f}억원"
+        if abs(value) >= 10_000:
+            return f"{value / 10_000:,.0f}만원"
+        return f"{value:,.0f}원"
+
+    empty_operation_row = {
+        "전체": 0, "전체 비중": 0.0,
+        "300만원 이상": 0, "300만원 이상 비중": 0.0,
+        "100만원 미만": 0, "100만원 미만 비중": 0.0,
+        "평균금액": 0.0,
+    }
+    operation_card_columns = st.columns(3)
+    for operation_column, operation_name in zip(
+        operation_card_columns, ["재편성", "유사신규", "신규"]
+    ):
+        current_row = current_operation_lookup.get(operation_name, empty_operation_row)
+        compare_row = compare_operation_lookup.get(operation_name, empty_operation_row)
+        card_rows = [
+            ("전체 구성", _factor_mix_count_text(compare_row, "전체", "전체 비중"), _factor_mix_count_text(current_row, "전체", "전체 비중")),
+            ("300만원 이상", _factor_mix_count_text(compare_row, "300만원 이상", "300만원 이상 비중"), _factor_mix_count_text(current_row, "300만원 이상", "300만원 이상 비중")),
+            ("100만원 미만", _factor_mix_count_text(compare_row, "100만원 미만", "100만원 미만 비중"), _factor_mix_count_text(current_row, "100만원 미만", "100만원 미만 비중")),
+            ("평균 주문금액", _factor_mix_money_text(compare_row.get("평균금액", 0)), _factor_mix_money_text(current_row.get("평균금액", 0))),
+        ]
+        card_cells = [
+            '<div class="factor-mix-head">성과구간</div>',
+            '<div class="factor-mix-head factor-mix-period">'
+            f'비교기간<br>{factor_compare_period["start"]:%m.%d}~{factor_compare_period["end"]:%m.%d}</div>',
+            '<div class="factor-mix-head factor-mix-period">'
+            f'기준기간<br>{factor_current_period["start"]:%m.%d}~{factor_current_period["end"]:%m.%d}</div>',
+        ]
+        for row_label, compare_text, current_text in card_rows:
+            card_cells.extend([
+                f'<div class="factor-mix-label">{row_label}</div>',
+                f'<div class="factor-mix-value">{compare_text}</div>',
+                f'<div class="factor-mix-value">{current_text}</div>',
+            ])
+        with operation_column:
+            st.markdown(
+                '<div class="factor-mix-card">'
+                f'<div class="factor-mix-title">{operation_name}</div>'
+                f'<div class="factor-mix-grid">{"".join(card_cells)}</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
     (
-        factor_product_tab,
+        factor_current_product_tab,
+        factor_compare_product_tab,
         factor_mix_tab,
         factor_target_tab,
-        factor_seg_tab,
         factor_material_tab,
         factor_operation_tab,
         factor_trend_tab,
     ) = st.tabs([
-        "발송 상품 분석", "상품 구성", "타겟 성과", "SEG 성과",
-        "소재 · 문구", "운영 조건", "최근 추이",
+        "기준기간상품", "비교기간상품", "상품구성", "타겟성과",
+        "소재문구", "운영조건", "최근추이",
     ])
     factor_key = hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:10]
 
-    with factor_product_tab:
-        st.caption(
-            "알파코드·쇼라코드·판매가가 같은 상품은 한 행으로 집계합니다. "
-            "동일 상품이 여러 회차 운영된 경우 현재실적은 회차당 평균 주문금액입니다."
-        )
-        factor_current_product_tab, factor_compare_product_tab = st.tabs(
-            ["기준기간", "비교기간"]
-        )
+    def _render_factor_product_period(tab, bundle_key, period, table_key):
+        with tab:
+            st.caption(
+                f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d} · '
+                "알파코드·쇼라코드·판매가가 같으면 한 행으로 집계 · "
+                "여러 회차 운영 시 현재실적은 회차당 평균 주문금액"
+            )
+            view = factor_bundle[bundle_key].copy()
+            if view.empty:
+                st.info("해당 기간에 표시할 발송 상품이 없습니다.")
+                return
+            selectable_dataframe(
+                clean_identifier_columns(view),
+                key=f"factor_products_{table_key}_{factor_key}",
+                use_container_width=True,
+                hide_index=True,
+                height=min(760, 42 + len(view) * 35),
+            )
 
-        def _render_factor_product_period(tab, bundle_key, period, table_key):
-            with tab:
-                st.caption(f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d}')
-                view = factor_bundle[bundle_key].copy()
-                if view.empty:
-                    st.info("해당 기간에 표시할 발송 상품이 없습니다.")
-                    return
-                selectable_dataframe(
-                    clean_identifier_columns(view),
-                    key=f"factor_products_{table_key}_{factor_key}",
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(760, 42 + len(view) * 35),
-                )
-
-        _render_factor_product_period(
-            factor_current_product_tab,
-            "current_product_analysis",
-            factor_current_period,
-            "current",
-        )
-        _render_factor_product_period(
-            factor_compare_product_tab,
-            "compare_product_analysis",
-            factor_compare_period,
-            "compare",
-        )
+    _render_factor_product_period(
+        factor_current_product_tab,
+        "current_product_analysis",
+        factor_current_period,
+        "current",
+    )
+    _render_factor_product_period(
+        factor_compare_product_tab,
+        "compare_product_analysis",
+        factor_compare_period,
+        "compare",
+    )
 
     with factor_mix_tab:
         factor_mix_view = factor_bundle["composition"].copy()
@@ -16777,30 +16817,6 @@ elif menu == "실적요인분석":
             for col in ["주문금액", "주문금액 증감"]:
                 target_view[col] = target_view[col].map(lambda v: f"{float(v):+,.0f}원" if col.endswith("증감") else f"{float(v):,.0f}원")
             selectable_dataframe(target_view, key=f"factor_target_{factor_key}", use_container_width=True, hide_index=True)
-
-    with factor_seg_tab:
-        seg_view = factor_bundle["segments"].copy()
-        seg_view = seg_view[seg_view.get("_fa_seg", pd.Series("", index=seg_view.index)).astype(str).str.strip().ne("")]
-        if seg_view.empty:
-            st.info("SEG별 비교 데이터가 없습니다.")
-        else:
-            seg_view["구분"] = (seg_view["_fa_gender"].astype(str) + " " + seg_view["_fa_age"].astype(str)).str.strip()
-            seg_view = seg_view[[
-                "구분", "_fa_seg", "현재_발송건수", "현재_CTR", "CTR_증감",
-                "현재_SPM", "SPM_증감", "현재_주문금액", "주문금액_증감",
-            ]].rename(columns={
-                "_fa_seg": "SEG", "현재_발송건수": "발송건수", "현재_CTR": "CTR",
-                "CTR_증감": "CTR 증감", "현재_SPM": "SPM", "SPM_증감": "SPM 증감",
-                "현재_주문금액": "주문금액", "주문금액_증감": "주문금액 증감",
-            })
-            seg_view["발송건수"] = seg_view["발송건수"].map(lambda v: f"{float(v):,.0f}")
-            seg_view["CTR"] = seg_view["CTR"].map(lambda v: f"{float(v) * 100:.1f}%")
-            seg_view["CTR 증감"] = seg_view["CTR 증감"].map(lambda v: f"{float(v) * 100:+.1f}%p")
-            seg_view["SPM"] = seg_view["SPM"].map(lambda v: f"{float(v):.1f}")
-            seg_view["SPM 증감"] = seg_view["SPM 증감"].map(lambda v: f"{float(v):+.1f}")
-            seg_view["주문금액"] = seg_view["주문금액"].map(lambda v: f"{float(v):,.0f}원")
-            seg_view["주문금액 증감"] = seg_view["주문금액 증감"].map(lambda v: f"{float(v):+,.0f}원")
-            selectable_dataframe(seg_view, key=f"factor_seg_{factor_key}", use_container_width=True, hide_index=True, height=620)
 
     with factor_material_tab:
         st.caption("소재·문구는 발송 회차 기준이며 상품별 CTR을 의미하지 않습니다.")
