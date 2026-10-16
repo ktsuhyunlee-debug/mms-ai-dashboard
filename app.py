@@ -12251,12 +12251,11 @@ def _factor_period_product_table(
 ) -> pd.DataFrame:
     """선택 기간의 상품 실적을 실제 발송 회차별로 표시하고 과거 이력과 비교합니다."""
     columns = [
-        "알파코드", "쇼라코드", "상품명", "재편성 여부",
-        "회차", "발송일", "시간대", "타겟",
-        "기간 운영횟수", "누적 MMS 발송횟수",
-        "현재실적", "평균실적", "평균 대비", "실적 구분",
-        "최고실적", "최고 대비",
-        "현재가", "최고실적 당시 가격", "가격 변동", "상품가격 구분",
+        "알파코드", "쇼라코드", "상품명", "상품 구분",
+        "기간 회차", "발송일", "시간대", "타겟", "누적 MMS 발송횟수",
+        "회차 실적", "이전 평균실적", "평균 대비", "실적 구분",
+        "이전 최고실적", "최고 대비",
+        "회차 판매가", "최고실적 당시 판매가", "가격 변동률", "가격 구분",
     ]
     if period_products is None or period_products.empty:
         return pd.DataFrame(columns=columns)
@@ -12320,6 +12319,7 @@ def _factor_period_product_table(
     )
 
     period_counts = period.groupby("_fa_key")["_fa_send_run"].nunique().to_dict()
+    period_totals = period.groupby("_fa_key")["_fa_amount"].sum().to_dict()
     period_orders = {}
     for product_key, product_rows in period.groupby("_fa_key", sort=False):
         run_order = (
@@ -12341,6 +12341,9 @@ def _factor_period_product_table(
         if pd.isna(base) or float(base) == 0:
             return pd.NA
         return (float(current) - float(base)) / abs(float(base))
+
+    def _percent_value(value) -> float:
+        return float(value) * 100 if pd.notna(value) else float("nan")
 
     def _performance_label(value) -> str:
         if pd.isna(value):
@@ -12388,7 +12391,8 @@ def _factor_period_product_table(
                 & product_history["_fa_send_run"].astype(str).lt(send_run)
             ].copy()
 
-        if prior_history.empty:
+        is_first_operation = prior_history.empty
+        if is_first_operation:
             best_amount = average_amount = float("nan")
             best_price = float("nan")
         else:
@@ -12411,30 +12415,39 @@ def _factor_period_product_table(
             "알파코드": alpha or "-",
             "쇼라코드": shora or "-",
             "상품명": name or "-",
-            "재편성 여부": _factor_operation_label(group),
-            "회차": int(period_orders.get(product_key, {}).get(send_run, 1)),
+            "상품 구분": _factor_operation_label(group),
+            "기간 회차": (
+                f'{int(period_orders.get(product_key, {}).get(send_run, 1))}'
+                f'/{int(period_counts.get(product_key, 0))}'
+            ),
             "발송일": run_date.date() if pd.notna(run_date) else None,
             "시간대": str(latest.get("_fa_time", "") or "-") or "-",
             "타겟": _targets(group),
-            "기간 운영횟수": int(period_counts.get(product_key, 0)),
             "누적 MMS 발송횟수": int(cumulative_mms_counts.get(product_key, 0)),
-            "현재실적": current_amount,
-            "평균실적": average_amount,
-            "평균 대비": average_change,
-            "실적 구분": _performance_label(average_change),
-            "최고실적": best_amount,
-            "최고 대비": best_change,
-            "현재가": current_price if current_price > 0 else float("nan"),
-            "최고실적 당시 가격": best_price if pd.notna(best_price) and best_price > 0 else float("nan"),
-            "가격 변동": price_change,
-            "상품가격 구분": _price_label(current_price, best_price),
-            "_sort": current_amount,
+            "회차 실적": current_amount,
+            "이전 평균실적": average_amount,
+            "평균 대비": _percent_value(average_change),
+            "실적 구분": "최초 운영" if is_first_operation else _performance_label(average_change),
+            "이전 최고실적": best_amount,
+            "최고 대비": _percent_value(best_change),
+            "회차 판매가": current_price if current_price > 0 else float("nan"),
+            "최고실적 당시 판매가": best_price if pd.notna(best_price) and best_price > 0 else float("nan"),
+            "가격 변동률": _percent_value(price_change),
+            "가격 구분": "최초 운영" if is_first_operation else _price_label(current_price, best_price),
+            "_product_total_sort": float(period_totals.get(product_key, 0)),
+            "_product_sort": product_key,
+            "_run_date_sort": run_date,
+            "_run_time_sort": str(latest.get("_fa_time", "") or ""),
         })
 
     return (
         pd.DataFrame(rows)
-        .sort_values("_sort", ascending=False, kind="stable")
-        .drop(columns="_sort")
+        .sort_values(
+            ["_product_total_sort", "_product_sort", "_run_date_sort", "_run_time_sort"],
+            ascending=[False, True, True, True],
+            kind="stable",
+        )
+        .drop(columns=["_product_total_sort", "_product_sort", "_run_date_sort", "_run_time_sort"])
         .reset_index(drop=True)[columns]
     )
 
@@ -16642,7 +16655,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v7",
+        "performance_factor_analysis_v8",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16826,13 +16839,13 @@ elif menu == "실적요인분석":
             index=data.index,
             columns=data.columns,
         )
-        for column in ["평균 대비", "최고 대비", "가격 변동"]:
+        for column in ["평균 대비", "최고 대비", "가격 변동률"]:
             if column not in data.columns:
                 continue
             values = pd.to_numeric(data[column], errors="coerce")
             styles.loc[values.gt(0), column] = "color: #d64545; font-weight: 600;"
             styles.loc[values.lt(0), column] = "color: #2f6fec; font-weight: 600;"
-        for column in ["실적 구분", "상품가격 구분"]:
+        for column in ["실적 구분", "가격 구분"]:
             if column not in data.columns:
                 continue
             values = data[column].fillna("").astype(str).str.strip()
@@ -16845,7 +16858,7 @@ elif menu == "실적요인분석":
             st.caption(
                 f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d} · '
                 "상품별 실제 발송 회차를 각각 표시 · 같은 날짜·시간대의 V1/V2는 합산해 1회 처리 · "
-                "평균·최고실적은 해당 회차 이전 발송 이력 기준 · "
+                "이전 평균·최고실적은 해당 회차 이전 발송 이력 기준 · "
                 "실적 구분은 평균 대비 ±5% 이내 유지 · "
                 "숫자 열은 전체 수치 기준으로 정렬"
             )
@@ -16857,15 +16870,27 @@ elif menu == "실적요인분석":
             number_formats = {
                 column: "{:,.0f}"
                 for column in [
-                    "회차", "기간 운영횟수", "누적 MMS 발송횟수",
-                    "현재실적", "평균실적", "최고실적",
-                    "현재가", "최고실적 당시 가격",
+                    "누적 MMS 발송횟수", "회차 실적", "이전 평균실적",
+                    "이전 최고실적", "회차 판매가", "최고실적 당시 판매가",
                 ]
                 if column in view.columns
             }
             number_formats.update({
-                column: "{:+.1%}"
-                for column in ["평균 대비", "최고 대비", "가격 변동"]
+                column: "{:+.1f}%"
+                for column in ["평균 대비", "최고 대비", "가격 변동률"]
+                if column in view.columns
+            })
+            column_config = {
+                column: st.column_config.NumberColumn(format="localized")
+                for column in [
+                    "누적 MMS 발송횟수", "회차 실적", "이전 평균실적",
+                    "이전 최고실적", "회차 판매가", "최고실적 당시 판매가",
+                ]
+                if column in view.columns
+            }
+            column_config.update({
+                column: st.column_config.NumberColumn(format="%+.1f%%")
+                for column in ["평균 대비", "최고 대비", "가격 변동률"]
                 if column in view.columns
             })
             styled_view = (
@@ -16878,6 +16903,7 @@ elif menu == "실적요인분석":
                 key=f"factor_products_{table_key}_{factor_key}",
                 use_container_width=True,
                 hide_index=True,
+                column_config=column_config,
                 height=min(760, 42 + len(view) * 35),
             )
 
