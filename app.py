@@ -12255,7 +12255,8 @@ def _factor_period_product_table(
         "기간 회차", "발송일", "시간대", "타겟", "누적 MMS 발송횟수",
         "회차 실적", "이전 평균실적", "평균 대비", "실적 구분",
         "이전 최고실적", "최고 대비",
-        "회차 판매가", "최고실적 당시 판매가", "가격 변동률", "가격 구분",
+        "회차 판매가", "이전 평균 판매가", "평균가 대비", "평균가 구분",
+        "최고실적 당시 판매가", "최고실적가 대비", "최고실적가 구분",
     ]
     if period_products is None or period_products.empty:
         return pd.DataFrame(columns=columns)
@@ -12348,18 +12349,18 @@ def _factor_period_product_table(
     def _performance_label(value) -> str:
         if pd.isna(value):
             return "-"
-        if float(value) > 0.05:
+        if float(value) > 0.10:
             return "상승"
-        if float(value) < -0.05:
+        if float(value) < -0.10:
             return "하락"
         return "유지"
 
-    def _price_label(current_price: float, best_price: float) -> str:
-        if pd.isna(current_price) or pd.isna(best_price) or current_price <= 0 or best_price <= 0:
+    def _price_label(change_ratio) -> str:
+        if pd.isna(change_ratio):
             return "-"
-        if current_price > best_price:
+        if float(change_ratio) > 0.02:
             return "상승"
-        if current_price < best_price:
+        if float(change_ratio) < -0.02:
             return "하락"
         return "유지"
 
@@ -12394,17 +12395,26 @@ def _factor_period_product_table(
         is_first_operation = prior_history.empty
         if is_first_operation:
             best_amount = average_amount = float("nan")
-            best_price = float("nan")
+            best_price = average_price = float("nan")
         else:
             best_row = prior_history.loc[prior_history["_fa_amount"].idxmax()]
             best_amount = float(best_row["_fa_amount"])
             best_price = float(best_row["_fa_price"] or 0)
             average_amount = float(prior_history["_fa_amount"].mean())
+            valid_prior_prices = pd.to_numeric(
+                prior_history["_fa_price"], errors="coerce"
+            )
+            valid_prior_prices = valid_prior_prices[valid_prior_prices.gt(0)]
+            average_price = (
+                float(valid_prior_prices.mean())
+                if not valid_prior_prices.empty else float("nan")
+            )
 
         current_price = float(current_price or 0)
         average_change = _change_ratio(current_amount, average_amount)
         best_change = _change_ratio(current_amount, best_amount)
-        price_change = _change_ratio(current_price, best_price)
+        average_price_change = _change_ratio(current_price, average_price)
+        best_price_change = _change_ratio(current_price, best_price)
 
         latest = group.iloc[-1]
         run_date = group["_fa_date"].dropna().min()
@@ -12431,9 +12441,12 @@ def _factor_period_product_table(
             "이전 최고실적": best_amount,
             "최고 대비": _percent_value(best_change),
             "회차 판매가": current_price if current_price > 0 else float("nan"),
+            "이전 평균 판매가": average_price if pd.notna(average_price) and average_price > 0 else float("nan"),
+            "평균가 대비": _percent_value(average_price_change),
+            "평균가 구분": "최초 운영" if is_first_operation else _price_label(average_price_change),
             "최고실적 당시 판매가": best_price if pd.notna(best_price) and best_price > 0 else float("nan"),
-            "가격 변동률": _percent_value(price_change),
-            "가격 구분": "최초 운영" if is_first_operation else _price_label(current_price, best_price),
+            "최고실적가 대비": _percent_value(best_price_change),
+            "최고실적가 구분": "최초 운영" if is_first_operation else _price_label(best_price_change),
             "_product_total_sort": float(period_totals.get(product_key, 0)),
             "_product_sort": product_key,
             "_run_date_sort": run_date,
@@ -16655,7 +16668,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v8",
+        "performance_factor_analysis_v9",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16839,13 +16852,13 @@ elif menu == "실적요인분석":
             index=data.index,
             columns=data.columns,
         )
-        for column in ["평균 대비", "최고 대비", "가격 변동률"]:
+        for column in ["평균 대비", "최고 대비", "평균가 대비", "최고실적가 대비"]:
             if column not in data.columns:
                 continue
             values = pd.to_numeric(data[column], errors="coerce")
             styles.loc[values.gt(0), column] = "color: #d64545; font-weight: 600;"
             styles.loc[values.lt(0), column] = "color: #2f6fec; font-weight: 600;"
-        for column in ["실적 구분", "가격 구분"]:
+        for column in ["실적 구분", "평균가 구분", "최고실적가 구분"]:
             if column not in data.columns:
                 continue
             values = data[column].fillna("").astype(str).str.strip()
@@ -16859,7 +16872,8 @@ elif menu == "실적요인분석":
                 f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d} · '
                 "상품별 실제 발송 회차를 각각 표시 · 같은 날짜·시간대의 V1/V2는 합산해 1회 처리 · "
                 "이전 평균·최고실적은 해당 회차 이전 발송 이력 기준 · "
-                "실적 구분은 평균 대비 ±5% 이내 유지 · "
+                "실적 구분은 이전 평균실적 대비 ±10% 이내 유지 · "
+                "판매가 구분은 이전 평균·최고실적 당시 판매가 대비 각각 ±2% 이내 유지 · "
                 "숫자 열은 전체 수치 기준으로 정렬"
             )
             view = factor_bundle[bundle_key].copy()
@@ -16871,26 +16885,28 @@ elif menu == "실적요인분석":
                 column: "{:,.0f}"
                 for column in [
                     "누적 MMS 발송횟수", "회차 실적", "이전 평균실적",
-                    "이전 최고실적", "회차 판매가", "최고실적 당시 판매가",
+                    "이전 최고실적", "회차 판매가", "이전 평균 판매가",
+                    "최고실적 당시 판매가",
                 ]
                 if column in view.columns
             }
             number_formats.update({
                 column: "{:+.1f}%"
-                for column in ["평균 대비", "최고 대비", "가격 변동률"]
+                for column in ["평균 대비", "최고 대비", "평균가 대비", "최고실적가 대비"]
                 if column in view.columns
             })
             column_config = {
                 column: st.column_config.NumberColumn(format="localized")
                 for column in [
                     "누적 MMS 발송횟수", "회차 실적", "이전 평균실적",
-                    "이전 최고실적", "회차 판매가", "최고실적 당시 판매가",
+                    "이전 최고실적", "회차 판매가", "이전 평균 판매가",
+                    "최고실적 당시 판매가",
                 ]
                 if column in view.columns
             }
             column_config.update({
                 column: st.column_config.NumberColumn(format="%+.1f%%")
-                for column in ["평균 대비", "최고 대비", "가격 변동률"]
+                for column in ["평균 대비", "최고 대비", "평균가 대비", "최고실적가 대비"]
                 if column in view.columns
             })
             styled_view = (
