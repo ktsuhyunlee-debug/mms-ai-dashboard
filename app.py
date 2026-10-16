@@ -12248,10 +12248,12 @@ def _factor_period_product_table(
     period_products: pd.DataFrame,
     history_end,
 ) -> pd.DataFrame:
-    """선택 기간 상품을 코드·판매가별로 묶어 회차 평균과 전체 이력을 비교합니다."""
+    """선택 기간 상품을 코드·판매가별로 묶어 실적과 가격 변화를 분리 비교합니다."""
     columns = [
-        "알파코드", "쇼라코드", "상품명", "재편성여부", "운영횟수",
-        "현재실적(판매가)", "최고실적(판매가)", "최저실적(판매가)", "평균실적",
+        "알파코드", "쇼라코드", "상품명",
+        "현재실적", "평균실적", "평균 대비", "실적 구분",
+        "최고실적", "최고 대비",
+        "현재가", "최고실적 당시 가격", "가격 변동", "상품가격 구분",
     ]
     if period_products is None or period_products.empty:
         return pd.DataFrame(columns=columns)
@@ -12298,9 +12300,36 @@ def _factor_period_product_table(
         else pd.DataFrame(columns=["_fa_key", "_fa_send_run", "_fa_price", "_fa_amount"])
     )
 
-    def _amount_price_text(amount: float, price: float) -> str:
-        price_text = f"{price:,.0f}원" if price > 0 else "-"
-        return f"{amount:,.0f}원 ({price_text})"
+    def _change_ratio(current: float, base: float):
+        if pd.isna(base) or float(base) == 0:
+            return pd.NA
+        return (float(current) - float(base)) / abs(float(base))
+
+    def _percent_text(value) -> str:
+        if pd.isna(value):
+            return "-"
+        value = float(value)
+        if abs(value) < 0.0005:
+            return "0.0%"
+        return f"{value * 100:+.1f}%"
+
+    def _performance_label(value) -> str:
+        if pd.isna(value):
+            return "-"
+        if float(value) > 0.05:
+            return "상승"
+        if float(value) < -0.05:
+            return "하락"
+        return "유지"
+
+    def _price_label(current_price: float, best_price: float) -> str:
+        if current_price <= 0 or best_price <= 0:
+            return "-"
+        if current_price > best_price:
+            return "상승"
+        if current_price < best_price:
+            return "하락"
+        return "유지"
 
     rows = []
     for (product_key, current_price), group in period.groupby(
@@ -12313,16 +12342,18 @@ def _factor_period_product_table(
 
         product_history = history_runs[history_runs["_fa_key"].eq(product_key)].copy()
         if product_history.empty:
-            best_amount = lowest_amount = average_amount = current_amount
-            best_price = lowest_price = float(current_price or 0)
+            best_amount = average_amount = current_amount
+            best_price = float(current_price or 0)
         else:
             best_row = product_history.loc[product_history["_fa_amount"].idxmax()]
-            lowest_row = product_history.loc[product_history["_fa_amount"].idxmin()]
             best_amount = float(best_row["_fa_amount"])
             best_price = float(best_row["_fa_price"] or 0)
-            lowest_amount = float(lowest_row["_fa_amount"])
-            lowest_price = float(lowest_row["_fa_price"] or 0)
             average_amount = float(product_history["_fa_amount"].mean())
+
+        current_price = float(current_price or 0)
+        average_change = _change_ratio(current_amount, average_amount)
+        best_change = _change_ratio(current_amount, best_amount)
+        price_change = _change_ratio(current_price, best_price)
 
         latest = group.iloc[-1]
         alpha = clean_identifier_value(latest.get("알파코드", ""))
@@ -12332,12 +12363,16 @@ def _factor_period_product_table(
             "알파코드": alpha or "-",
             "쇼라코드": shora or "-",
             "상품명": name or "-",
-            "재편성여부": _factor_operation_label(group),
-            "운영횟수": operation_count,
-            "현재실적(판매가)": _amount_price_text(current_amount, float(current_price or 0)),
-            "최고실적(판매가)": _amount_price_text(best_amount, best_price),
-            "최저실적(판매가)": _amount_price_text(lowest_amount, lowest_price),
-            "평균실적": f"{average_amount:,.0f}원",
+            "현재실적": f"{current_amount:,.0f}",
+            "평균실적": f"{average_amount:,.0f}",
+            "평균 대비": _percent_text(average_change),
+            "실적 구분": _performance_label(average_change),
+            "최고실적": f"{best_amount:,.0f}",
+            "최고 대비": _percent_text(best_change),
+            "현재가": f"{current_price:,.0f}" if current_price > 0 else "-",
+            "최고실적 당시 가격": f"{best_price:,.0f}" if best_price > 0 else "-",
+            "가격 변동": _percent_text(price_change),
+            "상품가격 구분": _price_label(current_price, best_price),
             "_sort": current_amount,
         })
 
@@ -12664,12 +12699,12 @@ def _build_factor_analysis_bundle(
         "current_product_analysis": _factor_period_product_table(
             filtered_products,
             current_products,
-            max(current_period["end"], compare_period["end"]),
+            current_period["end"],
         ),
         "compare_product_analysis": _factor_period_product_table(
             filtered_products,
             previous_products,
-            max(current_period["end"], compare_period["end"]),
+            compare_period["end"],
         ),
         "composition": _factor_composition_table(current_metrics, previous_metrics),
         "current_operation_performance": _monthly_operation_performance(current_products),
@@ -16549,7 +16584,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v5",
+        "performance_factor_analysis_v6",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16732,7 +16767,9 @@ elif menu == "실적요인분석":
             st.caption(
                 f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d} · '
                 "알파코드·쇼라코드·판매가가 같으면 한 행으로 집계 · "
-                "여러 회차 운영 시 현재실적은 회차당 평균 주문금액"
+                "여러 회차 운영 시 현재실적은 회차당 평균 주문금액 · "
+                "실적 구분은 평균 대비 ±5% 이내 유지 · "
+                "상품가격 구분은 최고실적 당시 가격과 비교"
             )
             view = factor_bundle[bundle_key].copy()
             if view.empty:
