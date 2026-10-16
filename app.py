@@ -12247,10 +12247,13 @@ def _factor_period_product_table(
     all_products: pd.DataFrame,
     period_products: pd.DataFrame,
     history_end,
+    mms_products: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """선택 기간 상품을 코드·판매가별로 묶어 실적과 가격 변화를 분리 비교합니다."""
+    """선택 기간의 상품 실적을 실제 발송 회차별로 표시하고 과거 이력과 비교합니다."""
     columns = [
-        "알파코드", "쇼라코드", "상품명", "재편성 여부", "운영횟수",
+        "알파코드", "쇼라코드", "상품명", "재편성 여부",
+        "회차", "발송일", "시간대", "타겟",
+        "기간 운영횟수", "누적 MMS 발송횟수",
         "현재실적", "평균실적", "평균 대비", "실적 구분",
         "최고실적", "최고 대비",
         "현재가", "최고실적 당시 가격", "가격 변동", "상품가격 구분",
@@ -12278,14 +12281,25 @@ def _factor_period_product_table(
         work["_fa_amount"] = pd.to_numeric(
             work.get("주문금액", pd.Series(0, index=work.index)), errors="coerce"
         ).fillna(0)
+        time_col = first_col(work, ["시간대", "_time", "발송시간", "시간"])
+        work["_fa_time"] = (
+            work[time_col].map(_v4482_time_key)
+            if time_col else pd.Series("", index=work.index, dtype="object")
+        )
         work["_fa_send_run"] = _send_run_key_series(work)
         return work[work["_fa_key"].ne("")].copy()
 
     period = _prepare(period_products)
     history = _prepare(all_products)
+    mms_history = _prepare(mms_products if mms_products is not None else all_products)
+    cutoff = pd.Timestamp(history_end)
     history = history[
         history["_fa_date"].notna()
-        & history["_fa_date"].le(pd.Timestamp(history_end))
+        & history["_fa_date"].le(cutoff)
+    ].copy()
+    mms_history = mms_history[
+        mms_history["_fa_date"].notna()
+        & mms_history["_fa_date"].le(cutoff)
     ].copy()
     if period.empty:
         return pd.DataFrame(columns=columns)
@@ -12295,23 +12309,38 @@ def _factor_period_product_table(
             ["_fa_key", "_fa_send_run", "_fa_price"],
             as_index=False,
             dropna=False,
-        )["_fa_amount"].sum()
+        ).agg(
+            _fa_amount=("_fa_amount", "sum"),
+            _fa_date=("_fa_date", "min"),
+        )
         if not history.empty
-        else pd.DataFrame(columns=["_fa_key", "_fa_send_run", "_fa_price", "_fa_amount"])
+        else pd.DataFrame(
+            columns=["_fa_key", "_fa_send_run", "_fa_price", "_fa_amount", "_fa_date"]
+        )
+    )
+
+    period_counts = period.groupby("_fa_key")["_fa_send_run"].nunique().to_dict()
+    period_orders = {}
+    for product_key, product_rows in period.groupby("_fa_key", sort=False):
+        run_order = (
+            product_rows[["_fa_send_run", "_fa_date", "_fa_time"]]
+            .drop_duplicates("_fa_send_run")
+            .sort_values(["_fa_date", "_fa_time", "_fa_send_run"], kind="stable")
+        )
+        period_orders[product_key] = {
+            str(run_key): index + 1
+            for index, run_key in enumerate(run_order["_fa_send_run"].tolist())
+        }
+
+    cumulative_mms_counts = (
+        mms_history.groupby("_fa_key")["_fa_send_run"].nunique().to_dict()
+        if not mms_history.empty else {}
     )
 
     def _change_ratio(current: float, base: float):
         if pd.isna(base) or float(base) == 0:
             return pd.NA
         return (float(current) - float(base)) / abs(float(base))
-
-    def _percent_text(value) -> str:
-        if pd.isna(value):
-            return "-"
-        value = float(value)
-        if abs(value) < 0.0005:
-            return "0.0%"
-        return f"{value * 100:+.1f}%"
 
     def _performance_label(value) -> str:
         if pd.isna(value):
@@ -12323,7 +12352,7 @@ def _factor_period_product_table(
         return "유지"
 
     def _price_label(current_price: float, best_price: float) -> str:
-        if current_price <= 0 or best_price <= 0:
+        if pd.isna(current_price) or pd.isna(best_price) or current_price <= 0 or best_price <= 0:
             return "-"
         if current_price > best_price:
             return "상승"
@@ -12331,24 +12360,42 @@ def _factor_period_product_table(
             return "하락"
         return "유지"
 
+    def _targets(group: pd.DataFrame) -> str:
+        values = []
+        for _, item in group.iterrows():
+            value = target_label(item)
+            if value and value not in values:
+                values.append(value)
+        return " / ".join(values) if values else "-"
+
     rows = []
-    for (product_key, current_price), group in period.groupby(
-        ["_fa_key", "_fa_price"], sort=False, dropna=False
+    for (product_key, send_run, current_price), group in period.groupby(
+        ["_fa_key", "_fa_send_run", "_fa_price"], sort=False, dropna=False
     ):
-        group = group.sort_values("_fa_date", kind="stable")
-        current_runs = group.groupby("_fa_send_run", dropna=False)["_fa_amount"].sum()
-        operation_count = int(current_runs.size)
-        current_amount = float(current_runs.mean()) if operation_count else 0.0
+        group = group.sort_values(["_fa_date", "_fa_time"], kind="stable")
+        current_amount = float(group["_fa_amount"].sum())
+        send_run = str(send_run)
 
         product_history = history_runs[history_runs["_fa_key"].eq(product_key)].copy()
-        if product_history.empty:
-            best_amount = average_amount = current_amount
-            best_price = float(current_price or 0)
+        if send_run.startswith("ROW|"):
+            run_date = group["_fa_date"].dropna().min()
+            prior_history = product_history[
+                product_history["_fa_date"].lt(run_date)
+            ].copy() if pd.notna(run_date) else product_history.iloc[0:0].copy()
         else:
-            best_row = product_history.loc[product_history["_fa_amount"].idxmax()]
+            prior_history = product_history[
+                ~product_history["_fa_send_run"].astype(str).str.startswith("ROW|")
+                & product_history["_fa_send_run"].astype(str).lt(send_run)
+            ].copy()
+
+        if prior_history.empty:
+            best_amount = average_amount = float("nan")
+            best_price = float("nan")
+        else:
+            best_row = prior_history.loc[prior_history["_fa_amount"].idxmax()]
             best_amount = float(best_row["_fa_amount"])
             best_price = float(best_row["_fa_price"] or 0)
-            average_amount = float(product_history["_fa_amount"].mean())
+            average_amount = float(prior_history["_fa_amount"].mean())
 
         current_price = float(current_price or 0)
         average_change = _change_ratio(current_amount, average_amount)
@@ -12356,6 +12403,7 @@ def _factor_period_product_table(
         price_change = _change_ratio(current_price, best_price)
 
         latest = group.iloc[-1]
+        run_date = group["_fa_date"].dropna().min()
         alpha = clean_identifier_value(latest.get("알파코드", ""))
         shora = clean_identifier_value(latest.get("쇼라코드", ""))
         name = str(latest.get("상품명", "") or "").strip()
@@ -12364,16 +12412,21 @@ def _factor_period_product_table(
             "쇼라코드": shora or "-",
             "상품명": name or "-",
             "재편성 여부": _factor_operation_label(group),
-            "운영횟수": operation_count,
-            "현재실적": f"{current_amount:,.0f}",
-            "평균실적": f"{average_amount:,.0f}",
-            "평균 대비": _percent_text(average_change),
+            "회차": int(period_orders.get(product_key, {}).get(send_run, 1)),
+            "발송일": run_date.date() if pd.notna(run_date) else None,
+            "시간대": str(latest.get("_fa_time", "") or "-") or "-",
+            "타겟": _targets(group),
+            "기간 운영횟수": int(period_counts.get(product_key, 0)),
+            "누적 MMS 발송횟수": int(cumulative_mms_counts.get(product_key, 0)),
+            "현재실적": current_amount,
+            "평균실적": average_amount,
+            "평균 대비": average_change,
             "실적 구분": _performance_label(average_change),
-            "최고실적": f"{best_amount:,.0f}",
-            "최고 대비": _percent_text(best_change),
-            "현재가": f"{current_price:,.0f}" if current_price > 0 else "-",
-            "최고실적 당시 가격": f"{best_price:,.0f}" if best_price > 0 else "-",
-            "가격 변동": _percent_text(price_change),
+            "최고실적": best_amount,
+            "최고 대비": best_change,
+            "현재가": current_price if current_price > 0 else float("nan"),
+            "최고실적 당시 가격": best_price if pd.notna(best_price) and best_price > 0 else float("nan"),
+            "가격 변동": price_change,
             "상품가격 구분": _price_label(current_price, best_price),
             "_sort": current_amount,
         })
@@ -12674,6 +12727,7 @@ def _build_factor_analysis_bundle(
     promotion_mode: str,
 ) -> dict:
     current_period, compare_period = catalog[current_index], catalog[compare_index]
+    mms_products = apply_home_send_type_filter(products, "MMS")
     filtered_products = _factor_promotion_filter(
         apply_home_send_type_filter(products, send_type), promotion_mode, promotions_df
     )
@@ -12702,11 +12756,13 @@ def _build_factor_analysis_bundle(
             filtered_products,
             current_products,
             current_period["end"],
+            mms_products,
         ),
         "compare_product_analysis": _factor_period_product_table(
             filtered_products,
             previous_products,
             compare_period["end"],
+            mms_products,
         ),
         "composition": _factor_composition_table(current_metrics, previous_metrics),
         "current_operation_performance": _monthly_operation_performance(current_products),
@@ -16586,7 +16642,7 @@ elif menu == "실적요인분석":
         factor_promotion_mode,
     )
     factor_bundle = _menu_cache_get(
-        "performance_factor_analysis_v6",
+        "performance_factor_analysis_v7",
         factor_signature,
         lambda: _build_factor_analysis_bundle(
             products, sends, messages, promotions,
@@ -16765,6 +16821,12 @@ elif menu == "실적요인분석":
     factor_key = hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:10]
 
     def _factor_product_change_color(value):
+        if pd.api.types.is_number(value) and not pd.isna(value):
+            if float(value) > 0:
+                return "color: #d64545; font-weight: 600;"
+            if float(value) < 0:
+                return "color: #2f6fec; font-weight: 600;"
+            return "color: #111827;"
         text = str(value or "").strip()
         if text == "상승" or text.startswith("+"):
             return "color: #d64545; font-weight: 600;"
@@ -16776,10 +16838,10 @@ elif menu == "실적요인분석":
         with tab:
             st.caption(
                 f'{period["start"]:%Y-%m-%d} ~ {period["end"]:%Y-%m-%d} · '
-                "알파코드·쇼라코드·판매가가 같으면 한 행으로 집계 · "
-                "여러 회차 운영 시 현재실적은 회차당 평균 주문금액 · "
+                "상품별 실제 발송 회차를 각각 표시 · 같은 날짜·시간대의 V1/V2는 합산해 1회 처리 · "
+                "평균·최고실적은 해당 회차 이전 발송 이력 기준 · "
                 "실적 구분은 평균 대비 ±5% 이내 유지 · "
-                "상품가격 구분은 최고실적 당시 가격과 비교"
+                "숫자 열은 전체 수치 기준으로 정렬"
             )
             view = factor_bundle[bundle_key].copy()
             if view.empty:
@@ -16793,7 +16855,21 @@ elif menu == "실적요인분석":
                 ]
                 if column in view.columns
             ]
-            styled_view = view.style
+            number_formats = {
+                column: "{:,.0f}"
+                for column in [
+                    "회차", "기간 운영횟수", "누적 MMS 발송횟수",
+                    "현재실적", "평균실적", "최고실적",
+                    "현재가", "최고실적 당시 가격",
+                ]
+                if column in view.columns
+            }
+            number_formats.update({
+                column: "{:+.1%}"
+                for column in ["평균 대비", "최고 대비", "가격 변동"]
+                if column in view.columns
+            })
+            styled_view = view.style.format(number_formats, na_rep="-")
             if hasattr(styled_view, "map"):
                 styled_view = styled_view.map(
                     _factor_product_change_color,
