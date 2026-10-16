@@ -16820,19 +16820,25 @@ elif menu == "실적요인분석":
     ])
     factor_key = hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:10]
 
-    def _factor_product_change_color(value):
-        if pd.api.types.is_number(value) and not pd.isna(value):
-            if float(value) > 0:
-                return "color: #d64545; font-weight: 600;"
-            if float(value) < 0:
-                return "color: #2f6fec; font-weight: 600;"
-            return "color: #111827;"
-        text = str(value or "").strip()
-        if text == "상승" or text.startswith("+"):
-            return "color: #d64545; font-weight: 600;"
-        if text == "하락" or (text.startswith("-") and text != "-"):
-            return "color: #2f6fec; font-weight: 600;"
-        return "color: #111827;"
+    def _factor_product_change_styles(data: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame(
+            "color: #111827;",
+            index=data.index,
+            columns=data.columns,
+        )
+        for column in ["평균 대비", "최고 대비", "가격 변동"]:
+            if column not in data.columns:
+                continue
+            values = pd.to_numeric(data[column], errors="coerce")
+            styles.loc[values.gt(0), column] = "color: #d64545; font-weight: 600;"
+            styles.loc[values.lt(0), column] = "color: #2f6fec; font-weight: 600;"
+        for column in ["실적 구분", "상품가격 구분"]:
+            if column not in data.columns:
+                continue
+            values = data[column].fillna("").astype(str).str.strip()
+            styles.loc[values.eq("상승"), column] = "color: #d64545; font-weight: 600;"
+            styles.loc[values.eq("하락"), column] = "color: #2f6fec; font-weight: 600;"
+        return styles
 
     def _render_factor_product_period(tab, bundle_key, period, table_key):
         with tab:
@@ -16848,13 +16854,6 @@ elif menu == "실적요인분석":
                 st.info("해당 기간에 표시할 발송 상품이 없습니다.")
                 return
             view = clean_identifier_columns(view)
-            change_columns = [
-                column for column in [
-                    "평균 대비", "실적 구분", "최고 대비",
-                    "가격 변동", "상품가격 구분",
-                ]
-                if column in view.columns
-            ]
             number_formats = {
                 column: "{:,.0f}"
                 for column in [
@@ -16869,17 +16868,11 @@ elif menu == "실적요인분석":
                 for column in ["평균 대비", "최고 대비", "가격 변동"]
                 if column in view.columns
             })
-            styled_view = view.style.format(number_formats, na_rep="-")
-            if hasattr(styled_view, "map"):
-                styled_view = styled_view.map(
-                    _factor_product_change_color,
-                    subset=change_columns,
-                )
-            else:
-                styled_view = styled_view.applymap(
-                    _factor_product_change_color,
-                    subset=change_columns,
-                )
+            styled_view = (
+                view.style
+                .format(number_formats, na_rep="-")
+                .apply(_factor_product_change_styles, axis=None)
+            )
             selectable_dataframe(
                 styled_view,
                 key=f"factor_products_{table_key}_{factor_key}",
