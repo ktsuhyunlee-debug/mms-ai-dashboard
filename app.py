@@ -16895,20 +16895,6 @@ elif menu == "실적요인분석":
                 for column in ["평균 대비", "최고 대비", "평균가 대비", "최고실적가 대비"]
                 if column in view.columns
             })
-            column_config = {
-                column: st.column_config.NumberColumn(format="localized")
-                for column in [
-                    "누적 MMS 발송횟수", "회차 실적", "이전 평균실적",
-                    "이전 최고실적", "회차 판매가", "이전 평균 판매가",
-                    "최고실적 당시 판매가",
-                ]
-                if column in view.columns
-            }
-            column_config.update({
-                column: st.column_config.NumberColumn(format="%+.1f%%")
-                for column in ["평균 대비", "최고 대비", "평균가 대비", "최고실적가 대비"]
-                if column in view.columns
-            })
             styled_view = (
                 view.style
                 .format(number_formats, na_rep="-")
@@ -16919,7 +16905,6 @@ elif menu == "실적요인분석":
                 key=f"factor_products_{table_key}_{factor_key}",
                 use_container_width=True,
                 hide_index=True,
-                column_config=column_config,
                 height=min(760, 42 + len(view) * 35),
             )
 
