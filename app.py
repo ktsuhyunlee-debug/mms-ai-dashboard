@@ -12250,7 +12250,7 @@ def _factor_period_product_table(
 ) -> pd.DataFrame:
     """선택 기간 상품을 코드·판매가별로 묶어 실적과 가격 변화를 분리 비교합니다."""
     columns = [
-        "알파코드", "쇼라코드", "상품명",
+        "알파코드", "쇼라코드", "상품명", "재편성 여부", "운영횟수",
         "현재실적", "평균실적", "평균 대비", "실적 구분",
         "최고실적", "최고 대비",
         "현재가", "최고실적 당시 가격", "가격 변동", "상품가격 구분",
@@ -12363,6 +12363,8 @@ def _factor_period_product_table(
             "알파코드": alpha or "-",
             "쇼라코드": shora or "-",
             "상품명": name or "-",
+            "재편성 여부": _factor_operation_label(group),
+            "운영횟수": operation_count,
             "현재실적": f"{current_amount:,.0f}",
             "평균실적": f"{average_amount:,.0f}",
             "평균 대비": _percent_text(average_change),
@@ -16762,6 +16764,14 @@ elif menu == "실적요인분석":
     ])
     factor_key = hashlib.sha1(repr(factor_signature).encode()).hexdigest()[:10]
 
+    def _factor_product_change_color(value):
+        text = str(value or "").strip()
+        if text == "상승" or text.startswith("+"):
+            return "color: #d64545; font-weight: 600;"
+        if text == "하락" or (text.startswith("-") and text != "-"):
+            return "color: #2f6fec; font-weight: 600;"
+        return "color: #111827;"
+
     def _render_factor_product_period(tab, bundle_key, period, table_key):
         with tab:
             st.caption(
@@ -16775,8 +16785,27 @@ elif menu == "실적요인분석":
             if view.empty:
                 st.info("해당 기간에 표시할 발송 상품이 없습니다.")
                 return
+            view = clean_identifier_columns(view)
+            change_columns = [
+                column for column in [
+                    "평균 대비", "실적 구분", "최고 대비",
+                    "가격 변동", "상품가격 구분",
+                ]
+                if column in view.columns
+            ]
+            styled_view = view.style
+            if hasattr(styled_view, "map"):
+                styled_view = styled_view.map(
+                    _factor_product_change_color,
+                    subset=change_columns,
+                )
+            else:
+                styled_view = styled_view.applymap(
+                    _factor_product_change_color,
+                    subset=change_columns,
+                )
             selectable_dataframe(
-                clean_identifier_columns(view),
+                styled_view,
                 key=f"factor_products_{table_key}_{factor_key}",
                 use_container_width=True,
                 hide_index=True,
