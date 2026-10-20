@@ -48,6 +48,7 @@
 
 import io
 import math
+import numbers
 import os
 import hashlib
 import html as _html
@@ -1668,11 +1669,19 @@ def aggregate_send(data: pd.DataFrame, mode: str) -> pd.DataFrame:
         d["_sort1"] = d["_date"].dt.year
         d["_sort2"] = d["_date"].dt.dayofyear
 
+    # 주차명은 연도가 달라도 동일하게 반복될 수 있으므로 연도까지 포함해 집계합니다.
+    # 월별·일별은 라벨 자체에 연도가 포함되어 있어 기존 라벨을 그대로 사용합니다.
+    d["_aggregate_key"] = (
+        d["_sort1"].astype("Int64").astype(str) + "|" + d["_label"].astype(str)
+        if mode == "Weekly" else d["_label"].astype(str)
+    )
+
     send_col = first_col(d, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(d, ["클릭 수(uniq)", "클릭 수"])
     d["_send_run_key"] = _send_run_key_series(d)
 
-    g = d.groupby("_label", as_index=False).agg(
+    g = d.groupby("_aggregate_key", as_index=False).agg(
+        _label=("_label", "first"),
         연도=("_sort1", "max"),
         _sort1=("_sort1", "max"),
         _sort2=("_sort2", "max"),
@@ -3088,7 +3097,19 @@ def append_total_and_change_rows(raw: pd.DataFrame, mode: str) -> pd.DataFrame:
 
 def format_home_table_with_summary(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     """홈 표 전용: 일반행 + 총합계 + 증감 행."""
-    raw = append_total_and_change_rows(df, mode)
+    detail = df.copy()
+    if not detail.empty:
+        if mode == "Weekly":
+            # 주간은 연도를 먼저, 같은 연도 안에서는 실제 주차 숫자를 기준으로 정렬합니다.
+            detail = detail.sort_values(
+                [c for c in ["연도", "_sort2", "_label"] if c in detail.columns],
+                kind="stable",
+            )
+        else:
+            # 월별·일별은 YYYY-MM / YYYY-MM-DD 형태의 구분값을 기준으로 정렬합니다.
+            detail = detail.sort_values("_label", kind="stable")
+
+    raw = append_total_and_change_rows(detail, mode)
     if raw.empty:
         return raw
 
@@ -4073,6 +4094,132 @@ def _weekly_black_dataframe_text(data):
         return data
 
 
+_NUMERIC_SORT_EXCLUDED_COLUMNS = {
+    "알파코드", "쇼라코드", "상품코드", "캠페인코드", "회원번호", "주문번호",
+    "URL", "상품명", "소재", "문구", "타겟", "SEG", "상품 구분",
+    "발송일", "발송일자", "일자", "날짜", "시간", "시간대", "요일",
+}
+
+
+def _sortable_number_cell(value):
+    """표시용 숫자 문자열을 정렬 가능한 숫자와 표시 형식 정보로 분리합니다."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+    except Exception:
+        return None
+    if isinstance(value, numbers.Real):
+        try:
+            number = float(value)
+            return (number, "", False, False, 0) if math.isfinite(number) else None
+        except Exception:
+            return None
+
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"nan", "none", "null", "-", "—"}:
+        return None
+    if re.fullmatch(r"\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?.*", raw):
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", raw):
+        return None
+
+    arrow = raw[:1] if raw[:1] in {"▲", "▼"} else ""
+    if arrow:
+        raw = raw[1:].strip()
+    explicit_plus = raw.startswith("+")
+    has_comma = "," in raw
+
+    unit = ""
+    for suffix in ["%p", "%", "천만원", "백만원", "만원", "천원", "주차", "원", "회", "건", "개", "명"]:
+        if raw.endswith(suffix):
+            unit = suffix
+            raw = raw[:-len(suffix)].strip()
+            break
+
+    cleaned = raw.replace(",", "").replace("₩", "").strip()
+    if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", cleaned):
+        return None
+    decimals = len(cleaned.split(".", 1)[1]) if "." in cleaned else 0
+    try:
+        number = float(cleaned)
+    except Exception:
+        return None
+    if arrow == "▼":
+        number = -abs(number)
+    elif arrow == "▲":
+        number = abs(number)
+    return number, unit, bool(arrow), explicit_plus, min(decimals, 4)
+
+
+def _numeric_sortable_dataframe(data):
+    """문자열로 포맷된 숫자 열을 숫자형으로 복원해 전체 값 기준 정렬을 보장합니다.
+
+    화면의 쉼표·단위·퍼센트 표시는 Styler로 유지하고, 식별자·날짜·혼합 문구 열은
+    원문을 그대로 둡니다. 이미 Styler인 표는 기존 조건부 서식을 보존하기 위해 건드리지 않습니다.
+    """
+    if not isinstance(data, pd.DataFrame) or data.empty:
+        return data
+
+    view = data.copy()
+    formatters = {}
+    converted = False
+
+    for column in view.columns:
+        if str(column).strip() in _NUMERIC_SORT_EXCLUDED_COLUMNS:
+            continue
+        series = view[column]
+        if pd.api.types.is_numeric_dtype(series):
+            continue
+        nonblank = series[~series.isna()].astype(str).str.strip()
+        nonblank = nonblank[~nonblank.str.lower().isin({"", "nan", "none", "null", "-", "—"})]
+        if len(nonblank) < 2:
+            continue
+
+        parsed_items = [_sortable_number_cell(value) for value in nonblank.tolist()]
+        if any(item is None for item in parsed_items):
+            continue
+        units = {item[1] for item in parsed_items}
+        arrow_flags = {item[2] for item in parsed_items}
+        # 서로 다른 단위나 일반값/증감값이 섞인 열은 의미가 달라 자동 변환하지 않습니다.
+        if len(units) != 1 or len(arrow_flags) != 1:
+            continue
+
+        parsed_full = series.map(
+            lambda value: (_sortable_number_cell(value) or (float("nan"), "", False, False, 0))[0]
+        )
+        view[column] = pd.to_numeric(parsed_full, errors="coerce")
+        converted = True
+
+        unit = next(iter(units))
+        use_arrow = next(iter(arrow_flags))
+        use_plus = any(item[3] for item in parsed_items)
+        decimals = max(item[4] for item in parsed_items)
+        use_comma = any("," in str(value) for value in nonblank.tolist()) or unit in {
+            "천만원", "백만원", "만원", "천원", "원", "회", "건", "개", "명"
+        }
+
+        def _formatter(value, *, _unit=unit, _arrow=use_arrow, _plus=use_plus,
+                       _decimals=decimals, _comma=use_comma):
+            if pd.isna(value):
+                return "-"
+            number = float(value)
+            number_format = f",.{_decimals}f" if _comma else f".{_decimals}f"
+            if _arrow:
+                marker = "▲" if number > 0 else ("▼" if number < 0 else "-")
+                return f"{marker} {format(abs(number), number_format)}{_unit}"
+            sign = "+" if _plus and number > 0 else ""
+            return f"{sign}{format(number, number_format)}{_unit}"
+
+        formatters[column] = _formatter
+
+    if not converted:
+        return data
+    return view.style.format(formatters, na_rep="-")
+
+
 def selectable_dataframe(
     data,
     *,
@@ -4082,6 +4229,19 @@ def selectable_dataframe(
     **kwargs,
 ):
     """기존 st.dataframe 표시를 유지하면서 셀 드래그 합계/평균을 추가한다."""
+    home_summary_rows = None
+    if (
+        str(key).startswith("home_")
+        and isinstance(data, pd.DataFrame)
+        and "구분" in data.columns
+    ):
+        summary_mask = data["구분"].astype(str).isin(["총합계", "증감"])
+        if summary_mask.any():
+            # 합계·증감은 한 행 안에서 숫자와 증감률 단위가 섞이므로 별도 표로 유지하고,
+            # 상세 기간 행은 숫자형으로 전달해 헤더 정렬을 정확하게 처리합니다.
+            home_summary_rows = data.loc[summary_mask].reset_index(drop=True)
+            data = data.loc[~summary_mask].reset_index(drop=True)
+
     if summary_df is None:
         if isinstance(data, pd.DataFrame):
             summary_df = data
@@ -4089,31 +4249,45 @@ def selectable_dataframe(
             # pandas Styler 등은 원본 DataFrame을 사용
             summary_df = getattr(data, "data", None)
 
+    # 표시를 위해 문자열로 만든 숫자도 브라우저에서는 숫자 열로 전달해
+    # 헤더 클릭 시 첫 글자가 아닌 전체 값 기준으로 정렬되게 합니다.
+    data = _numeric_sortable_dataframe(data)
+
     # 주간실적 표는 배경/조건부 서식을 유지하면서 글씨와 숫자만 검정색으로 표시합니다.
     if str(key).startswith("weekly_"):
         data = _weekly_black_dataframe_text(data)
 
     if not _streamlit_supports_multi_cell_selection():
         if allow_row_selection:
-            return st.dataframe(
+            event = st.dataframe(
                 data,
                 key=key,
                 on_select="rerun",
                 selection_mode="single-row",
                 **kwargs,
             )
-        return st.dataframe(data, **kwargs)
+        else:
+            event = st.dataframe(data, **kwargs)
+    else:
+        widget_key = f"{key}_{_selection_table_signature(summary_df)}"
+        modes = ["single-row", "multi-cell"] if allow_row_selection else "multi-cell"
+        event = st.dataframe(
+            data,
+            key=widget_key,
+            on_select="rerun",
+            selection_mode=modes,
+            **kwargs,
+        )
+        _render_selected_cell_summary(event, summary_df)
 
-    widget_key = f"{key}_{_selection_table_signature(summary_df)}"
-    modes = ["single-row", "multi-cell"] if allow_row_selection else "multi-cell"
-    event = st.dataframe(
-        data,
-        key=widget_key,
-        on_select="rerun",
-        selection_mode=modes,
-        **kwargs,
-    )
-    _render_selected_cell_summary(event, summary_df)
+    if home_summary_rows is not None and not home_summary_rows.empty:
+        st.caption("총합계 · 직전 기간 대비 증감")
+        st.dataframe(
+            home_summary_rows,
+            use_container_width=kwargs.get("use_container_width", True),
+            hide_index=kwargs.get("hide_index", True),
+            height=min(118, 38 + len(home_summary_rows) * 35),
+        )
     return event
 
 def render_weekly_product_grouped_table(
@@ -5936,7 +6110,9 @@ def _style_weekly_category_total(df: pd.DataFrame):
         return ["" for _ in row]
 
     try:
-        return df.style.apply(_row_style, axis=1)
+        sortable = _numeric_sortable_dataframe(df)
+        styler = sortable if hasattr(sortable, "apply") else df.style
+        return styler.apply(_row_style, axis=1)
     except Exception:
         return df
 
