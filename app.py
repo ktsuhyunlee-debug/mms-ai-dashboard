@@ -1079,7 +1079,11 @@ def normalize_product(df: pd.DataFrame) -> pd.DataFrame:
     d = d[d["_date"].notna()].copy()
     time_col = first_col(d, ["시간대", "발송시간", "시간"])
     d["시간대"] = d[time_col].map(_v4482_time_key) if time_col else ""
-    for c in ["정상가", "멤버십혜택가", "할인율", "전시순서", "주문건수", "주문수량", "주문금액", "발송일 최저가"]:
+    for c in [
+        "정상가", "멤버십혜택가", "할인율", "전시순서", "주문건수", "주문수량",
+        "주문금액", "발송일 최저가", "상품쿠폰미적용", "상품쿠폰적용(5000)",
+        "상품쿠폰적용(3000)",
+    ]:
         if c in d.columns:
             d[c] = num(d[c])
     d["_year"] = d["_date"].dt.year.astype(int)
@@ -14665,9 +14669,129 @@ def _build_monthly_performance_bundle(
     }
 
 
+_COUPON_SOURCE_COLUMNS = {
+    "쿠폰 미적용": ["상품쿠폰미적용", "상품 쿠폰 미적용", "쿠폰미적용"],
+    "5천원 적용": ["상품쿠폰적용(5000)", "상품쿠폰적용(5,000)", "상품쿠폰적용5000"],
+    "3천원 적용": ["상품쿠폰적용(3000)", "상품쿠폰적용(3,000)", "상품쿠폰적용3000"],
+}
+
+
+def _coupon_find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """공백 차이가 있는 쿠폰 컬럼도 같은 컬럼으로 인식합니다."""
+    normalized = {
+        re.sub(r"\s+", "", str(column)): column
+        for column in df.columns
+    }
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+        matched = normalized.get(re.sub(r"\s+", "", candidate))
+        if matched is not None:
+            return matched
+    return None
+
+
+def _prepare_coupon_rows(product_rows: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """상품 로우를 쿠폰 현황 집계용 공통 컬럼으로 정리합니다."""
+    if product_rows is None or product_rows.empty:
+        return pd.DataFrame(), []
+
+    work = product_rows.copy()
+    missing = []
+    for target, candidates in _COUPON_SOURCE_COLUMNS.items():
+        source = _coupon_find_column(work, candidates)
+        if source is None:
+            missing.append(candidates[0])
+            work[target] = 0.0
+        else:
+            work[target] = pd.to_numeric(work[source], errors="coerce").fillna(0)
+
+    for column in ["주문건수", "주문수량", "주문금액"]:
+        values = work[column] if column in work.columns else pd.Series(0, index=work.index)
+        work[column] = pd.to_numeric(values, errors="coerce").fillna(0)
+
+    work["쿠폰 적용 합계"] = work["5천원 적용"] + work["3천원 적용"]
+    work["쿠폰 집계건수"] = work["쿠폰 미적용"] + work["쿠폰 적용 합계"]
+    work["미적용 비중"] = safe_div(work["쿠폰 미적용"], work["쿠폰 집계건수"]).fillna(0)
+    work["적용 비중"] = safe_div(work["쿠폰 적용 합계"], work["쿠폰 집계건수"]).fillna(0)
+    work["_coupon_product_key"] = _product_mix_product_keys(work)
+    # 코드와 상품명이 모두 비어 있는 예외 행도 서로 다른 상품으로 세어
+    # 월·주차·일자 상품수가 로우 수보다 과소 집계되지 않도록 합니다.
+    blank_key = work["_coupon_product_key"].eq("")
+    if blank_key.any():
+        work.loc[blank_key, "_coupon_product_key"] = [
+            f"ROW:{index}" for index in work.index[blank_key]
+        ]
+    return work, missing
+
+
+def _coupon_group_summary(work: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    """월·주차·일자에 동일한 쿠폰 계산식을 적용합니다."""
+    if work is None or work.empty:
+        return pd.DataFrame()
+    grouped = work.groupby(group_columns, as_index=False, dropna=False).agg(
+        상품수=("_coupon_product_key", "nunique"),
+        주문건수=("주문건수", "sum"),
+        주문금액=("주문금액", "sum"),
+        쿠폰집계건수=("쿠폰 집계건수", "sum"),
+        미적용=("쿠폰 미적용", "sum"),
+        오천원적용=("5천원 적용", "sum"),
+        삼천원적용=("3천원 적용", "sum"),
+        적용합계=("쿠폰 적용 합계", "sum"),
+    )
+    grouped["미적용 비중"] = safe_div(grouped["미적용"], grouped["쿠폰집계건수"]).fillna(0)
+    grouped["적용 비중"] = safe_div(grouped["적용합계"], grouped["쿠폰집계건수"]).fillna(0)
+    return grouped
+
+
+def _coupon_format_summary(summary: pd.DataFrame, leading_columns: list[str]) -> pd.DataFrame:
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+    view = summary.copy()
+    rename_map = {
+        "쿠폰집계건수": "쿠폰 집계건수",
+        "오천원적용": "5천원 적용",
+        "삼천원적용": "3천원 적용",
+        "적용합계": "적용 합계",
+    }
+    view = view.rename(columns=rename_map)
+    ordered = leading_columns + [
+        "상품수", "주문건수", "주문금액", "쿠폰 집계건수", "미적용", "미적용 비중",
+        "5천원 적용", "3천원 적용", "적용 합계", "적용 비중",
+    ]
+    view = view[[column for column in ordered if column in view.columns]].copy()
+    for column in [
+        "상품수", "주문건수", "주문금액", "쿠폰 집계건수", "미적용",
+        "5천원 적용", "3천원 적용", "적용 합계",
+    ]:
+        if column in view.columns:
+            view[column] = pd.to_numeric(view[column], errors="coerce").fillna(0).round().astype(int)
+    for column in ["미적용 비중", "적용 비중"]:
+        if column in view.columns:
+            view[column] = view[column].map(lambda value: f"{float(value) * 100:.1f}%")
+    return clean_identifier_columns(view)
+
+
+def _coupon_selected_row(event, row_count: int) -> int | None:
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection", {})
+    rows = getattr(selection, "rows", None)
+    if rows is None and isinstance(selection, dict):
+        rows = selection.get("rows", [])
+    rows = list(rows or [])
+    if not rows:
+        return None
+    try:
+        position = int(rows[0])
+    except (TypeError, ValueError):
+        return None
+    return position if 0 <= position < int(row_count) else None
+
+
 
 _menu_options = [
-    "홈", "일일실적", "주간실적", "월간실적", "실적요인분석",
+    "홈", "일일실적", "주간실적", "월간실적", "쿠폰사용현황", "실적요인분석",
     "상품구성비교", "상품구분", "타겟별베스트상품",
     "타겟분석", "SEG분석", "편성 프로그램",
 ]
@@ -14676,6 +14800,7 @@ _menu_slug_to_name = {
     "daily": "일일실적",
     "weekly": "주간실적",
     "monthly": "월간실적",
+    "coupon": "쿠폰사용현황",
     "performance-factor": "실적요인분석",
     "product": "상품구분",
     "target": "타겟분석",
@@ -14692,6 +14817,7 @@ _menu_groups = [
         ("일일실적", "일일실적"),
         ("주간실적", "주간실적"),
         ("월간실적", "월간실적"),
+        ("쿠폰 사용 현황", "쿠폰사용현황"),
         ("실적 요인 분석", "실적요인분석"),
     ]),
     ("상품 분석", [
@@ -16721,6 +16847,326 @@ elif menu == "월간실적":
                 + '</div>',
                 unsafe_allow_html=True,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 쿠폰 사용 현황
+# ─────────────────────────────────────────────────────────────────────────────
+elif menu == "쿠폰사용현황":
+    st.markdown('<div class="section-title">🎟️ 쿠폰 사용 현황</div>', unsafe_allow_html=True)
+    st.caption(
+        "상품 시트의 상품쿠폰미적용·상품쿠폰적용(5000)·상품쿠폰적용(3000) 집계 기준입니다. "
+        "월을 선택하면 주차별, 주차를 선택하면 일자별, 일자를 선택하면 상품별 현황이 이어집니다."
+    )
+
+    coupon_rows, coupon_missing_columns = _prepare_coupon_rows(products)
+    if coupon_missing_columns:
+        st.warning(
+            "상품 시트에서 쿠폰 현황 컬럼을 찾을 수 없습니다: "
+            + ", ".join(coupon_missing_columns)
+        )
+        st.stop()
+    if coupon_rows.empty:
+        st.info("쿠폰 사용 현황을 표시할 상품 데이터가 없습니다.")
+        st.stop()
+
+    coupon_dates = pd.to_datetime(coupon_rows["_date"], errors="coerce").dropna()
+    if coupon_dates.empty:
+        st.info("쿠폰 현황을 집계할 발송일 데이터가 없습니다.")
+        st.stop()
+
+    coupon_min_date = coupon_dates.min().date()
+    coupon_max_date = coupon_dates.max().date()
+    coupon_filter_cols = st.columns([2.1, 1, 1, 1, 1.6])
+    with coupon_filter_cols[0]:
+        coupon_date_range = st.date_input(
+            "조회기간",
+            value=(coupon_min_date, coupon_max_date),
+            min_value=coupon_min_date,
+            max_value=coupon_max_date,
+            format="YYYY-MM-DD",
+            key="coupon_date_range",
+        )
+
+    def _coupon_filter_options(column: str) -> list[str]:
+        if column not in coupon_rows.columns:
+            return ["전체"]
+        values = [
+            clean_identifier_value(value)
+            for value in coupon_rows[column].dropna().tolist()
+        ]
+        return ["전체"] + sorted({value for value in values if value})
+
+    with coupon_filter_cols[1]:
+        coupon_gender = st.selectbox(
+            "성별", _coupon_filter_options("성별"), key="coupon_gender_filter"
+        )
+    with coupon_filter_cols[2]:
+        coupon_age = st.selectbox(
+            "연령", _coupon_filter_options("연령"), key="coupon_age_filter"
+        )
+    with coupon_filter_cols[3]:
+        coupon_seg = st.selectbox(
+            "SEG", _coupon_filter_options("SEG"), key="coupon_seg_filter"
+        )
+    with coupon_filter_cols[4]:
+        coupon_product_search = st.text_input(
+            "상품명 검색", placeholder="상품명 입력", key="coupon_product_search"
+        ).strip()
+
+    if isinstance(coupon_date_range, (tuple, list)) and len(coupon_date_range) == 2:
+        coupon_start_date, coupon_end_date = coupon_date_range
+    else:
+        coupon_start_date = coupon_end_date = coupon_date_range
+    coupon_start_ts = pd.Timestamp(coupon_start_date).normalize()
+    coupon_end_ts = pd.Timestamp(coupon_end_date).normalize()
+    if coupon_start_ts > coupon_end_ts:
+        st.warning("조회기간의 시작일이 종료일보다 늦습니다.")
+        st.stop()
+
+    coupon_work = coupon_rows[
+        pd.to_datetime(coupon_rows["_date"], errors="coerce").dt.normalize()
+        .between(coupon_start_ts, coupon_end_ts)
+    ].copy()
+    for column, selected_value in [
+        ("성별", coupon_gender), ("연령", coupon_age), ("SEG", coupon_seg),
+    ]:
+        if selected_value != "전체" and column in coupon_work.columns:
+            coupon_work = coupon_work[
+                coupon_work[column].map(clean_identifier_value).eq(selected_value)
+            ].copy()
+    if coupon_product_search and "상품명" in coupon_work.columns:
+        coupon_work = coupon_work[
+            coupon_work["상품명"].fillna("").astype(str).str.contains(
+                coupon_product_search, case=False, regex=False
+            )
+        ].copy()
+
+    if coupon_work.empty:
+        st.info("선택한 조건에 해당하는 쿠폰 데이터가 없습니다.")
+        st.stop()
+
+    coupon_product_count = int(coupon_work["_coupon_product_key"].nunique())
+    coupon_unapplied = float(coupon_work["쿠폰 미적용"].sum())
+    coupon_5000 = float(coupon_work["5천원 적용"].sum())
+    coupon_3000 = float(coupon_work["3천원 적용"].sum())
+    coupon_applied = coupon_5000 + coupon_3000
+    coupon_total = coupon_unapplied + coupon_applied
+    coupon_unapplied_share = coupon_unapplied / coupon_total if coupon_total else 0.0
+    coupon_applied_share = coupon_applied / coupon_total if coupon_total else 0.0
+
+    st.markdown('<div class="subsection-title">핵심 현황</div>', unsafe_allow_html=True)
+    coupon_cards = [
+        ("상품수", f"{coupon_product_count:,}개"),
+        ("쿠폰 집계건수", f"{int(round(coupon_total)):,}건"),
+        ("미적용", f"{int(round(coupon_unapplied)):,}건"),
+        ("미적용 비중", f"{coupon_unapplied_share * 100:.1f}%"),
+        ("적용 합계", f"{int(round(coupon_applied)):,}건"),
+        ("적용 비중", f"{coupon_applied_share * 100:.1f}%"),
+    ]
+    coupon_card_cols = st.columns(6)
+    for coupon_card_col, (label, value) in zip(coupon_card_cols, coupon_cards):
+        with coupon_card_col:
+            st.markdown(
+                f'<div class="metric-card weekly-kpi-card">'
+                f'<div class="metric-label">{label}</div>'
+                f'<div class="metric-value">{value}</div></div>',
+                unsafe_allow_html=True,
+            )
+    st.caption(
+        f"5천원 적용 {int(round(coupon_5000)):,}건 · "
+        f"3천원 적용 {int(round(coupon_3000)):,}건 · "
+        "쿠폰 집계건수는 주문건수와 별도로 상품 시트의 세 쿠폰 컬럼을 합산한 값입니다."
+    )
+
+    coupon_work["_coupon_month"] = pd.to_datetime(
+        coupon_work["_date"], errors="coerce"
+    ).dt.to_period("M").astype(str)
+    monthly_coupon = _coupon_group_summary(coupon_work, ["_coupon_month"])
+    monthly_coupon = monthly_coupon.sort_values("_coupon_month", kind="stable").reset_index(drop=True)
+    monthly_coupon["월"] = monthly_coupon["_coupon_month"].map(
+        lambda value: pd.Period(value, freq="M").strftime("%Y년 %m월")
+    )
+    monthly_coupon_display = _coupon_format_summary(monthly_coupon, ["월"])
+
+    st.markdown('<div class="subsection-title">월별 현황</div>', unsafe_allow_html=True)
+    st.caption("월 행을 선택하면 아래 주차별 현황이 변경됩니다. 미선택 시 가장 최근 월을 표시합니다.")
+    coupon_signature = "|".join([
+        str(coupon_start_ts.date()), str(coupon_end_ts.date()), coupon_gender,
+        coupon_age, coupon_seg, coupon_product_search, str(len(coupon_work)),
+    ])
+    coupon_signature_value = sum(
+        (index + 1) * ord(character)
+        for index, character in enumerate(coupon_signature)
+    ) % 10_000_000_000
+    monthly_coupon_event = selectable_dataframe(
+        monthly_coupon_display,
+        summary_df=monthly_coupon,
+        key=f"coupon_monthly_{coupon_signature_value}",
+        allow_row_selection=True,
+        use_container_width=True,
+        hide_index=True,
+        height=min(360, 42 + len(monthly_coupon_display) * 35),
+    )
+    selected_month_position = _coupon_selected_row(monthly_coupon_event, len(monthly_coupon))
+    if selected_month_position is None:
+        selected_month_position = len(monthly_coupon) - 1
+    selected_month_key = str(monthly_coupon.iloc[selected_month_position]["_coupon_month"])
+    selected_month_label = str(monthly_coupon.iloc[selected_month_position]["월"])
+    month_coupon_rows = coupon_work[coupon_work["_coupon_month"].eq(selected_month_key)].copy()
+
+    if "주차" not in month_coupon_rows.columns:
+        month_coupon_rows["주차"] = (
+            month_coupon_rows["_date"].dt.strftime("%m월 ")
+            + month_coupon_rows["_date"].dt.strftime("%U").astype(int).astype(str)
+            + "주차"
+        )
+    month_coupon_rows["주차"] = month_coupon_rows["주차"].fillna("미분류").astype(str)
+    weekly_coupon = _coupon_group_summary(month_coupon_rows, ["주차"])
+    weekly_period = month_coupon_rows.groupby("주차", dropna=False)["_date"].agg(["min", "max"]).reset_index()
+    weekly_period["기간"] = weekly_period.apply(
+        lambda row: f'{pd.Timestamp(row["min"]).strftime("%m.%d")}~{pd.Timestamp(row["max"]).strftime("%m.%d")}',
+        axis=1,
+    )
+    weekly_coupon = weekly_coupon.merge(weekly_period[["주차", "기간", "min"]], on="주차", how="left")
+    weekly_coupon = weekly_coupon.sort_values("min", kind="stable").reset_index(drop=True)
+    weekly_coupon_display = _coupon_format_summary(weekly_coupon, ["주차", "기간"])
+
+    st.markdown(
+        f'<div class="subsection-title">주차별 현황 · {selected_month_label}</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("주차 행을 선택하면 아래 일자별 현황이 변경됩니다. 미선택 시 가장 최근 주차를 표시합니다.")
+    weekly_coupon_event = selectable_dataframe(
+        weekly_coupon_display,
+        summary_df=weekly_coupon,
+        key=f"coupon_weekly_{coupon_signature_value}_{selected_month_key}",
+        allow_row_selection=True,
+        use_container_width=True,
+        hide_index=True,
+        height=min(390, 42 + len(weekly_coupon_display) * 35),
+    )
+    selected_week_position = _coupon_selected_row(weekly_coupon_event, len(weekly_coupon))
+    if selected_week_position is None:
+        selected_week_position = len(weekly_coupon) - 1
+    selected_week = str(weekly_coupon.iloc[selected_week_position]["주차"])
+    week_coupon_rows = month_coupon_rows[month_coupon_rows["주차"].eq(selected_week)].copy()
+
+    week_coupon_rows["_coupon_date"] = pd.to_datetime(
+        week_coupon_rows["_date"], errors="coerce"
+    ).dt.normalize()
+    daily_coupon = _coupon_group_summary(week_coupon_rows, ["_coupon_date"])
+    daily_coupon = daily_coupon.sort_values("_coupon_date", kind="stable").reset_index(drop=True)
+    weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    daily_coupon["일자"] = daily_coupon["_coupon_date"].dt.strftime("%Y-%m-%d")
+    daily_coupon["요일"] = daily_coupon["_coupon_date"].dt.dayofweek.map(weekday_map)
+    daily_coupon_display = _coupon_format_summary(daily_coupon, ["일자", "요일"])
+
+    st.markdown(
+        f'<div class="subsection-title">일자별 현황 · {selected_week}</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("일자 행을 선택하면 아래 상품별 현황이 변경됩니다. 미선택 시 가장 최근 일자를 표시합니다.")
+    daily_coupon_event = selectable_dataframe(
+        daily_coupon_display,
+        summary_df=daily_coupon,
+        key=f"coupon_daily_{coupon_signature_value}_{selected_month_key}_{selected_week}",
+        allow_row_selection=True,
+        use_container_width=True,
+        hide_index=True,
+        height=min(430, 42 + len(daily_coupon_display) * 35),
+    )
+    selected_day_position = _coupon_selected_row(daily_coupon_event, len(daily_coupon))
+    if selected_day_position is None:
+        selected_day_position = len(daily_coupon) - 1
+    selected_coupon_date = pd.Timestamp(
+        daily_coupon.iloc[selected_day_position]["_coupon_date"]
+    ).normalize()
+    selected_coupon_date_label = selected_coupon_date.strftime("%Y-%m-%d")
+    product_coupon_rows = week_coupon_rows[
+        pd.to_datetime(week_coupon_rows["_date"], errors="coerce").dt.normalize().eq(selected_coupon_date)
+    ].copy()
+
+    target_parts = []
+    for _, row in product_coupon_rows.iterrows():
+        values = [
+            clean_identifier_value(row.get(column, ""))
+            for column in ["성별", "연령", "SEG"]
+        ]
+        target_parts.append(" ".join(value for value in values if value))
+    product_coupon_rows["타겟"] = target_parts
+    product_coupon_rows["쿠폰 집계건수"] = (
+        product_coupon_rows["쿠폰 미적용"]
+        + product_coupon_rows["5천원 적용"]
+        + product_coupon_rows["3천원 적용"]
+    )
+    product_coupon_rows["적용 합계"] = (
+        product_coupon_rows["5천원 적용"] + product_coupon_rows["3천원 적용"]
+    )
+    product_coupon_rows["미적용 비중"] = safe_div(
+        product_coupon_rows["쿠폰 미적용"], product_coupon_rows["쿠폰 집계건수"]
+    ).fillna(0)
+    product_coupon_rows["적용 비중"] = safe_div(
+        product_coupon_rows["적용 합계"], product_coupon_rows["쿠폰 집계건수"]
+    ).fillna(0)
+
+    if "전시순서" in product_coupon_rows.columns:
+        product_coupon_rows["_coupon_display_order"] = pd.to_numeric(
+            product_coupon_rows["전시순서"], errors="coerce"
+        )
+    else:
+        product_coupon_rows["_coupon_display_order"] = 999999
+    product_coupon_rows["_coupon_time_sort"] = product_coupon_rows.get(
+        "시간대", pd.Series("", index=product_coupon_rows.index)
+    ).map(_v4482_time_key)
+    product_coupon_rows = product_coupon_rows.sort_values(
+        ["_coupon_time_sort", "_coupon_display_order", "주문금액"],
+        ascending=[True, True, False], kind="stable", na_position="last",
+    )
+
+    product_coupon_columns = [
+        "시간대", "소재", "타겟", "전시순서", "알파코드", "쇼라코드", "상품명",
+        "재편성", "주문건수", "주문수량", "주문금액", "쿠폰 집계건수",
+        "쿠폰 미적용", "미적용 비중", "5천원 적용", "3천원 적용", "적용 합계", "적용 비중",
+    ]
+    product_coupon_view = product_coupon_rows[
+        [column for column in product_coupon_columns if column in product_coupon_rows.columns]
+    ].copy()
+    for column in [
+        "전시순서", "주문건수", "주문수량", "주문금액", "쿠폰 집계건수",
+        "쿠폰 미적용", "5천원 적용", "3천원 적용", "적용 합계",
+    ]:
+        if column in product_coupon_view.columns:
+            product_coupon_view[column] = pd.to_numeric(
+                product_coupon_view[column], errors="coerce"
+            ).fillna(0).round().astype(int)
+    for column in ["미적용 비중", "적용 비중"]:
+        if column in product_coupon_view.columns:
+            product_coupon_view[column] = product_coupon_view[column].map(
+                lambda value: f"{float(value) * 100:.1f}%"
+            )
+    product_coupon_view = clean_identifier_columns(product_coupon_view)
+
+    st.markdown(
+        f'<div class="subsection-title">상품별 현황 · {selected_coupon_date_label}</div>',
+        unsafe_allow_html=True,
+    )
+    selected_day_product_count = int(product_coupon_rows["_coupon_product_key"].nunique())
+    st.caption(
+        f"선택 일자 상품수 {selected_day_product_count:,}개 · "
+        f"운영 상품 행 {len(product_coupon_view):,}건"
+    )
+    selectable_dataframe(
+        product_coupon_view,
+        summary_df=product_coupon_rows,
+        key=(
+            f"coupon_products_{coupon_signature_value}_{selected_month_key}_"
+            f"{selected_week}_{selected_coupon_date_label}"
+        ),
+        use_container_width=True,
+        hide_index=True,
+        height=min(680, 42 + len(product_coupon_view) * 35),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
