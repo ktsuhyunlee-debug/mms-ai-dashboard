@@ -14698,6 +14698,18 @@ def _prepare_coupon_rows(product_rows: pd.DataFrame) -> tuple[pd.DataFrame, list
         return pd.DataFrame(), []
 
     work = product_rows.copy()
+    inferred_channel = _weekly_send_type_series(work).reindex(work.index).fillna("MMS")
+    coupon_type_col = first_col(work, ["유형", "발송유형", "발송 유형", "발송방식", "발송 방식"])
+    if coupon_type_col:
+        explicit_channel = work[coupon_type_col].fillna("").astype(str).map(
+            lambda value: (
+                "RCS" if ("RCS" in value.upper() or "CAROUSEL" in value.upper() or "캐러셀" in value)
+                else ("MMS" if ("MMS" in value.upper() or "멀티미디어" in value) else "")
+            )
+        )
+        work["발송 유형"] = explicit_channel.where(explicit_channel.ne(""), inferred_channel)
+    else:
+        work["발송 유형"] = inferred_channel
     missing = []
     for target, candidates in _COUPON_SOURCE_COLUMNS.items():
         source = _coupon_find_column(work, candidates)
@@ -16940,7 +16952,7 @@ elif menu == "쿠폰사용현황":
 
     coupon_min_date = coupon_dates.min().date()
     coupon_max_date = coupon_dates.max().date()
-    coupon_filter_cols = st.columns([2.1, 1, 1, 1, 1.6])
+    coupon_filter_cols = st.columns([2.1, 1, 1, 1, 1, 1.6])
     with coupon_filter_cols[0]:
         coupon_date_range = st.date_input(
             "조회기간",
@@ -16961,21 +16973,26 @@ elif menu == "쿠폰사용현황":
         return sorted({value for value in values if value})
 
     with coupon_filter_cols[1]:
+        coupon_channels = st.multiselect(
+            "발송 유형", ["MMS", "RCS"],
+            placeholder="전체", key="coupon_channel_filter"
+        )
+    with coupon_filter_cols[2]:
         coupon_genders = st.multiselect(
             "성별", _coupon_filter_options("성별"),
             placeholder="전체", key="coupon_gender_filter"
         )
-    with coupon_filter_cols[2]:
+    with coupon_filter_cols[3]:
         coupon_ages = st.multiselect(
             "연령", _coupon_filter_options("연령"),
             placeholder="전체", key="coupon_age_filter"
         )
-    with coupon_filter_cols[3]:
+    with coupon_filter_cols[4]:
         coupon_segs = st.multiselect(
             "SEG", _coupon_filter_options("SEG"),
             placeholder="전체", key="coupon_seg_filter"
         )
-    with coupon_filter_cols[4]:
+    with coupon_filter_cols[5]:
         coupon_product_search = st.text_input(
             "상품명 검색", placeholder="상품명 입력", key="coupon_product_search"
         ).strip()
@@ -16994,6 +17011,10 @@ elif menu == "쿠폰사용현황":
         pd.to_datetime(coupon_rows["_date"], errors="coerce").dt.normalize()
         .between(coupon_start_ts, coupon_end_ts)
     ].copy()
+    if coupon_channels:
+        coupon_work = coupon_work[
+            coupon_work["발송 유형"].isin(coupon_channels)
+        ].copy()
     for column, selected_values in [
         ("성별", coupon_genders), ("연령", coupon_ages), ("SEG", coupon_segs),
     ]:
@@ -17061,7 +17082,8 @@ elif menu == "쿠폰사용현황":
     st.caption("월을 여러 개 체크할 수 있습니다. 선택한 월을 합쳐 아래 주차별 현황에 표시하며, 미선택 시 가장 최근 월을 표시합니다.")
     coupon_signature = "|".join([
         str(coupon_start_ts.date()), str(coupon_end_ts.date()),
-        ",".join(coupon_genders), ",".join(coupon_ages), ",".join(coupon_segs),
+        ",".join(coupon_channels), ",".join(coupon_genders),
+        ",".join(coupon_ages), ",".join(coupon_segs),
         coupon_product_search, str(len(coupon_work)),
     ])
     coupon_signature_value = sum(
@@ -17084,22 +17106,28 @@ elif menu == "쿠폰사용현황":
     selected_month_keys = monthly_coupon.iloc[selected_month_positions]["_coupon_month"].astype(str).tolist()
     selected_month_labels = monthly_coupon.iloc[selected_month_positions]["월"].astype(str).tolist()
     selected_month_label = " · ".join(selected_month_labels)
-    month_coupon_rows = coupon_work[coupon_work["_coupon_month"].isin(selected_month_keys)].copy()
-
-    if "주차" not in month_coupon_rows.columns:
-        month_coupon_rows["주차"] = (
-            month_coupon_rows["_date"].dt.strftime("%m월 ")
-            + month_coupon_rows["_date"].dt.strftime("%U").astype(int).astype(str)
+    coupon_week_rows = coupon_work.copy()
+    if "주차" not in coupon_week_rows.columns:
+        coupon_week_rows["주차"] = (
+            coupon_week_rows["_date"].dt.strftime("%m월 ")
+            + coupon_week_rows["_date"].dt.strftime("%U").astype(int).astype(str)
             + "주차"
         )
-    month_coupon_rows["주차"] = month_coupon_rows["주차"].fillna("미분류").astype(str)
-    month_coupon_rows["_coupon_week_key"] = (
-        month_coupon_rows["_coupon_month"] + "|" + month_coupon_rows["주차"]
+    coupon_week_rows["주차"] = coupon_week_rows["주차"].fillna("미분류").astype(str)
+    # 월 경계에 걸친 같은 주차(예: 8월·9월의 0831주차)는 한 행으로 합칩니다.
+    coupon_week_rows["_coupon_week_key"] = (
+        pd.to_datetime(coupon_week_rows["_date"], errors="coerce").dt.year.astype("Int64").astype(str)
+        + "|" + coupon_week_rows["주차"]
     )
+    selected_month_week_keys = coupon_week_rows.loc[
+        coupon_week_rows["_coupon_month"].isin(selected_month_keys), "_coupon_week_key"
+    ].dropna().unique().tolist()
+    month_coupon_rows = coupon_week_rows[
+        coupon_week_rows["_coupon_week_key"].isin(selected_month_week_keys)
+    ].copy()
     weekly_coupon = _coupon_group_summary(month_coupon_rows, ["_coupon_week_key"])
     weekly_period = month_coupon_rows.groupby("_coupon_week_key", dropna=False).agg(
         주차=("주차", "first"),
-        월=("_coupon_month", "first"),
         min=("_date", "min"),
         max=("_date", "max"),
     ).reset_index()
@@ -17107,8 +17135,6 @@ elif menu == "쿠폰사용현황":
         lambda row: f'{pd.Timestamp(row["min"]).strftime("%m.%d")}~{pd.Timestamp(row["max"]).strftime("%m.%d")}',
         axis=1,
     )
-    if len(selected_month_keys) > 1:
-        weekly_period["주차"] = weekly_period["월"] + " · " + weekly_period["주차"]
     weekly_coupon = weekly_coupon.merge(
         weekly_period[["_coupon_week_key", "주차", "기간", "min"]],
         on="_coupon_week_key", how="left",
@@ -17223,7 +17249,7 @@ elif menu == "쿠폰사용현황":
     )
 
     product_coupon_columns = [
-        "일자", "시간대", "소재", "타겟", "전시순서", "알파코드", "쇼라코드", "상품명",
+        "일자", "시간대", "발송 유형", "소재", "타겟", "전시순서", "알파코드", "쇼라코드", "상품명",
         "재편성", "주문건수", "주문수량", "주문금액", "쿠폰 집계건수",
         "쿠폰 미적용", "미적용 비중", "5천원 적용", "3천원 적용", "그 외 적용",
         "적용 합계", "적용 비중",
