@@ -1082,7 +1082,7 @@ def normalize_product(df: pd.DataFrame) -> pd.DataFrame:
     for c in [
         "정상가", "멤버십혜택가", "할인율", "전시순서", "주문건수", "주문수량",
         "주문금액", "발송일 최저가", "상품쿠폰미적용", "상품쿠폰적용(5000)",
-        "상품쿠폰적용(3000)",
+        "상품쿠폰적용(3000)", "상품쿠폰적용(나머지)",
     ]:
         if c in d.columns:
             d[c] = num(d[c])
@@ -14674,6 +14674,7 @@ _COUPON_SOURCE_COLUMNS = {
     "쿠폰 미적용": ["상품쿠폰미적용", "상품 쿠폰 미적용", "쿠폰미적용"],
     "5천원 적용": ["상품쿠폰적용(5000)", "상품쿠폰적용(5,000)", "상품쿠폰적용5000"],
     "3천원 적용": ["상품쿠폰적용(3000)", "상품쿠폰적용(3,000)", "상품쿠폰적용3000"],
+    "그 외 적용": ["상품쿠폰적용(나머지)", "상품 쿠폰 적용(나머지)", "상품쿠폰적용나머지"],
 }
 
 
@@ -14723,25 +14724,6 @@ def _prepare_coupon_rows(product_rows: pd.DataFrame) -> tuple[pd.DataFrame, list
         values = work[column] if column in work.columns else pd.Series(0, index=work.index)
         work[column] = pd.to_numeric(values, errors="coerce").fillna(0)
 
-    known_coupon_sources = {
-        _coupon_find_column(work, candidates)
-        for candidates in _COUPON_SOURCE_COLUMNS.values()
-    }
-    other_coupon_sources = [
-        column for column in work.columns
-        if re.sub(r"\s+", "", str(column)).startswith("상품쿠폰적용")
-        and column not in known_coupon_sources
-    ]
-    explicit_other = pd.Series(0.0, index=work.index)
-    for column in other_coupon_sources:
-        explicit_other = explicit_other.add(
-            pd.to_numeric(work[column], errors="coerce").fillna(0), fill_value=0
-        )
-
-    known_count = work["쿠폰 미적용"] + work["5천원 적용"] + work["3천원 적용"] + explicit_other
-    # 원본에 기타 쿠폰 열이 따로 없으면 주문수량과 세 쿠폰 열의 차이를 기타 적용으로 봅니다.
-    residual_other = (work["주문수량"] - known_count).clip(lower=0)
-    work["그 외 적용"] = explicit_other + residual_other
     work["쿠폰 적용 합계"] = work["5천원 적용"] + work["3천원 적용"] + work["그 외 적용"]
     work["쿠폰 집계건수"] = work["쿠폰 미적용"] + work["쿠폰 적용 합계"]
     work["미적용 비중"] = safe_div(work["쿠폰 미적용"], work["쿠폰 집계건수"]).fillna(0)
@@ -16930,7 +16912,8 @@ elif menu == "월간실적":
 elif menu == "쿠폰사용현황":
     st.markdown('<div class="section-title">🎟️ 쿠폰 사용 현황</div>', unsafe_allow_html=True)
     st.caption(
-        "상품 시트의 상품쿠폰미적용·상품쿠폰적용(5000)·상품쿠폰적용(3000) 집계 기준입니다. "
+        "상품 시트의 상품쿠폰미적용·상품쿠폰적용(5000)·상품쿠폰적용(3000)·"
+        "상품쿠폰적용(나머지) 원본값 집계 기준입니다. "
         "월을 선택하면 주차별, 주차를 선택하면 일자별, 일자를 선택하면 상품별 현황이 이어집니다."
     )
 
@@ -17065,7 +17048,7 @@ elif menu == "쿠폰사용현황":
         f"5천원 적용 {int(round(coupon_5000)):,}건 · "
         f"3천원 적용 {int(round(coupon_3000)):,}건 · "
         f"그 외 적용 {int(round(coupon_other)):,}건 · "
-        "그 외 적용은 별도 쿠폰 열과 주문수량 대비 미분류 차이를 합산한 값입니다."
+        "그 외 적용은 상품쿠폰적용(나머지) 원본값입니다."
     )
 
     coupon_work["_coupon_month"] = pd.to_datetime(
