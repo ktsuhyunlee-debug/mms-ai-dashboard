@@ -14625,7 +14625,8 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
-        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="inside",
+        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
+        cliponaxis=False,
         customdata=hover_dates, hovertemplate="%{customdata}<br>주문금액 %{y:.1f}백만원<extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
@@ -14662,9 +14663,12 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
 
 
 
-def _monthly_daily_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
-    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR을 생성합니다."""
-    columns = ["일자", "주문금액", "SPM", "CTR", "CVR"]
+def _monthly_daily_trend(
+    send_rows: pd.DataFrame,
+    product_rows: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR과 상품 상세를 생성합니다."""
+    columns = ["일자", "주문금액", "SPM", "CTR", "CVR", "상품상세"]
     if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
         return pd.DataFrame(columns=columns)
     work = send_rows.copy()
@@ -14686,6 +14690,38 @@ def _monthly_daily_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
     grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
     grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
     grouped["CVR"] = grouped["_orders"].div(grouped["_click"].replace(0, pd.NA)).fillna(0)
+
+    product_details = {}
+    if (
+        product_rows is not None
+        and not product_rows.empty
+        and "_date" in product_rows.columns
+        and "상품명" in product_rows.columns
+    ):
+        detail_rows = product_rows.copy()
+        detail_rows["_monthly_date"] = pd.to_datetime(
+            detail_rows["_date"], errors="coerce"
+        ).dt.normalize()
+        detail_rows = detail_rows[detail_rows["_monthly_date"].notna()].copy()
+        detail_rows["_product_name"] = (
+            detail_rows["상품명"].fillna("상품명 없음").astype(str).str.strip()
+            .replace("", "상품명 없음")
+        )
+        detail_rows["_product_amount"] = pd.to_numeric(
+            detail_rows.get("주문금액", 0), errors="coerce"
+        ).fillna(0)
+        detail_rows = (
+            detail_rows.groupby(["_monthly_date", "_product_name"], as_index=False)["_product_amount"]
+            .sum()
+            .sort_values(["_monthly_date", "_product_amount"], ascending=[True, False], kind="stable")
+        )
+        for detail_date, detail_group in detail_rows.groupby("_monthly_date", sort=False):
+            product_details[detail_date] = "<br>".join(
+                f'{_html.escape(str(row["_product_name"]))} {float(row["_product_amount"]):,.0f}원'
+                for _, row in detail_group.iterrows()
+            )
+
+    grouped["상품상세"] = grouped["_monthly_date"].map(product_details).fillna("상품별 데이터 없음")
     return grouped[columns]
 
 
@@ -14695,12 +14731,15 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
-        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="inside",
-        hovertemplate="%{x}<br>주문금액 %{y:.1f}백만원<extra></extra>",
+        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
+        cliponaxis=False,
+        customdata=trend.get("상품상세", pd.Series("상품별 데이터 없음", index=trend.index)).tolist(),
+        hovertemplate="%{x}<br>주문금액 %{y:.1f}백만원<br><br><b>상품별 주문금액</b><br>%{customdata}<extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
-        mode="lines+markers", line=dict(color="#27ae60", width=3),
+        mode="lines+markers+text", line=dict(color="#27ae60", width=3),
+        text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
         hovertemplate="%{x}<br>SPM %{y:.1f}<extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
@@ -14715,12 +14754,14 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
     rate_fig = go.Figure()
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
-        mode="lines+markers", line=dict(color="#2f80ed", width=3),
+        mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
+        text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
         hovertemplate="%{x}<br>CTR %{y:.1f}%<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
-        mode="lines+markers", line=dict(color="#8b5cf6", width=3),
+        mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
+        text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
         hovertemplate="%{x}<br>CVR %{y:.1f}%<extra></extra>",
     ))
     rate_fig.update_layout(
@@ -14746,7 +14787,7 @@ def _build_monthly_performance_bundle(
     prev_sends = _monthly_period_rows(sends_df, prev_year, prev_month)
     trend = _monthly_weekly_trend(send_rows)
     amount_chart, rate_chart = _monthly_trend_charts(trend)
-    daily_trend = _monthly_daily_trend(send_rows)
+    daily_trend = _monthly_daily_trend(send_rows, product_rows)
     daily_amount_chart, daily_rate_chart = _monthly_daily_trend_charts(daily_trend)
     return {
         "products": product_rows,
@@ -16722,7 +16763,7 @@ elif menu == "월간실적":
     _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v6",
+        "monthly_performance_bundle_v7",
         (int(monthly_year), int(monthly_month), monthly_send_type),
         lambda: _build_monthly_performance_bundle(
             _monthly_products_source, _monthly_sends_source, overall_performance,
@@ -16806,45 +16847,112 @@ elif menu == "월간실적":
 
     mms = monthly_bundle["mms"]
     prev_mms = monthly_bundle["previous_mms"]
-    mms_share_text = f'{mms["share"]*100:.1f}%' if mms.get("available") else "-"
     mms_delta = (
         weekly_delta(mms["share"], prev_mms["share"], pp=True)
         if mms.get("available") and prev_mms.get("available") else "-"
     )
-    _mms_col, _mix_col = st.columns([1, 2])
-    with _mms_col:
+    mms_share_text = f'{float(mms["share"])*100:.1f}%' if mms.get("available") else "-"
+    mms_share_pct = float(mms["share"]) * 100 if mms.get("available") else 0.0
+    mms_donut_radius = 52
+    mms_donut_circumference = 2 * math.pi * mms_donut_radius
+    mms_donut_progress = min(max(mms_share_pct, 0.0), 100.0)
+    mms_donut_offset = mms_donut_circumference * (1 - mms_donut_progress / 100.0)
+    mms_amount_display = f'{int(float(mms.get("amount", 0))):,}원'
+    overall_amount_display = (
+        f'{int(float(mms.get("total_amount", 0))):,}원' if mms.get("available") else "-"
+    )
+
+    monthly_mix = _weekly_operation_mix(mp)
+    previous_monthly_mix = (
+        _weekly_operation_mix(monthly_bundle["previous_products"])
+        if not monthly_bundle["previous_products"].empty else None
+    )
+
+    def _monthly_mix_delta(name: str) -> str:
+        if previous_monthly_mix is None or previous_monthly_mix.get("total", 0) <= 0:
+            return "-"
+        return weekly_delta(
+            monthly_mix[name]["share"],
+            previous_monthly_mix[name]["share"],
+            pp=True,
+        )
+
+    monthly_mix_unclassified = int(monthly_mix.get("미분류", 0))
+    monthly_mix_note = (
+        f'<div class="weekly-breakdown-sub">총 편성건수 {monthly_mix["total"]:,}건 / 미분류 {monthly_mix_unclassified:,}건</div>'
+        if monthly_mix_unclassified > 0
+        else f'<div class="weekly-breakdown-sub">총 편성건수 {monthly_mix["total"]:,}건 기준</div>'
+    )
+
+    breakdown_left, breakdown_right = st.columns(2)
+    with breakdown_left:
         st.markdown(
             f'''
-            <div class="metric-card weekly-breakdown-card" style="min-height:170px;">
-              <div class="metric-label">MMS 실적 비중</div>
-              <div style="display:flex;align-items:baseline;gap:12px;margin:12px 0 15px;">
-                <div style="font-size:34px;font-weight:900;color:#111827;">{mms_share_text}</div>
-                <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
-              </div>
-              <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b;margin-top:6px;">
-                <span>MMS 주문금액</span><b style="color:#111827;">{_monthly_money_display(mms["amount"])}</b>
-              </div>
-              <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b;margin-top:7px;">
-                <span>전체 주문금액</span><b style="color:#111827;">{_monthly_money_display(mms["total_amount"]) if mms.get("available") else "-"}</b>
-              </div>
+            <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
+                <div class="metric-label">MMS 실적 비중</div>
+                <div class="weekly-mms-share-layout">
+                    <div class="weekly-mms-donut-wrap">
+                        <div class="weekly-mms-donut">
+                            <svg viewBox="0 0 140 140" aria-hidden="true">
+                                <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#e5e7eb" stroke-width="14"></circle>
+                                <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#2f6fec" stroke-width="14" stroke-linecap="round"
+                                    stroke-dasharray="{mms_donut_circumference:.2f}"
+                                    stroke-dashoffset="{mms_donut_offset:.2f}"></circle>
+                            </svg>
+                            <div class="weekly-mms-donut-center">
+                                <div class="weekly-mms-donut-value">{mms_share_text}</div>
+                                <div class="weekly-mms-donut-label">MMS 실적 비중</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="weekly-mms-info">
+                        <div>
+                            <div class="weekly-mms-amount-label">MMS 주문금액</div>
+                            <div class="weekly-mms-amount-value">{mms_amount_display}</div>
+                        </div>
+                        <div>
+                            <div class="weekly-mms-amount-label">전체 주문금액</div>
+                            <div class="weekly-mms-amount-value">{overall_amount_display}</div>
+                        </div>
+                        <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
+                    </div>
+                </div>
             </div>
             ''',
             unsafe_allow_html=True,
         )
-    with _mix_col:
-        _operation_for_summary = monthly_bundle["operation"]
-        _summary_parts = []
-        for _, row in _operation_for_summary.iterrows():
-            _summary_parts.append(
-                f'<div class="weekly-mix-item"><div class="weekly-mix-name">{row["구분"]}</div>'
-                f'<div class="weekly-mix-value">{row["전체 비중"]*100:.1f}%</div>'
-                f'<div class="weekly-mix-meta">{int(row["전체"]):,}건</div>'
-                f'<div class="weekly-mix-meta">주문금액 {_monthly_money_display(row["주문금액"])}</div></div>'
-            )
+
+    with breakdown_right:
+        rerun_delta = _monthly_mix_delta("재편성")
+        similar_delta = _monthly_mix_delta("유사신규")
+        new_delta = _monthly_mix_delta("신규")
         st.markdown(
-            '<div class="metric-card weekly-breakdown-card" style="min-height:170px;">'
-            '<div class="metric-label">상품 편성 구성 <span style="font-weight:500;color:#6b7280;">(상품 편성건수 기준)</span></div>'
-            '<div class="weekly-mix-grid" style="margin-top:13px;">' + "".join(_summary_parts) + '</div></div>',
+            f'''
+            <div class="metric-card weekly-breakdown-card">
+                <div class="metric-label">상품 편성 구성 <span style="font-weight:500; color:var(--muted);">(편성건수 기준)</span></div>
+                <div class="weekly-mix-grid">
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">재편성</div>
+                        <div class="weekly-mix-value">{monthly_mix["재편성"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{monthly_mix["재편성"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(rerun_delta)}">전월 대비 {rerun_delta}</div>
+                    </div>
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">유사신규</div>
+                        <div class="weekly-mix-value">{monthly_mix["유사신규"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{monthly_mix["유사신규"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(similar_delta)}">전월 대비 {similar_delta}</div>
+                    </div>
+                    <div class="weekly-mix-item">
+                        <div class="weekly-mix-name">신규</div>
+                        <div class="weekly-mix-value">{monthly_mix["신규"]["share"]*100:.1f}%</div>
+                        <div class="weekly-mix-meta">{monthly_mix["신규"]["count"]:,}건</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(new_delta)}">전월 대비 {new_delta}</div>
+                    </div>
+                </div>
+                {monthly_mix_note}
+            </div>
+            ''',
             unsafe_allow_html=True,
         )
 
