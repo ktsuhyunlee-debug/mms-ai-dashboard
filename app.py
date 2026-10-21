@@ -14384,6 +14384,30 @@ def _monthly_period_rows(df: pd.DataFrame, year: int, month: int) -> pd.DataFram
     return df.loc[dates.dt.year.eq(int(year)) & dates.dt.month.eq(int(month))].copy()
 
 
+def _monthly_filter_send_type(df: pd.DataFrame, send_type: str) -> pd.DataFrame:
+    """월간실적의 상품·발송 데이터를 동일한 MMS/RCS 기준으로 필터링합니다."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
+    if send_type not in {"MMS", "RCS"}:
+        return df.copy()
+    channels = _weekly_send_type_series(df).reindex(df.index).fillna("MMS")
+    return df.loc[channels.eq(send_type)].copy()
+
+
+def _monthly_week_start_series(df: pd.DataFrame) -> pd.Series:
+    """발송일이 속한 주의 월요일을 반환합니다."""
+    if df is None or df.empty or "_date" not in df.columns:
+        return pd.Series(dtype="datetime64[ns]")
+    dates = pd.to_datetime(df["_date"], errors="coerce").dt.normalize()
+    return dates - pd.to_timedelta(dates.dt.dayofweek, unit="D")
+
+
+def _monthly_week_label_series(df: pd.DataFrame) -> pd.Series:
+    """주 시작일을 1005주차 형태로 표시합니다."""
+    week_start = _monthly_week_start_series(df)
+    return week_start.dt.strftime("%m%d") + "주차"
+
+
 def _monthly_previous_period(year: int, month: int) -> tuple[int, int]:
     current = pd.Timestamp(year=int(year), month=int(month), day=1)
     previous = current - pd.offsets.MonthBegin(1)
@@ -14571,7 +14595,7 @@ def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
     work = work[work["_monthly_date"].notna()].copy()
     if work.empty:
         return pd.DataFrame(columns=columns)
-    work["_week_start"] = work["_monthly_date"] - pd.to_timedelta(work["_monthly_date"].dt.dayofweek, unit="D")
+    work["_week_start"] = _monthly_week_start_series(work)
     send_col = first_col(work, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(work, ["클릭 수(uniq)", "클릭 수"])
     work["_sent"] = pd.to_numeric(work[send_col], errors="coerce").fillna(0) if send_col else 0.0
@@ -14583,7 +14607,7 @@ def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
         _orders=("_orders", "sum"), 주문금액=("_amount", "sum"),
         _min_date=("_monthly_date", "min"), _max_date=("_monthly_date", "max"),
     ).sort_values("_week_start")
-    grouped["주차"] = [f"{idx}주" for idx in range(1, len(grouped) + 1)]
+    grouped["주차"] = grouped["_week_start"].dt.strftime("%m%d") + "주차"
     grouped["기간"] = grouped.apply(lambda r: f"{r['_min_date'].month}/{r['_min_date'].day}~{r['_max_date'].month}/{r['_max_date'].day}", axis=1)
     grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
     grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
@@ -14948,6 +14972,8 @@ try:
         del st.query_params["week"]
     if menu != "월간실적" and "month" in st.query_params:
         del st.query_params["month"]
+    if menu != "월간실적" and "send_type" in st.query_params:
+        del st.query_params["send_type"]
     if menu != "일일실적" and "date" in st.query_params:
         del st.query_params["date"]
     if menu != "상품구성비교" and "mix_month" in st.query_params:
@@ -16567,8 +16593,12 @@ elif menu == "월간실적":
         _monthly_query_month = int(_get_query_param("month"))
     except (TypeError, ValueError):
         _monthly_query_month = None
+    _monthly_send_type_options = ["전체", "MMS", "RCS"]
+    _monthly_query_send_type = str(_get_query_param("send_type") or "전체").strip().upper()
+    if _monthly_query_send_type not in _monthly_send_type_options:
+        _monthly_query_send_type = "전체"
 
-    _month_filter_left, _month_filter_right, _month_filter_note = st.columns([1, 1, 3])
+    _month_filter_left, _month_filter_right, _month_filter_type, _month_filter_note = st.columns([1, 1, 1, 3])
     with _month_filter_left:
         monthly_year = st.selectbox(
             "연도 선택",
@@ -16588,6 +16618,13 @@ elif menu == "월간실적":
             format_func=lambda value: f"{int(value)}월",
             key="monthly_selected_month",
         )
+    with _month_filter_type:
+        monthly_send_type = st.selectbox(
+            "발송 유형",
+            _monthly_send_type_options,
+            index=_monthly_send_type_options.index(_monthly_query_send_type),
+            key="monthly_selected_send_type",
+        )
     with _month_filter_note:
         st.markdown(
             '<div style="padding-top:2rem;color:#6b7280;font-size:13px;">'
@@ -16599,16 +16636,20 @@ elif menu == "월간실적":
         st.query_params["menu"] = "monthly"
         st.query_params["year"] = str(int(monthly_year))
         st.query_params["month"] = str(int(monthly_month))
+        st.query_params["send_type"] = monthly_send_type
     except Exception:
         pass
 
+    _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
+    _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v4",
-        (int(monthly_year), int(monthly_month)),
+        "monthly_performance_bundle_v5",
+        (int(monthly_year), int(monthly_month), monthly_send_type),
         lambda: _build_monthly_performance_bundle(
-            products, sends, overall_performance, int(monthly_year), int(monthly_month)
+            _monthly_products_source, _monthly_sends_source, overall_performance,
+            int(monthly_year), int(monthly_month)
         ),
-        max_entries=18,
+        max_entries=36,
     )
     mp = monthly_bundle["products"].copy()
     ms = monthly_bundle["sends"].copy()
@@ -16844,19 +16885,52 @@ elif menu == "월간실적":
             )
 
     st.markdown('<div class="subsection-title">TOP 상품</div>', unsafe_allow_html=True)
-    top_products = monthly_bundle["top_products"].copy()
-    if top_products.empty:
+    if mp.empty:
         st.info("선택 월의 상품 실적 데이터가 없습니다.")
     else:
-        top_view = clean_identifier_columns(top_products.copy())
-        top_view["발송횟수"] = top_view["발송횟수"].map(lambda value: f"{int(value):,}회")
-        for _money_col in ["주문금액", "평균금액"]:
-            top_view[_money_col] = top_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
-        selectable_dataframe(
-            top_view,
-            key=f"monthly_top_products_{monthly_year}_{monthly_month}",
-            use_container_width=True, hide_index=True, height=420,
+        _monthly_top_rows = mp.copy()
+        _monthly_top_rows["_monthly_week_start"] = _monthly_week_start_series(_monthly_top_rows)
+        _monthly_top_rows["_monthly_week_label"] = _monthly_week_label_series(_monthly_top_rows)
+        _monthly_top_weeks = (
+            _monthly_top_rows[["_monthly_week_start", "_monthly_week_label"]]
+            .dropna(subset=["_monthly_week_start"])
+            .drop_duplicates()
+            .sort_values("_monthly_week_start", kind="stable")
         )
+        _monthly_top_labels = ["전체"] + _monthly_top_weeks["_monthly_week_label"].tolist()
+        _monthly_top_tabs = st.tabs(_monthly_top_labels)
+
+        def _render_monthly_top_table(_rows: pd.DataFrame, _tab_key: str):
+            _top_products = _monthly_top_products(_rows)
+            if _top_products.empty:
+                st.info("해당 주차의 상품 실적 데이터가 없습니다.")
+                return
+            _top_view = clean_identifier_columns(_top_products.copy())
+            _top_view["발송횟수"] = _top_view["발송횟수"].map(lambda value: f"{int(value):,}회")
+            for _money_col in ["주문금액", "평균금액"]:
+                _top_view[_money_col] = _top_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+            selectable_dataframe(
+                _top_view,
+                key=(
+                    f"monthly_top_products_{monthly_year}_{monthly_month}_"
+                    f"{monthly_send_type}_{_tab_key}"
+                ),
+                use_container_width=True, hide_index=True, height=420,
+            )
+
+        with _monthly_top_tabs[0]:
+            _render_monthly_top_table(_monthly_top_rows, "all")
+        for _top_tab, (_, _top_week) in zip(
+            _monthly_top_tabs[1:], _monthly_top_weeks.iterrows()
+        ):
+            _top_week_label = str(_top_week["_monthly_week_label"])
+            with _top_tab:
+                _render_monthly_top_table(
+                    _monthly_top_rows[
+                        _monthly_top_rows["_monthly_week_start"].eq(_top_week["_monthly_week_start"])
+                    ].copy(),
+                    _top_week_label,
+                )
 
     st.markdown('<div class="subsection-title">월간 성과 요약</div>', unsafe_allow_html=True)
     trend = monthly_bundle["trend"]
