@@ -16952,6 +16952,14 @@ elif menu in {"월간실적", "월간실적 V2"}:
             return "-"
         return weekly_delta(metrics.get(metric_name, 0), prev_metrics.get(metric_name, 0), pp=pp)
 
+    mms = monthly_bundle["mms"]
+    prev_mms = monthly_bundle["previous_mms"]
+    mms_delta = (
+        weekly_delta(mms["share"], prev_mms["share"], pp=True)
+        if mms.get("available") and prev_mms.get("available") else "-"
+    )
+    mms_share_text = f'{float(mms["share"])*100:.1f}%' if mms.get("available") else "-"
+
     st.markdown('<div class="subsection-title">핵심 실적</div>', unsafe_allow_html=True)
     monthly_cards = [
         ("발송횟수", f'{int(metrics["발송횟수"]):,}회', _monthly_delta("발송횟수")),
@@ -16964,6 +16972,8 @@ elif menu in {"월간실적", "월간실적 V2"}:
         ("객단가", f'{int(metrics["객단가"]):,}원', _monthly_delta("객단가")),
         ("SPM", f'{metrics["SPM"]:.1f}', _monthly_delta("SPM")),
     ]
+    if monthly_v2:
+        monthly_cards.append(("MMS 실적 비중", mms_share_text, mms_delta))
     for _monthly_card_row in [monthly_cards[:5], monthly_cards[5:]]:
         _monthly_card_cols = st.columns(len(_monthly_card_row))
         for _monthly_card_col, (label, value, delta) in zip(_monthly_card_cols, _monthly_card_row):
@@ -17017,41 +17027,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
     )
 
     if monthly_v2:
-        st.markdown(
-            f'''
-            <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
-                <div class="metric-label">MMS 실적 비중</div>
-                <div class="weekly-mms-share-layout" style="grid-template-columns: 200px minmax(0, 1fr); gap: 32px;">
-                    <div class="weekly-mms-donut-wrap">
-                        <div class="weekly-mms-donut">
-                            <svg viewBox="0 0 140 140" aria-hidden="true">
-                                <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#e5e7eb" stroke-width="14"></circle>
-                                <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#2f6fec" stroke-width="14" stroke-linecap="round"
-                                    stroke-dasharray="{mms_donut_circumference:.2f}"
-                                    stroke-dashoffset="{mms_donut_offset:.2f}"></circle>
-                            </svg>
-                            <div class="weekly-mms-donut-center">
-                                <div class="weekly-mms-donut-value">{mms_share_text}</div>
-                                <div class="weekly-mms-donut-label">MMS 실적 비중</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="weekly-mms-info" style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; align-items:center;">
-                        <div>
-                            <div class="weekly-mms-amount-label">MMS 주문금액</div>
-                            <div class="weekly-mms-amount-value">{mms_amount_display}</div>
-                        </div>
-                        <div>
-                            <div class="weekly-mms-amount-label">전체 주문금액</div>
-                            <div class="weekly-mms-amount-value">{overall_amount_display}</div>
-                        </div>
-                        <div><div class="weekly-mms-amount-label">전월 대비</div><div class="weekly-mms-amount-value {weekly_delta_class(mms_delta)}">{mms_delta}</div></div>
-                    </div>
-                </div>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
+        pass
     else:
         breakdown_left, breakdown_right = st.columns(2)
         with breakdown_left:
