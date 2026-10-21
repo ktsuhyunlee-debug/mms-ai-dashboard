@@ -16953,22 +16953,32 @@ elif menu == "월간실적":
     lowest_category = categories.iloc[-1]["소카테고리"] if not categories.empty else "소카테고리"
 
     insight_cols = st.columns(3)
+    rise_lines = [
+        f'{best_week["주차"]} 주문금액 {_monthly_money_display(best_week["주문금액"])}로 월 최고' if best_week is not None else "주차별 데이터 없음",
+        f'{best_target["label"]} 주문금액 {_monthly_money_display(best_target["amount"])}로 타겟 중 최고' if best_target else "타겟별 데이터 없음",
+        f"300만원 이상 상품 {high_total:,}건 운영",
+    ]
+    decline_lines = [
+        f'{worst_week["주차"]} 주문금액 {_monthly_money_display(worst_week["주문금액"])}로 월 최저' if worst_week is not None else "주차별 데이터 없음",
+        f"100만원 미만 상품 {low_total:,}건으로 저성과 상품 비중 점검 필요",
+    ]
+    if has_previous:
+        ctr_change = float(metrics.get("CTR", 0) or 0) - float(prev_metrics.get("CTR", 0) or 0)
+        if ctr_change > 0:
+            rise_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+        elif ctr_change < 0:
+            decline_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+    else:
+        decline_lines.append("전월 비교 데이터 없음")
+
     insight_contents = [
         (
             "성과 상승 요인",
-            [
-                f'{best_week["주차"]} 주문금액 {_monthly_money_display(best_week["주문금액"])}로 월 최고' if best_week is not None else "주차별 데이터 없음",
-                f'{best_target["label"]} 주문금액 {_monthly_money_display(best_target["amount"])}로 타겟 중 최고' if best_target else "타겟별 데이터 없음",
-                f"300만원 이상 상품 {high_total:,}건 운영",
-            ],
+            rise_lines,
         ),
         (
             "성과 하락 요인",
-            [
-                f'{worst_week["주차"]} 주문금액 {_monthly_money_display(worst_week["주문금액"])}로 월 최저' if worst_week is not None else "주차별 데이터 없음",
-                f"100만원 미만 상품 {low_total:,}건으로 저성과 상품 비중 점검 필요",
-                f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}' if has_previous else "전월 비교 데이터 없음",
-            ],
+            decline_lines,
         ),
         (
             "다음 달 점검 항목",
