@@ -10541,6 +10541,123 @@ def render_weekly_send_carousel(
             )
 
 
+@_weekly_fragment
+def render_monthly_send_carousel(
+    pw: pd.DataFrame,
+    sw: pd.DataFrame,
+    messages_df: pd.DataFrame | None,
+    selected_year: int,
+    selected_month: int,
+) -> None:
+    """월간실적에서 선택 월의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
+    items = _build_weekly_send_carousel_items(pw, sw, messages_df)
+    st.markdown('<div class="subsection-title">MMS 발송 소재 · 문구</div>', unsafe_allow_html=True)
+    if not items:
+        st.info("선택 월의 MMS 발송 소재가 없습니다.")
+        return
+
+    state_key = f"monthly_send_carousel_index_{selected_year}_{selected_month}"
+    current_index = int(st.session_state.get(state_key, 0) or 0)
+    if current_index < 0 or current_index >= len(items):
+        current_index = 0
+
+    nav_prev, nav_center, nav_next = st.columns([0.75, 4.5, 0.75])
+    if nav_prev.button("◀ 이전", key=f"{state_key}_prev", use_container_width=True):
+        current_index = (current_index - 1) % len(items)
+    if nav_next.button("다음 ▶", key=f"{state_key}_next", use_container_width=True):
+        current_index = (current_index + 1) % len(items)
+    st.session_state[state_key] = current_index
+
+    item = items[current_index]
+    date_text = item["date"].strftime("%Y-%m-%d") if pd.notna(item["date"]) else "-"
+    meta_parts = [date_text, item["time"] or "-", item["material"] or "소재명 없음"]
+    if item["target"]:
+        meta_parts.append(item["target"])
+    nav_center.markdown(
+        "<div style='text-align:center; padding-top:0.5rem; font-weight:800;'>"
+        f"{current_index + 1} / {len(items)} &nbsp;·&nbsp; {_html.escape(' · '.join(meta_parts))}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    image_col, message_col, table_col = st.columns([1.15, 1.15, 3.0], gap="small")
+
+    with image_col:
+        st.markdown("**발송 이미지**")
+        image_paths = item["image_paths"]
+        image_state_key = (
+            f"monthly_send_image_index_{selected_year}_{selected_month}_"
+            f"{current_index}_{item['asset_key']}"
+        )
+        image_index = int(st.session_state.get(image_state_key, 0) or 0)
+        if image_index < 0 or image_index >= len(image_paths):
+            image_index = 0
+
+        if len(image_paths) > 1:
+            image_prev, image_count, image_next = st.columns([0.75, 1.0, 0.75], gap="small")
+            if image_prev.button("◀", key=f"{image_state_key}_prev", use_container_width=True):
+                image_index = (image_index - 1) % len(image_paths)
+            if image_next.button("▶", key=f"{image_state_key}_next", use_container_width=True):
+                image_index = (image_index + 1) % len(image_paths)
+            image_count.markdown(
+                f"<div style='text-align:center; padding-top:0.45rem; font-weight:800;'>"
+                f"{image_index + 1} / {len(image_paths)}</div>",
+                unsafe_allow_html=True,
+            )
+        st.session_state[image_state_key] = image_index
+
+        image_path = image_paths[image_index] if image_paths else None
+        if image_path is not None:
+            try:
+                modified_ns = image_path.stat().st_mtime_ns
+            except OSError:
+                modified_ns = 0
+            mime, encoded = _encode_daily_image_cached(str(image_path), modified_ns)
+            image_body = (
+                f'<img src="data:{mime};base64,{encoded}" '
+                f'alt="{_html.escape(image_path.name)}">'
+            )
+        else:
+            image_body = (
+                '<div class="asset-empty">images 폴더에<br>'
+                + _html.escape(f"{item['asset_key']}로 연결되는 이미지가 없습니다.")
+                + '</div>'
+            )
+        st.markdown(
+            f'<div class="asset-card asset-image-card" style="height:390px; min-height:390px;">{image_body}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with message_col:
+        st.markdown("**MMS 문구**")
+        message_text = str(item["message_text"] or "").lstrip()
+        if message_text:
+            message_body = _html.escape(message_text).replace("\n", "<br>")
+        else:
+            message_body = "연결된 MMS 문구가 없습니다."
+        st.markdown(
+            '<div class="asset-card asset-message-card weekly-message-card" '
+            'style="min-height:390px; max-height:390px; overflow-y:auto;">'
+            f'{message_body}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with table_col:
+        st.markdown("**상품 실적**")
+        product_view = item["product_view"]
+        if product_view.empty:
+            st.info("해당 발송과 연결된 상품 실적이 없습니다.")
+        else:
+            render_weekly_product_grouped_table(
+                product_view,
+                product_view,
+                height=390,
+                total_labels={"합계"},
+                total_bold_only=True,
+                apply_amount_colors=False,
+            )
+
+
 def _build_weekly_core_bundle(
     selected_year: int,
     week: str,
@@ -16981,6 +17098,11 @@ elif menu == "월간실적":
             _weekly_black_plotly_text(monthly_bundle["daily_rate_chart"]),
             use_container_width=True, config={"displayModeBar": False},
         )
+
+    # 주간실적과 동일한 발송 소재·문구·상품 실적 캐러셀을 선택 월 전체 발송 기준으로 표시합니다.
+    render_monthly_send_carousel(
+        mp, ms, messages, int(monthly_year), int(monthly_month)
+    )
 
     st.markdown('<div class="subsection-title">타겟별 성과</div>', unsafe_allow_html=True)
     monthly_target_cols = st.columns(4)
