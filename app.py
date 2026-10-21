@@ -10551,6 +10551,7 @@ def render_monthly_send_carousel(
     messages_df: pd.DataFrame | None,
     selected_year: int,
     selected_month: int,
+    monthly_v2: bool = False,
 ) -> None:
     """월간실적에서 선택 월의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
     items = _build_weekly_send_carousel_items(pw, sw, messages_df)
@@ -10651,9 +10652,17 @@ def render_monthly_send_carousel(
         if product_view.empty:
             st.info("해당 발송과 연결된 상품 실적이 없습니다.")
         else:
+            display_product_view = product_view.copy()
+            if monthly_v2:
+                display_product_view = display_product_view.drop(
+                    columns=[
+                        c for c in ["최저가 여부", "재편성"]
+                        if c in display_product_view.columns
+                    ]
+                )
             render_weekly_product_grouped_table(
-                product_view,
-                product_view,
+                display_product_view,
+                display_product_view,
                 height=390,
                 total_labels={"합계"},
                 total_bold_only=True,
@@ -17129,7 +17138,8 @@ elif menu in {"월간실적", "월간실적 V2"}:
 
     # 주간실적과 동일한 발송 소재·문구·상품 실적 캐러셀을 선택 월 전체 발송 기준으로 표시합니다.
     render_monthly_send_carousel(
-        mp, ms, messages, int(monthly_year), int(monthly_month)
+        mp, ms, messages, int(monthly_year), int(monthly_month),
+        monthly_v2=monthly_v2,
     )
 
     st.markdown('<div class="subsection-title">타겟별 성과</div>', unsafe_allow_html=True)
