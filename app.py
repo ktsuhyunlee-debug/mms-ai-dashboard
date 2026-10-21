@@ -16722,7 +16722,7 @@ elif menu == "월간실적":
     _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v5",
+        "monthly_performance_bundle_v6",
         (int(monthly_year), int(monthly_month), monthly_send_type),
         lambda: _build_monthly_performance_bundle(
             _monthly_products_source, _monthly_sends_source, overall_performance,
