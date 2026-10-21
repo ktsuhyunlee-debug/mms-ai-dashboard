@@ -14541,7 +14541,7 @@ def _monthly_operation_performance(product_rows: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _monthly_top_products(product_rows: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+def _monthly_top_products(product_rows: pd.DataFrame, top_n: int | None = 10) -> pd.DataFrame:
     columns = ["구분", "알파코드", "쇼라코드", "상품명", "발송횟수", "주문금액", "평균금액"]
     if product_rows is None or product_rows.empty or "상품명" not in product_rows.columns:
         return pd.DataFrame(columns=columns)
@@ -14563,7 +14563,10 @@ def _monthly_top_products(product_rows: pd.DataFrame, top_n: int = 10) -> pd.Dat
         주문금액=("주문금액", "sum"),
     )
     grouped["평균금액"] = grouped["주문금액"].div(grouped["발송횟수"].replace(0, pd.NA)).fillna(0)
-    return grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False]).head(top_n)[columns]
+    grouped = grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False])
+    if top_n is not None:
+        grouped = grouped.head(int(top_n))
+    return grouped[columns]
 
 
 def _monthly_small_categories(product_rows: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
@@ -16884,7 +16887,7 @@ elif menu == "월간실적":
                 use_container_width=True, hide_index=True, height=430,
             )
 
-    st.markdown('<div class="subsection-title">TOP 상품</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subsection-title">TOP 상품 · 주차별 상품</div>', unsafe_allow_html=True)
     if mp.empty:
         st.info("선택 월의 상품 실적 데이터가 없습니다.")
     else:
@@ -16900,8 +16903,12 @@ elif menu == "월간실적":
         _monthly_top_labels = ["전체"] + _monthly_top_weeks["_monthly_week_label"].tolist()
         _monthly_top_tabs = st.tabs(_monthly_top_labels)
 
-        def _render_monthly_top_table(_rows: pd.DataFrame, _tab_key: str):
-            _top_products = _monthly_top_products(_rows)
+        def _render_monthly_top_table(
+            _rows: pd.DataFrame,
+            _tab_key: str,
+            _show_all: bool = False,
+        ):
+            _top_products = _monthly_top_products(_rows, top_n=None if _show_all else 10)
             if _top_products.empty:
                 st.info("해당 주차의 상품 실적 데이터가 없습니다.")
                 return
@@ -16919,17 +16926,20 @@ elif menu == "월간실적":
             )
 
         with _monthly_top_tabs[0]:
+            st.caption("선택 월의 주문금액 TOP10 상품입니다.")
             _render_monthly_top_table(_monthly_top_rows, "all")
         for _top_tab, (_, _top_week) in zip(
             _monthly_top_tabs[1:], _monthly_top_weeks.iterrows()
         ):
             _top_week_label = str(_top_week["_monthly_week_label"])
             with _top_tab:
+                st.caption(f"{_top_week_label}에 발송된 전체 상품입니다.")
                 _render_monthly_top_table(
                     _monthly_top_rows[
                         _monthly_top_rows["_monthly_week_start"].eq(_top_week["_monthly_week_start"])
                     ].copy(),
                     _top_week_label,
+                    _show_all=True,
                 )
 
     st.markdown('<div class="subsection-title">월간 성과 요약</div>', unsafe_allow_html=True)
