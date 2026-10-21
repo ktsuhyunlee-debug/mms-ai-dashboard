@@ -15986,7 +15986,15 @@ elif menu == "일일실적":
             product_view["할인율"] = product_view["할인율"].map(format_discount_percent)
         for price_col in ["정상가", "멤버십혜택가", "주문금액", "최고매출", "발송일 최저가"]:
             if price_col in product_view.columns:
-                product_view[price_col] = product_view[price_col].map(format_integer_price)
+                product_view[price_col] = product_view[price_col].map(
+                    lambda x: f"{format_integer_price(x)}원" if str(x).strip() not in ["", "nan", "None"] else ""
+                )
+
+        for count_col, unit in [("주문건수", "건"), ("주문수량", "개")]:
+            if count_col in product_view.columns:
+                product_view[count_col] = product_view[count_col].map(
+                    lambda x, _unit=unit: f"{format_integer_price(x)}{_unit}" if str(x).strip() not in ["", "nan", "None"] else ""
+                )
 
         if "최저가 확보" in product_view.columns:
             product_view = product_view.rename(columns={"최저가 확보": "최저가 여부"})
@@ -15995,15 +16003,13 @@ elif menu == "일일실적":
         total_row = {c: "" for c in product_view.columns}
         first_display = product_view.columns[0]
         total_row[first_display] = "합계"
-        for c in ["주문건수", "주문수량", "주문금액"]:
-            if c in product_view.columns:
-                total_row[c] = matched[c].sum()
+        if "주문건수" in product_view.columns:
+            total_row["주문건수"] = f"{format_integer_price(matched['주문건수'].sum())}건"
+        if "주문수량" in product_view.columns:
+            total_row["주문수량"] = f"{format_integer_price(matched['주문수량'].sum())}개"
+        if "주문금액" in product_view.columns:
+            total_row["주문금액"] = f"{format_integer_price(matched['주문금액'].sum())}원"
         product_view = pd.concat([product_view, pd.DataFrame([total_row])], ignore_index=True)
-        for c in ["주문건수", "주문수량", "주문금액"]:
-            if c in product_view.columns:
-                product_view[c] = product_view[c].map(
-                    lambda x: format_integer_price(x) if str(x).strip() not in ["", "nan", "None"] else ""
-                )
 
         st.markdown('<div class="subsection-title">상품 실적</div>', unsafe_allow_html=True)
         _daily_product_view = clean_identifier_columns(product_view)
@@ -16013,6 +16019,7 @@ elif menu == "일일실적":
             use_container_width=True,
             hide_index=True,
             height=280,
+            preserve_display_text=True,
         )
 
         st.markdown('<div class="subsection-title">상품 인사이트</div>', unsafe_allow_html=True)
