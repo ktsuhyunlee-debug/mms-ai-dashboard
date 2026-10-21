@@ -15112,7 +15112,7 @@ def _coupon_table_style(view: pd.DataFrame):
 
 
 _menu_options = [
-    "홈", "일일실적", "주간실적", "월간실적", "쿠폰사용현황", "실적요인분석",
+    "홈", "일일실적", "주간실적", "월간실적", "월간실적 V2", "쿠폰사용현황", "실적요인분석",
     "상품구성비교", "상품구분", "타겟별베스트상품",
     "타겟분석", "SEG분석", "편성 프로그램",
 ]
@@ -15121,6 +15121,7 @@ _menu_slug_to_name = {
     "daily": "일일실적",
     "weekly": "주간실적",
     "monthly": "월간실적",
+    "monthly-v2": "월간실적 V2",
     "coupon": "쿠폰사용현황",
     "performance-factor": "실적요인분석",
     "product": "상품구분",
@@ -15138,6 +15139,7 @@ _menu_groups = [
         ("일일실적", "일일실적"),
         ("주간실적", "주간실적"),
         ("월간실적", "월간실적"),
+        ("월간실적 V2", "월간실적 V2"),
         ("쿠폰 사용 현황", "쿠폰사용현황"),
         ("실적 요인 분석", "실적요인분석"),
     ]),
@@ -15206,13 +15208,13 @@ except Exception:
 
 # 메뉴별로 사용하지 않는 세부 query param은 정리
 try:
-    if menu not in {"주간실적", "월간실적"} and "year" in st.query_params:
+    if menu not in {"주간실적", "월간실적", "월간실적 V2"} and "year" in st.query_params:
         del st.query_params["year"]
     if menu != "주간실적" and "week" in st.query_params:
         del st.query_params["week"]
-    if menu != "월간실적" and "month" in st.query_params:
+    if menu not in {"월간실적", "월간실적 V2"} and "month" in st.query_params:
         del st.query_params["month"]
-    if menu != "월간실적" and "send_type" in st.query_params:
+    if menu not in {"월간실적", "월간실적 V2"} and "send_type" in st.query_params:
         del st.query_params["send_type"]
     if menu != "일일실적" and "date" in st.query_params:
         del st.query_params["date"]
@@ -16821,8 +16823,10 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 # 월간실적
 # ─────────────────────────────────────────────────────────────────────────────
-elif menu == "월간실적":
-    st.markdown('<div class="section-title">📅 월간실적</div>', unsafe_allow_html=True)
+elif menu in {"월간실적", "월간실적 V2"}:
+    monthly_v2 = menu == "월간실적 V2"
+    _monthly_title = "📅 월간실적 V2" if monthly_v2 else "📅 월간실적"
+    st.markdown(f'<div class="section-title">{_monthly_title}</div>', unsafe_allow_html=True)
 
     _monthly_dates = pd.concat([
         pd.to_datetime(products.get("_date"), errors="coerce"),
@@ -16881,7 +16885,7 @@ elif menu == "월간실적":
             unsafe_allow_html=True,
         )
     try:
-        st.query_params["menu"] = "monthly"
+        st.query_params["menu"] = "monthly-v2" if monthly_v2 else "monthly"
         st.query_params["year"] = str(int(monthly_year))
         st.query_params["month"] = str(int(monthly_month))
         st.query_params["send_type"] = monthly_send_type
@@ -17050,39 +17054,40 @@ elif menu == "월간실적":
             unsafe_allow_html=True,
         )
 
-    with breakdown_right:
-        rerun_delta = _monthly_mix_delta("재편성")
-        similar_delta = _monthly_mix_delta("유사신규")
-        new_delta = _monthly_mix_delta("신규")
-        st.markdown(
-            f'''
-            <div class="metric-card weekly-breakdown-card">
-                <div class="metric-label">상품 편성 구성 <span style="font-weight:500; color:var(--muted);">(편성건수 기준)</span></div>
-                <div class="weekly-mix-grid">
-                    <div class="weekly-mix-item">
-                        <div class="weekly-mix-name">재편성</div>
-                        <div class="weekly-mix-value">{monthly_mix["재편성"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{monthly_mix["재편성"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(rerun_delta)}">전월 대비 {rerun_delta}</div>
+    if not monthly_v2:
+        with breakdown_right:
+            rerun_delta = _monthly_mix_delta("재편성")
+            similar_delta = _monthly_mix_delta("유사신규")
+            new_delta = _monthly_mix_delta("신규")
+            st.markdown(
+                f'''
+                <div class="metric-card weekly-breakdown-card">
+                    <div class="metric-label">상품 편성 구성 <span style="font-weight:500; color:var(--muted);">(편성건수 기준)</span></div>
+                    <div class="weekly-mix-grid">
+                        <div class="weekly-mix-item">
+                            <div class="weekly-mix-name">재편성</div>
+                            <div class="weekly-mix-value">{monthly_mix["재편성"]["share"]*100:.1f}%</div>
+                            <div class="weekly-mix-meta">{monthly_mix["재편성"]["count"]:,}건</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(rerun_delta)}">전월 대비 {rerun_delta}</div>
+                        </div>
+                        <div class="weekly-mix-item">
+                            <div class="weekly-mix-name">유사신규</div>
+                            <div class="weekly-mix-value">{monthly_mix["유사신규"]["share"]*100:.1f}%</div>
+                            <div class="weekly-mix-meta">{monthly_mix["유사신규"]["count"]:,}건</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(similar_delta)}">전월 대비 {similar_delta}</div>
+                        </div>
+                        <div class="weekly-mix-item">
+                            <div class="weekly-mix-name">신규</div>
+                            <div class="weekly-mix-value">{monthly_mix["신규"]["share"]*100:.1f}%</div>
+                            <div class="weekly-mix-meta">{monthly_mix["신규"]["count"]:,}건</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(new_delta)}">전월 대비 {new_delta}</div>
+                        </div>
                     </div>
-                    <div class="weekly-mix-item">
-                        <div class="weekly-mix-name">유사신규</div>
-                        <div class="weekly-mix-value">{monthly_mix["유사신규"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{monthly_mix["유사신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(similar_delta)}">전월 대비 {similar_delta}</div>
-                    </div>
-                    <div class="weekly-mix-item">
-                        <div class="weekly-mix-name">신규</div>
-                        <div class="weekly-mix-value">{monthly_mix["신규"]["share"]*100:.1f}%</div>
-                        <div class="weekly-mix-meta">{monthly_mix["신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(new_delta)}">전월 대비 {new_delta}</div>
-                    </div>
+                    {monthly_mix_note}
                 </div>
-                {monthly_mix_note}
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
+                ''',
+                unsafe_allow_html=True,
+            )
 
     st.markdown('<div class="subsection-title">주차별 실적 추이</div>', unsafe_allow_html=True)
     trend_left, trend_right = st.columns(2)
@@ -17152,36 +17157,37 @@ elif menu == "월간실적":
                 unsafe_allow_html=True,
             )
 
-    st.markdown('<div class="subsection-title">상품 구성 · 성과 구간</div>', unsafe_allow_html=True)
     operation = monthly_bundle["operation"].copy()
-    operation_cols = st.columns(3)
-    for op_col, (_, row) in zip(operation_cols, operation.iterrows()):
-        with op_col:
-            st.markdown(
-                f'''
-                <div class="monthly-op-card">
-                  <div class="monthly-op-title">{row["구분"]}</div>
-                  <div class="monthly-op-main">{int(row["전체"]):,}건 <span style="font-size:15px;color:#64748b;">{row["전체 비중"]*100:.1f}%</span></div>
-                  <div class="monthly-op-row"><span>300만원 이상</span><b>{int(row["300만원 이상"]):,}건 · {row["300만원 이상 비중"]*100:.1f}%</b></div>
-                  <div class="monthly-op-row"><span>100만원 미만</span><b>{int(row["100만원 미만"]):,}건 · {row["100만원 미만 비중"]*100:.1f}%</b></div>
-                  <div class="monthly-op-row"><span>평균 주문금액</span><b>{_monthly_money_display(row["평균금액"])}</b></div>
-                </div>
-                ''',
-                unsafe_allow_html=True,
-            )
+    if not monthly_v2:
+        st.markdown('<div class="subsection-title">상품 구성 · 성과 구간</div>', unsafe_allow_html=True)
+        operation_cols = st.columns(3)
+        for op_col, (_, row) in zip(operation_cols, operation.iterrows()):
+            with op_col:
+                st.markdown(
+                    f'''
+                    <div class="monthly-op-card">
+                      <div class="monthly-op-title">{row["구분"]}</div>
+                      <div class="monthly-op-main">{int(row["전체"]):,}건 <span style="font-size:15px;color:#64748b;">{row["전체 비중"]*100:.1f}%</span></div>
+                      <div class="monthly-op-row"><span>300만원 이상</span><b>{int(row["300만원 이상"]):,}건 · {row["300만원 이상 비중"]*100:.1f}%</b></div>
+                      <div class="monthly-op-row"><span>100만원 미만</span><b>{int(row["100만원 미만"]):,}건 · {row["100만원 미만 비중"]*100:.1f}%</b></div>
+                      <div class="monthly-op-row"><span>평균 주문금액</span><b>{_monthly_money_display(row["평균금액"])}</b></div>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
 
-    _operation_view = operation.copy()
-    for _pct_col in ["전체 비중", "300만원 이상 비중", "100만원 미만 비중"]:
-        _operation_view[_pct_col] = _operation_view[_pct_col].map(lambda value: f"{float(value)*100:.1f}%")
-    for _count_col in ["전체", "300만원 이상", "100만원 미만"]:
-        _operation_view[_count_col] = _operation_view[_count_col].map(lambda value: f"{int(value):,}건")
-    for _money_col in ["주문금액", "평균금액"]:
-        _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
-    selectable_dataframe(
-        clean_identifier_columns(_operation_view),
-        key=f"monthly_operation_{monthly_year}_{monthly_month}",
-        use_container_width=True, hide_index=True,
-    )
+        _operation_view = operation.copy()
+        for _pct_col in ["전체 비중", "300만원 이상 비중", "100만원 미만 비중"]:
+            _operation_view[_pct_col] = _operation_view[_pct_col].map(lambda value: f"{float(value)*100:.1f}%")
+        for _count_col in ["전체", "300만원 이상", "100만원 미만"]:
+            _operation_view[_count_col] = _operation_view[_count_col].map(lambda value: f"{int(value):,}건")
+        for _money_col in ["주문금액", "평균금액"]:
+            _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+        selectable_dataframe(
+            clean_identifier_columns(_operation_view),
+            key=f"monthly_operation_{monthly_year}_{monthly_month}",
+            use_container_width=True, hide_index=True,
+        )
 
     st.markdown('<div class="subsection-title">주요 소카테고리</div>', unsafe_allow_html=True)
     categories = monthly_bundle["categories"].copy()
@@ -17243,6 +17249,10 @@ elif menu == "월간실적":
                 st.info("해당 주차의 상품 실적 데이터가 없습니다.")
                 return
             _top_view = clean_identifier_columns(_top_products.copy())
+            if monthly_v2:
+                _top_view = _top_view.drop(
+                    columns=[c for c in ["구분", "재편성 여부", "재편성"] if c in _top_view.columns]
+                )
             _top_view["발송횟수"] = _top_view["발송횟수"].map(lambda value: f"{int(value):,}회")
             for _money_col in ["주문금액", "평균금액"]:
                 _top_view[_money_col] = _top_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
@@ -17272,62 +17282,63 @@ elif menu == "월간실적":
                     _show_all=True,
                 )
 
-    st.markdown('<div class="subsection-title">월간 성과 요약</div>', unsafe_allow_html=True)
-    trend = monthly_bundle["trend"]
-    best_week = trend.loc[trend["주문금액"].idxmax()] if not trend.empty else None
-    worst_week = trend.loc[trend["주문금액"].idxmin()] if not trend.empty else None
-    valid_targets = [item for item in monthly_bundle["targets"] if item.get("amount", 0) > 0]
-    best_target = max(valid_targets, key=lambda item: item["amount"]) if valid_targets else None
-    high_total = int(operation["300만원 이상"].sum()) if not operation.empty else 0
-    low_total = int(operation["100만원 미만"].sum()) if not operation.empty else 0
-    lowest_category = categories.iloc[-1]["소카테고리"] if not categories.empty else "소카테고리"
+    if not monthly_v2:
+        st.markdown('<div class="subsection-title">월간 성과 요약</div>', unsafe_allow_html=True)
+        trend = monthly_bundle["trend"]
+        best_week = trend.loc[trend["주문금액"].idxmax()] if not trend.empty else None
+        worst_week = trend.loc[trend["주문금액"].idxmin()] if not trend.empty else None
+        valid_targets = [item for item in monthly_bundle["targets"] if item.get("amount", 0) > 0]
+        best_target = max(valid_targets, key=lambda item: item["amount"]) if valid_targets else None
+        high_total = int(operation["300만원 이상"].sum()) if not operation.empty else 0
+        low_total = int(operation["100만원 미만"].sum()) if not operation.empty else 0
+        lowest_category = categories.iloc[-1]["소카테고리"] if not categories.empty else "소카테고리"
 
-    insight_cols = st.columns(3)
-    rise_lines = [
-        f'{best_week["주차"]} 주문금액 {_monthly_money_display(best_week["주문금액"])}로 월 최고' if best_week is not None else "주차별 데이터 없음",
-        f'{best_target["label"]} 주문금액 {_monthly_money_display(best_target["amount"])}로 타겟 중 최고' if best_target else "타겟별 데이터 없음",
-        f"300만원 이상 상품 {high_total:,}건 운영",
-    ]
-    decline_lines = [
-        f'{worst_week["주차"]} 주문금액 {_monthly_money_display(worst_week["주문금액"])}로 월 최저' if worst_week is not None else "주차별 데이터 없음",
-        f"100만원 미만 상품 {low_total:,}건으로 저성과 상품 비중 점검 필요",
-    ]
-    if has_previous:
-        ctr_change = float(metrics.get("CTR", 0) or 0) - float(prev_metrics.get("CTR", 0) or 0)
-        if ctr_change > 0:
-            rise_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
-        elif ctr_change < 0:
-            decline_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
-    else:
-        decline_lines.append("전월 비교 데이터 없음")
+        insight_cols = st.columns(3)
+        rise_lines = [
+            f'{best_week["주차"]} 주문금액 {_monthly_money_display(best_week["주문금액"])}로 월 최고' if best_week is not None else "주차별 데이터 없음",
+            f'{best_target["label"]} 주문금액 {_monthly_money_display(best_target["amount"])}로 타겟 중 최고' if best_target else "타겟별 데이터 없음",
+            f"300만원 이상 상품 {high_total:,}건 운영",
+        ]
+        decline_lines = [
+            f'{worst_week["주차"]} 주문금액 {_monthly_money_display(worst_week["주문금액"])}로 월 최저' if worst_week is not None else "주차별 데이터 없음",
+            f"100만원 미만 상품 {low_total:,}건으로 저성과 상품 비중 점검 필요",
+        ]
+        if has_previous:
+            ctr_change = float(metrics.get("CTR", 0) or 0) - float(prev_metrics.get("CTR", 0) or 0)
+            if ctr_change > 0:
+                rise_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+            elif ctr_change < 0:
+                decline_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+        else:
+            decline_lines.append("전월 비교 데이터 없음")
 
-    insight_contents = [
-        (
-            "성과 상승 요인",
-            rise_lines,
-        ),
-        (
-            "성과 하락 요인",
-            decline_lines,
-        ),
-        (
-            "다음 달 점검 항목",
-            [
-                "재편성·유사신규·신규별 300만원 이상 상품 비중 확대 검토",
-                "100만원 미만 상품의 가격·타겟·운영 간격 재점검",
-                f"{lowest_category} 등 하위 소카테고리 상품 구성 점검",
-            ],
-        ),
-    ]
-    for col, (title, lines) in zip(insight_cols, insight_contents):
-        with col:
-            st.markdown(
-                '<div class="monthly-insight-card">'
-                f'<div class="monthly-insight-title">{title}</div>'
-                + "".join(f'<div class="monthly-insight-line">• {line}</div>' for line in lines)
-                + '</div>',
-                unsafe_allow_html=True,
-            )
+        insight_contents = [
+            (
+                "성과 상승 요인",
+                rise_lines,
+            ),
+            (
+                "성과 하락 요인",
+                decline_lines,
+            ),
+            (
+                "다음 달 점검 항목",
+                [
+                    "재편성·유사신규·신규별 300만원 이상 상품 비중 확대 검토",
+                    "100만원 미만 상품의 가격·타겟·운영 간격 재점검",
+                    f"{lowest_category} 등 하위 소카테고리 상품 구성 점검",
+                ],
+            ),
+        ]
+        for col, (title, lines) in zip(insight_cols, insight_contents):
+            with col:
+                st.markdown(
+                    '<div class="monthly-insight-card">'
+                    f'<div class="monthly-insight-title">{title}</div>'
+                    + "".join(f'<div class="monthly-insight-line">• {line}</div>' for line in lines)
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
