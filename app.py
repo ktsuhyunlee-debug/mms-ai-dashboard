@@ -14661,6 +14661,77 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     return amount_fig, rate_fig
 
 
+
+def _monthly_daily_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
+    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR을 생성합니다."""
+    columns = ["일자", "주문금액", "SPM", "CTR", "CVR"]
+    if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
+        return pd.DataFrame(columns=columns)
+    work = send_rows.copy()
+    work["_monthly_date"] = pd.to_datetime(work["_date"], errors="coerce").dt.normalize()
+    work = work[work["_monthly_date"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+    send_col = first_col(work, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(work, ["클릭 수(uniq)", "클릭 수"])
+    work["_sent"] = pd.to_numeric(work[send_col], errors="coerce").fillna(0) if send_col else 0.0
+    work["_click"] = pd.to_numeric(work[click_col], errors="coerce").fillna(0) if click_col else 0.0
+    work["_orders"] = pd.to_numeric(work.get("주문건수", 0), errors="coerce").fillna(0)
+    work["_amount"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+    grouped = work.groupby("_monthly_date", as_index=False).agg(
+        _sent=("_sent", "sum"), _click=("_click", "sum"),
+        _orders=("_orders", "sum"), 주문금액=("_amount", "sum"),
+    ).sort_values("_monthly_date")
+    grouped["일자"] = grouped["_monthly_date"].dt.strftime("%m/%d")
+    grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
+    grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
+    grouped["CVR"] = grouped["_orders"].div(grouped["_click"].replace(0, pd.NA)).fillna(0)
+    return grouped[columns]
+
+
+def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
+    labels = trend["일자"].tolist() if not trend.empty else []
+    amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
+    amount_fig.add_trace(go.Bar(
+        x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
+        name="주문금액(백만원)", marker_color="#2f80ed",
+        text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="inside",
+        hovertemplate="%{x}<br>주문금액 %{y:.1f}백만원<extra></extra>",
+    ), secondary_y=False)
+    amount_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
+        mode="lines+markers", line=dict(color="#27ae60", width=3),
+        hovertemplate="%{x}<br>SPM %{y:.1f}<extra></extra>",
+    ), secondary_y=True)
+    amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
+    amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
+    amount_fig.update_layout(
+        title=dict(text="일자별 주문금액 · SPM", x=.5, xanchor="center"), height=410,
+        margin=dict(l=55, r=60, t=60, b=90), plot_bgcolor="#fff",
+        xaxis=dict(tickangle=-45),
+        legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+    )
+
+    rate_fig = go.Figure()
+    rate_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
+        mode="lines+markers", line=dict(color="#2f80ed", width=3),
+        hovertemplate="%{x}<br>CTR %{y:.1f}%<extra></extra>",
+    ))
+    rate_fig.add_trace(go.Scatter(
+        x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
+        mode="lines+markers", line=dict(color="#8b5cf6", width=3),
+        hovertemplate="%{x}<br>CVR %{y:.1f}%<extra></extra>",
+    ))
+    rate_fig.update_layout(
+        title=dict(text="일자별 CTR · CVR", x=.5, xanchor="center"), height=410,
+        margin=dict(l=55, r=35, t=60, b=90), plot_bgcolor="#fff",
+        xaxis=dict(tickangle=-45),
+        yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
+        legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+    )
+    return amount_fig, rate_fig
+
 def _build_monthly_performance_bundle(
     products_df: pd.DataFrame,
     sends_df: pd.DataFrame,
@@ -14675,6 +14746,8 @@ def _build_monthly_performance_bundle(
     prev_sends = _monthly_period_rows(sends_df, prev_year, prev_month)
     trend = _monthly_weekly_trend(send_rows)
     amount_chart, rate_chart = _monthly_trend_charts(trend)
+    daily_trend = _monthly_daily_trend(send_rows)
+    daily_amount_chart, daily_rate_chart = _monthly_daily_trend_charts(daily_trend)
     return {
         "products": product_rows,
         "sends": send_rows,
@@ -14692,6 +14765,9 @@ def _build_monthly_performance_bundle(
         "trend": trend,
         "amount_chart": amount_chart,
         "rate_chart": rate_chart,
+        "daily_trend": daily_trend,
+        "daily_amount_chart": daily_amount_chart,
+        "daily_rate_chart": daily_rate_chart,
         "previous_year": prev_year,
         "previous_month": prev_month,
     }
@@ -16782,6 +16858,19 @@ elif menu == "월간실적":
     with trend_right:
         st.plotly_chart(
             _weekly_black_plotly_text(monthly_bundle["rate_chart"]),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+
+    st.markdown('<div class="subsection-title">일자별 실적 추이</div>', unsafe_allow_html=True)
+    daily_trend_left, daily_trend_right = st.columns(2)
+    with daily_trend_left:
+        st.plotly_chart(
+            _weekly_black_plotly_text(monthly_bundle["daily_amount_chart"]),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+    with daily_trend_right:
+        st.plotly_chart(
+            _weekly_black_plotly_text(monthly_bundle["daily_rate_chart"]),
             use_container_width=True, config={"displayModeBar": False},
         )
 
