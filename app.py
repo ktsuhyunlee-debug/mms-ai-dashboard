@@ -17016,13 +17016,12 @@ elif menu in {"월간실적", "월간실적 V2"}:
         else f'<div class="weekly-breakdown-sub">총 편성건수 {monthly_mix["total"]:,}건 기준</div>'
     )
 
-    breakdown_left, breakdown_right = st.columns(2)
-    with breakdown_left:
+    if monthly_v2:
         st.markdown(
             f'''
             <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
                 <div class="metric-label">MMS 실적 비중</div>
-                <div class="weekly-mms-share-layout">
+                <div class="weekly-mms-share-layout" style="grid-template-columns: 200px minmax(0, 1fr); gap: 32px;">
                     <div class="weekly-mms-donut-wrap">
                         <div class="weekly-mms-donut">
                             <svg viewBox="0 0 140 140" aria-hidden="true">
@@ -17037,7 +17036,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
                             </div>
                         </div>
                     </div>
-                    <div class="weekly-mms-info">
+                    <div class="weekly-mms-info" style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; align-items:center;">
                         <div>
                             <div class="weekly-mms-amount-label">MMS 주문금액</div>
                             <div class="weekly-mms-amount-value">{mms_amount_display}</div>
@@ -17046,15 +17045,52 @@ elif menu in {"월간실적", "월간실적 V2"}:
                             <div class="weekly-mms-amount-label">전체 주문금액</div>
                             <div class="weekly-mms-amount-value">{overall_amount_display}</div>
                         </div>
-                        <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
+                        <div><div class="weekly-mms-amount-label">전월 대비</div><div class="weekly-mms-amount-value {weekly_delta_class(mms_delta)}">{mms_delta}</div></div>
                     </div>
                 </div>
             </div>
             ''',
             unsafe_allow_html=True,
         )
+    else:
+        breakdown_left, breakdown_right = st.columns(2)
+        with breakdown_left:
+            st.markdown(
+                f'''
+                <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
+                    <div class="metric-label">MMS 실적 비중</div>
+                    <div class="weekly-mms-share-layout">
+                        <div class="weekly-mms-donut-wrap">
+                            <div class="weekly-mms-donut">
+                                <svg viewBox="0 0 140 140" aria-hidden="true">
+                                    <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#e5e7eb" stroke-width="14"></circle>
+                                    <circle cx="70" cy="70" r="{mms_donut_radius}" fill="none" stroke="#2f6fec" stroke-width="14" stroke-linecap="round"
+                                        stroke-dasharray="{mms_donut_circumference:.2f}"
+                                        stroke-dashoffset="{mms_donut_offset:.2f}"></circle>
+                                </svg>
+                                <div class="weekly-mms-donut-center">
+                                    <div class="weekly-mms-donut-value">{mms_share_text}</div>
+                                    <div class="weekly-mms-donut-label">MMS 실적 비중</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="weekly-mms-info">
+                            <div>
+                                <div class="weekly-mms-amount-label">MMS 주문금액</div>
+                                <div class="weekly-mms-amount-value">{mms_amount_display}</div>
+                            </div>
+                            <div>
+                                <div class="weekly-mms-amount-label">전체 주문금액</div>
+                                <div class="weekly-mms-amount-value">{overall_amount_display}</div>
+                            </div>
+                            <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
+                        </div>
+                    </div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
 
-    if not monthly_v2:
         with breakdown_right:
             rerun_delta = _monthly_mix_delta("재편성")
             similar_delta = _monthly_mix_delta("유사신규")
