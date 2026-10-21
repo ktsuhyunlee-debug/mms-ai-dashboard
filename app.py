@@ -4278,6 +4278,7 @@ def selectable_dataframe(
     summary_df: pd.DataFrame | None = None,
     allow_row_selection: bool = False,
     row_selection_mode: str = "single-row",
+    preserve_display_text: bool = False,
     **kwargs,
 ):
     """기존 st.dataframe 표시를 유지하면서 셀 드래그 합계/평균을 추가한다."""
@@ -4303,7 +4304,9 @@ def selectable_dataframe(
 
     # 표시를 위해 문자열로 만든 숫자도 브라우저에서는 숫자 열로 전달해
     # 헤더 클릭 시 첫 글자가 아닌 전체 값 기준으로 정렬되게 합니다.
-    data = _numeric_sortable_dataframe(data)
+    # 단, 복사 시 표시 문자열(%, 쉼표 등)을 그대로 보존해야 하는 표는 원문 문자열을 유지합니다.
+    if not preserve_display_text:
+        data = _numeric_sortable_dataframe(data)
 
     # 주간실적 표는 배경/조건부 서식을 유지하면서 글씨와 숫자만 검정색으로 표시합니다.
     if str(key).startswith("weekly_"):
@@ -15944,7 +15947,7 @@ elif menu == "일일실적":
                 "연령": target_send_row.get("연령", ""),
                 "SEG": target_send_row.get("SEG", ""),
                 "소재": row_material,
-                "URL": target_send_row.get("URL", ""),
+                "URL": clean_identifier_value(target_send_row.get("URL", "")),
                 "발송건수": fmt_num(send_count),
                 "클릭수": fmt_num(click_count),
                 "CTR": fmt_pct(click_count / send_count if send_count else 0),
@@ -15960,6 +15963,7 @@ elif menu == "일일실적":
             key=f"daily_send_stats_{selected_date}_{asset_slot}_{key_token}",
             use_container_width=True,
             hide_index=True,
+            preserve_display_text=True,
         )
 
         if matched.empty:
