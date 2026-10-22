@@ -7149,6 +7149,45 @@ def _weekly_mms_share_stats(
     return result
 
 
+def _weekly_mms_share_stats_range(
+    df: pd.DataFrame,
+    overall_performance: pd.DataFrame | None,
+    start_date,
+    end_date,
+) -> dict:
+    """선택한 주간 내 세부 기간을 분모·분자에 동일하게 적용해 MMS 실적 비중을 계산합니다."""
+    result = {
+        "amount": 0.0,
+        "total_amount": 0.0,
+        "amount_share": None,
+        "available": False,
+    }
+    if df is None or df.empty:
+        return result
+
+    amount_series = (
+        pd.to_numeric(df["주문금액"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0)
+        if "주문금액" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    result["amount"] = float(amount_series.sum())
+
+    if overall_performance is None or overall_performance.empty or "_date" not in overall_performance.columns:
+        return result
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    overall_dates = pd.to_datetime(overall_performance["_date"], errors="coerce").dt.normalize()
+    mask = overall_dates.notna() & overall_dates.between(start_ts, end_ts, inclusive="both")
+    total_amount = float(
+        pd.to_numeric(overall_performance.loc[mask, "주문금액"], errors="coerce").fillna(0).sum()
+    )
+    result["total_amount"] = total_amount
+    if total_amount > 0:
+        result["amount_share"] = result["amount"] / total_amount
+        result["available"] = True
+    return result
+
+
 def _weekly_category_col(df: pd.DataFrame):
     if df is None or not hasattr(df, "columns"):
         return None
@@ -14756,6 +14795,26 @@ def _monthly_period_rows(df: pd.DataFrame, year: int, month: int) -> pd.DataFram
     return df.loc[dates.dt.year.eq(int(year)) & dates.dt.month.eq(int(month))].copy()
 
 
+def _date_range_rows(df: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+    """실제 발송일 기준으로 시작일~종료일(포함) 데이터를 반환합니다."""
+    if df is None or df.empty or "_date" not in df.columns:
+        return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    dates = pd.to_datetime(df["_date"], errors="coerce").dt.normalize()
+    return df.loc[dates.notna() & dates.between(start_ts, end_ts, inclusive="both")].copy()
+
+
+def _monthly_previous_aligned_range(start_date, end_date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """선택 월의 일자 구간을 전월 동일 일자 구간으로 이동합니다."""
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    return (
+        (start_ts - pd.DateOffset(months=1)).normalize(),
+        (end_ts - pd.DateOffset(months=1)).normalize(),
+    )
+
+
 def _monthly_filter_send_type(df: pd.DataFrame, send_type: str) -> pd.DataFrame:
     """월간실적의 상품·발송 데이터를 동일한 MMS/RCS 기준으로 필터링합니다."""
     if df is None or df.empty:
@@ -14869,6 +14928,34 @@ def _monthly_mms_share_stats(
         result["available"] = True
     return result
 
+
+
+def _monthly_mms_share_stats_range(
+    send_rows: pd.DataFrame,
+    overall_df: pd.DataFrame | None,
+    start_date,
+    end_date,
+) -> dict:
+    """선택 기간의 전체실적 주문금액 대비 MMS 주문금액 비중을 계산합니다."""
+    result = {"amount": 0.0, "total_amount": 0.0, "share": None, "available": False}
+    if send_rows is None or send_rows.empty:
+        return result
+    send_types = _weekly_send_type_series(send_rows)
+    amounts = pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0)
+    result["amount"] = float(amounts.loc[send_types.eq("MMS")].sum())
+
+    if overall_df is None or overall_df.empty or "_date" not in overall_df.columns:
+        return result
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    overall_dates = pd.to_datetime(overall_df["_date"], errors="coerce").dt.normalize()
+    mask = overall_dates.notna() & overall_dates.between(start_ts, end_ts, inclusive="both")
+    total = float(pd.to_numeric(overall_df.loc[mask, "주문금액"], errors="coerce").fillna(0).sum())
+    result["total_amount"] = total
+    if total > 0:
+        result["share"] = result["amount"] / total
+        result["available"] = True
+    return result
 
 def _monthly_operation_performance(product_rows: pd.DataFrame) -> pd.DataFrame:
     """재편성·유사신규·신규별 구성과 고·저성과 상품 비중을 생성합니다."""
@@ -15183,6 +15270,54 @@ def _build_monthly_performance_bundle(
         "daily_rate_chart": daily_rate_chart,
         "previous_year": prev_year,
         "previous_month": prev_month,
+    }
+
+
+def _build_monthly_performance_bundle_range(
+    products_df: pd.DataFrame,
+    sends_df: pd.DataFrame,
+    overall_df: pd.DataFrame,
+    start_date,
+    end_date,
+) -> dict:
+    """월간실적에서 선택한 일자 구간과 전월 동일 일자 구간을 비교합니다."""
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    prev_start, prev_end = _monthly_previous_aligned_range(start_ts, end_ts)
+
+    product_rows = _date_range_rows(products_df, start_ts, end_ts)
+    send_rows = _date_range_rows(sends_df, start_ts, end_ts)
+    prev_products = _date_range_rows(products_df, prev_start, prev_end)
+    prev_sends = _date_range_rows(sends_df, prev_start, prev_end)
+
+    trend = _monthly_weekly_trend(send_rows)
+    amount_chart, rate_chart = _monthly_trend_charts(trend)
+    daily_trend = _monthly_daily_trend(send_rows, product_rows)
+    daily_amount_chart, daily_rate_chart = _monthly_daily_trend_charts(daily_trend)
+    return {
+        "products": product_rows,
+        "sends": send_rows,
+        "previous_products": prev_products,
+        "previous_sends": prev_sends,
+        "metrics": _monthly_summary_metrics(product_rows, send_rows),
+        "previous_metrics": _monthly_summary_metrics(prev_products, prev_sends),
+        "targets": _monthly_target_metrics(send_rows),
+        "previous_targets": _monthly_target_metrics(prev_sends),
+        "mms": _monthly_mms_share_stats_range(send_rows, overall_df, start_ts, end_ts),
+        "previous_mms": _monthly_mms_share_stats_range(prev_sends, overall_df, prev_start, prev_end),
+        "operation": _monthly_operation_performance(product_rows),
+        "categories": _monthly_small_categories(product_rows),
+        "top_products": _monthly_top_products(product_rows),
+        "trend": trend,
+        "amount_chart": amount_chart,
+        "rate_chart": rate_chart,
+        "daily_trend": daily_trend,
+        "daily_amount_chart": daily_amount_chart,
+        "daily_rate_chart": daily_rate_chart,
+        "period_start": start_ts,
+        "period_end": end_ts,
+        "previous_start": prev_start,
+        "previous_end": prev_end,
     }
 
 
@@ -16376,20 +16511,55 @@ elif menu == "주간실적":
     _set_weekly_deeplink(selected_year, week)
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 주차 화면으로 바로 연결됩니다.")
 
-    pw = year_products[year_products["주차"].astype(str) == week].copy()
+    # 주차를 빠른 선택값으로 사용하되, 해당 주차 안에서 실제 조회 기간을 직접 조정할 수 있습니다.
+    _selected_week_products = year_products[year_products["주차"].astype(str) == week].copy()
+    _week_start, _week_end = _weekly_period_bounds(
+        int(selected_year), str(week), _selected_week_products
+    )
+    if pd.isna(_week_start) or pd.isna(_week_end):
+        st.info("선택한 주차의 날짜 범위를 확인할 수 없습니다.")
+        st.stop()
 
-    # 카드·그래프·소재/SEG/요일/시간대 표 모두 선택 주차의 실제 날짜 범위에 있는
-    # 모든 발송건을 사용합니다. 소재 시트의 '주차' 값이 비어 있거나 표기가 달라도 누락하지 않습니다.
-    _week_start, _week_end = _weekly_period_bounds(int(selected_year), str(week), pw)
-    if pd.notna(_week_start) and pd.notna(_week_end):
-        _year_send_dates = pd.to_datetime(year_sends["_date"], errors="coerce").dt.normalize()
-        sw = year_sends[
-            _year_send_dates.notna()
-            & _year_send_dates.ge(_week_start)
-            & _year_send_dates.le(_week_end)
-        ].copy()
+    _weekly_period_value = st.date_input(
+        "기간 설정",
+        value=(_week_start.date(), _week_end.date()),
+        min_value=_week_start.date(),
+        max_value=_week_end.date(),
+        format="YYYY-MM-DD",
+        key=f"weekly_period_{selected_year}_{week}",
+        help="선택한 주차 안에서 조회할 시작일과 종료일을 지정합니다. 전주 비교도 동일한 요일 구간으로 자동 적용됩니다.",
+    )
+    if isinstance(_weekly_period_value, (tuple, list)):
+        if len(_weekly_period_value) >= 2:
+            _period_start = pd.Timestamp(_weekly_period_value[0]).normalize()
+            _period_end = pd.Timestamp(_weekly_period_value[1]).normalize()
+        elif len(_weekly_period_value) == 1:
+            _period_start = _period_end = pd.Timestamp(_weekly_period_value[0]).normalize()
+        else:
+            _period_start, _period_end = _week_start, _week_end
     else:
-        sw = year_sends[year_sends["주차"].astype(str) == week].copy()
+        _period_start = _period_end = pd.Timestamp(_weekly_period_value).normalize()
+    if _period_start > _period_end:
+        _period_start, _period_end = _period_end, _period_start
+
+    _weekly_period_token = f"{_period_start:%Y%m%d}_{_period_end:%Y%m%d}"
+    _prev_period_start = (_period_start - pd.Timedelta(days=7)).normalize()
+    _prev_period_end = (_period_end - pd.Timedelta(days=7)).normalize()
+    st.caption(
+        f"조회 기간 {_period_start:%Y-%m-%d} ~ {_period_end:%Y-%m-%d} · "
+        f"전주 비교 {_prev_period_start:%Y-%m-%d} ~ {_prev_period_end:%Y-%m-%d}"
+    )
+
+    _all_product_dates = pd.to_datetime(products["_date"], errors="coerce").dt.normalize()
+    _all_send_dates = pd.to_datetime(sends["_date"], errors="coerce").dt.normalize()
+    pw = products.loc[
+        _all_product_dates.notna()
+        & _all_product_dates.between(_period_start, _period_end, inclusive="both")
+    ].copy()
+    sw = sends.loc[
+        _all_send_dates.notna()
+        & _all_send_dates.between(_period_start, _period_end, inclusive="both")
+    ].copy()
 
     # 주간실적 표 공통 운영구분 표시: 원본에 '재편성' 컬럼이 없더라도
     # 상품구분/신규구분/운영구분/편성구분 등 기존 운영구분 컬럼에서 안전하게 보완합니다.
@@ -16402,7 +16572,7 @@ elif menu == "주간실적":
         )
 
     if pw.empty or sw.empty:
-        st.info("선택한 연도·주차의 상품 또는 소재 데이터가 없습니다.")
+        st.info("선택한 기간의 상품 또는 소재 데이터가 없습니다.")
         st.stop()
 
     send_col = first_col(sw, ["발송 성공 건수", "총 발송 건수"])
@@ -16416,27 +16586,16 @@ elif menu == "주간실적":
     aov = amount / order_count if order_count else 0
     spm = amount / send_count if send_count else 0
 
-    # 전주 대비 카드 증감
-    # 전주 역시 상품 주차 선택 목록을 기준으로 잡고 발송행은 실제 날짜 범위로 조회합니다.
-    # 소재 시트의 주차 라벨 누락 여부가 전주 비교에 영향을 주지 않도록 합니다.
-    year_week_names = [str(x) for x in weeks]
-    prev_sw = pd.DataFrame()
-    prev_pw = pd.DataFrame()
-    if week in year_week_names and year_week_names.index(week) > 0:
-        prev_week = year_week_names[year_week_names.index(week) - 1]
-        prev_pw = year_products[year_products["주차"].astype(str) == prev_week].copy()
-        _prev_week_start, _prev_week_end = _weekly_period_bounds(
-            int(selected_year), str(prev_week), prev_pw
-        )
-        if pd.notna(_prev_week_start) and pd.notna(_prev_week_end):
-            _year_send_dates = pd.to_datetime(year_sends["_date"], errors="coerce").dt.normalize()
-            prev_sw = year_sends[
-                _year_send_dates.notna()
-                & _year_send_dates.ge(_prev_week_start)
-                & _year_send_dates.le(_prev_week_end)
-            ].copy()
-        else:
-            prev_sw = year_sends[year_sends["주차"].astype(str) == prev_week].copy()
+    # 전주 대비는 선택 기간과 같은 요일 구간을 7일 전에서 비교합니다.
+    prev_pw = products.loc[
+        _all_product_dates.notna()
+        & _all_product_dates.between(_prev_period_start, _prev_period_end, inclusive="both")
+    ].copy()
+    prev_sw = sends.loc[
+        _all_send_dates.notna()
+        & _all_send_dates.between(_prev_period_start, _prev_period_end, inclusive="both")
+    ].copy()
+    prev_week = str(week)
 
     def prev_metric(column, default=0):
         return float(prev_sw[column].sum()) if not prev_sw.empty and column in prev_sw.columns else default
@@ -16576,12 +16735,12 @@ elif menu == "주간실적":
             )
 
     # 4번째 줄: MMS 실적 비중 / 상품 편성 구성
-    _mms_stats = _weekly_mms_share_stats(
-        sw, overall_performance, int(selected_year), str(week)
+    _mms_stats = _weekly_mms_share_stats_range(
+        sw, overall_performance, _period_start, _period_end
     )
     _prev_mms_stats = (
-        _weekly_mms_share_stats(
-            prev_sw, overall_performance, int(selected_year), str(prev_week)
+        _weekly_mms_share_stats_range(
+            prev_sw, overall_performance, _prev_period_start, _prev_period_end
         )
         if not prev_sw.empty
         else None
@@ -16714,8 +16873,8 @@ elif menu == "주간실적":
         unsafe_allow_html=True,
     )
     weekly_core = _menu_cache_get(
-        "weekly_core_bundle_v8",
-        (int(selected_year), str(week)),
+        "weekly_core_bundle_v9_period",
+        (int(selected_year), str(week), _weekly_period_token),
         lambda: _build_weekly_core_bundle(
             int(selected_year), str(week), pw, sw
         ),
@@ -16740,16 +16899,16 @@ elif menu == "주간실적":
     # 상품 시트의 주차 라벨이 아니라 실제 발송일·시간대로 다시 연결하므로
     # 해당 연도의 전체 상품행을 넘기고 캐러셀 내부에서 정확히 필터링합니다.
     render_weekly_send_carousel(
-        year_products, sw, messages, int(selected_year), str(week)
+        pw, sw, messages, int(selected_year), f"{week}_{_weekly_period_token}"
     )
 
     # 선택 주차 소재 반응 로우를 전체 합산해 성·연령 / 지역 분포를 한 줄로 표시
     render_weekly_material_response_analysis(
-        _week_start,
-        _week_end,
+        _period_start,
+        _period_end,
         material_age_raw,
         material_region_raw,
-        key_prefix=f"weekly_response_{selected_year}_{week}",
+        key_prefix=f"weekly_response_{selected_year}_{week}_{_weekly_period_token}",
     )
 
     # 대·중·소카테고리 편성 및 주문 비중
@@ -16851,15 +17010,15 @@ elif menu == "주간실적":
         load_weekly_analysis = st.toggle(
             "상세 분석 · 추천 · 소싱 불러오기",
             value=False,
-            key=f"weekly_analysis_load_{selected_year}_{week}",
+            key=f"weekly_analysis_load_{selected_year}_{week}_{_weekly_period_token}",
             help="핵심 실적과 상세표를 먼저 표시하고, 분석이 필요할 때만 계산해 메뉴 이동 속도를 높입니다.",
         )
         if not load_weekly_analysis:
             st.info("버튼을 켜면 주간 인사이트, 재편성 추천, 신규·유사신규 소싱 제안을 불러옵니다.")
         else:
             weekly_analysis = _menu_cache_get(
-                "weekly_analysis_bundle_v2",
-                (int(selected_year), str(week)),
+                "weekly_analysis_bundle_v3_period",
+                (int(selected_year), str(week), _weekly_period_token),
                 lambda: _build_weekly_analysis_bundle(
                     products, sends, int(selected_year), str(week), pw, sw
                 ),
@@ -17168,10 +17327,44 @@ elif menu in {"월간실적", "월간실적 V2"}:
     with _month_filter_note:
         st.markdown(
             '<div style="padding-top:2rem;color:#6b7280;font-size:13px;">'
-            '전월 대비 기준 · 발송횟수는 같은 날짜·같은 시간대를 1회로 계산'
+            '전월 동일 일자 구간 대비 · 발송횟수는 같은 날짜·같은 시간대를 1회로 계산'
             '</div>',
             unsafe_allow_html=True,
         )
+
+    _month_start = pd.Timestamp(year=int(monthly_year), month=int(monthly_month), day=1).normalize()
+    _month_end = (_month_start + pd.offsets.MonthEnd(0)).normalize()
+    _monthly_period_value = st.date_input(
+        "기간 설정",
+        value=(_month_start.date(), _month_end.date()),
+        min_value=_month_start.date(),
+        max_value=_month_end.date(),
+        format="YYYY-MM-DD",
+        key=f"monthly_period_{'v2' if monthly_v2 else 'v1'}_{monthly_year}_{monthly_month}",
+        help="선택한 월 안에서 조회할 시작일과 종료일을 지정합니다. 전월 비교도 동일한 일자 구간으로 자동 적용됩니다.",
+    )
+    if isinstance(_monthly_period_value, (tuple, list)):
+        if len(_monthly_period_value) >= 2:
+            _monthly_period_start = pd.Timestamp(_monthly_period_value[0]).normalize()
+            _monthly_period_end = pd.Timestamp(_monthly_period_value[1]).normalize()
+        elif len(_monthly_period_value) == 1:
+            _monthly_period_start = _monthly_period_end = pd.Timestamp(_monthly_period_value[0]).normalize()
+        else:
+            _monthly_period_start, _monthly_period_end = _month_start, _month_end
+    else:
+        _monthly_period_start = _monthly_period_end = pd.Timestamp(_monthly_period_value).normalize()
+    if _monthly_period_start > _monthly_period_end:
+        _monthly_period_start, _monthly_period_end = _monthly_period_end, _monthly_period_start
+
+    _monthly_prev_start, _monthly_prev_end = _monthly_previous_aligned_range(
+        _monthly_period_start, _monthly_period_end
+    )
+    _monthly_period_token = f"{_monthly_period_start:%Y%m%d}_{_monthly_period_end:%Y%m%d}"
+    st.caption(
+        f"조회 기간 {_monthly_period_start:%Y-%m-%d} ~ {_monthly_period_end:%Y-%m-%d} · "
+        f"전월 비교 {_monthly_prev_start:%Y-%m-%d} ~ {_monthly_prev_end:%Y-%m-%d}"
+    )
+
     try:
         st.query_params["menu"] = "monthly-v2" if monthly_v2 else "monthly"
         st.query_params["year"] = str(int(monthly_year))
@@ -17183,13 +17376,17 @@ elif menu in {"월간실적", "월간실적 V2"}:
     _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v7",
-        (int(monthly_year), int(monthly_month), monthly_send_type),
-        lambda: _build_monthly_performance_bundle(
-            _monthly_products_source, _monthly_sends_source, overall_performance,
-            int(monthly_year), int(monthly_month)
+        "monthly_performance_bundle_v8_period",
+        (
+            int(monthly_year), int(monthly_month), monthly_send_type,
+            _monthly_period_start.strftime("%Y-%m-%d"),
+            _monthly_period_end.strftime("%Y-%m-%d"),
         ),
-        max_entries=36,
+        lambda: _build_monthly_performance_bundle_range(
+            _monthly_products_source, _monthly_sends_source, overall_performance,
+            _monthly_period_start, _monthly_period_end
+        ),
+        max_entries=72,
     )
     mp = monthly_bundle["products"].copy()
     ms = monthly_bundle["sends"].copy()
@@ -17198,7 +17395,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
     has_previous = not monthly_bundle["previous_sends"].empty or not monthly_bundle["previous_products"].empty
 
     if mp.empty and ms.empty:
-        st.info("선택한 월의 상품 또는 소재 데이터가 없습니다.")
+        st.info("선택한 기간의 상품 또는 소재 데이터가 없습니다.")
         st.stop()
 
     st.markdown(
@@ -17417,7 +17614,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
 
     # 주간실적과 동일한 발송 소재·문구·상품 실적 캐러셀을 선택 월 전체 발송 기준으로 표시합니다.
     render_monthly_send_carousel(
-        mp, ms, messages, int(monthly_year), int(monthly_month),
+        mp, ms, messages, int(monthly_year), f"{monthly_month}_{_monthly_period_token}",
         monthly_v2=monthly_v2,
     )
 
@@ -17486,14 +17683,14 @@ elif menu in {"월간실적", "월간실적 V2"}:
             _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
         selectable_dataframe(
             clean_identifier_columns(_operation_view),
-            key=f"monthly_operation_{monthly_year}_{monthly_month}",
+            key=f"monthly_operation_{monthly_year}_{monthly_month}_{_monthly_period_token}",
             use_container_width=True, hide_index=True,
         )
 
     st.markdown('<div class="subsection-title">주요 소카테고리</div>', unsafe_allow_html=True)
     categories = monthly_bundle["categories"].copy()
     if categories.empty:
-        st.info("선택 월의 소카테고리 데이터가 없습니다.")
+        st.info("선택 기간의 소카테고리 데이터가 없습니다.")
     else:
         category_chart_col, category_table_col = st.columns([1.05, 1])
         with category_chart_col:
@@ -17520,13 +17717,13 @@ elif menu in {"월간실적", "월간실적 V2"}:
                 category_view[_money_col] = category_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
             selectable_dataframe(
                 clean_identifier_columns(category_view),
-                key=f"monthly_category_{monthly_year}_{monthly_month}",
+                key=f"monthly_category_{monthly_year}_{monthly_month}_{_monthly_period_token}",
                 use_container_width=True, hide_index=True, height=430,
             )
 
     st.markdown('<div class="subsection-title">TOP 상품 · 주차별 상품</div>', unsafe_allow_html=True)
     if mp.empty:
-        st.info("선택 월의 상품 실적 데이터가 없습니다.")
+        st.info("선택 기간의 상품 실적 데이터가 없습니다.")
     else:
         _monthly_top_rows = mp.copy()
         _monthly_top_rows["_monthly_week_start"] = _monthly_week_start_series(_monthly_top_rows)
@@ -17561,7 +17758,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
                 _top_view,
                 key=(
                     f"monthly_top_products_{monthly_year}_{monthly_month}_"
-                    f"{monthly_send_type}_{_tab_key}"
+                    f"{monthly_send_type}_{_monthly_period_token}_{_tab_key}"
                 ),
                 use_container_width=True, hide_index=True, height=420,
             )
