@@ -556,6 +556,50 @@ html, body, [class*="css"] {
     margin-top: 2px;
 }
 
+/* 주간 MMS 실적 비중 카드: 월~금 요일별 MMS 비중 */
+.weekly-mms-weekday-wrap {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.weekly-mms-weekday-label {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 7px;
+}
+
+.weekly-mms-weekday-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.weekly-mms-weekday-item {
+    min-width: 0;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    text-align: center;
+}
+
+.weekly-mms-weekday-name {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 2px;
+}
+
+.weekly-mms-weekday-value {
+    color: #111827;
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
 .weekly-breakdown-card .metric-label {
     font-size: 13px;
     margin-bottom: 12px;
@@ -16928,6 +16972,60 @@ elif menu == "주간실적":
         else "-"
     )
 
+    # 선택 기간 내 월~금 각각의 MMS 주문금액 / 전체 주문금액 비중.
+    # 여러 주를 묶어 조회한 경우에도 같은 요일끼리 합산해 계산합니다.
+    _weekday_share_items = []
+    _weekday_defs = [(0, "월"), (1, "화"), (2, "수"), (3, "목"), (4, "금")]
+    _sw_dates = pd.to_datetime(sw.get("_date"), errors="coerce").dt.normalize() if not sw.empty and "_date" in sw.columns else pd.Series(pd.NaT, index=sw.index)
+    _overall_dates = (
+        pd.to_datetime(overall_performance.get("_date"), errors="coerce").dt.normalize()
+        if overall_performance is not None and not overall_performance.empty and "_date" in overall_performance.columns
+        else pd.Series(dtype="datetime64[ns]")
+    )
+    for _weekday_num, _weekday_name in _weekday_defs:
+        _mms_weekday_amount = 0.0
+        _overall_weekday_amount = 0.0
+
+        if not sw.empty and "주문금액" in sw.columns and not _sw_dates.empty:
+            _mms_weekday_mask = (
+                _sw_dates.notna()
+                & _sw_dates.between(pd.Timestamp(_period_start).normalize(), pd.Timestamp(_period_end).normalize(), inclusive="both")
+                & _sw_dates.dt.weekday.eq(_weekday_num)
+            )
+            _mms_weekday_amount = float(
+                pd.to_numeric(sw.loc[_mms_weekday_mask, "주문금액"], errors="coerce").fillna(0).sum()
+            )
+
+        if not _overall_dates.empty and "주문금액" in overall_performance.columns:
+            _overall_weekday_mask = (
+                _overall_dates.notna()
+                & _overall_dates.between(pd.Timestamp(_period_start).normalize(), pd.Timestamp(_period_end).normalize(), inclusive="both")
+                & _overall_dates.dt.weekday.eq(_weekday_num)
+            )
+            _overall_weekday_amount = float(
+                pd.to_numeric(
+                    overall_performance.loc[_overall_weekday_mask, "주문금액"],
+                    errors="coerce",
+                ).fillna(0).sum()
+            )
+
+        _weekday_share = (
+            _mms_weekday_amount / _overall_weekday_amount
+            if _overall_weekday_amount > 0
+            else None
+        )
+        _weekday_share_items.append(
+            (_weekday_name, f"{_weekday_share * 100:.1f}%" if _weekday_share is not None else "-")
+        )
+
+    _weekday_share_html = "".join(
+        f'<div class="weekly-mms-weekday-item">'
+        f'<div class="weekly-mms-weekday-name">{_weekday_name}</div>'
+        f'<div class="weekly-mms-weekday-value">{_weekday_value}</div>'
+        f'</div>'
+        for _weekday_name, _weekday_value in _weekday_share_items
+    )
+
     _mix = _weekly_operation_mix(pw)
     _prev_mix = _weekly_operation_mix(prev_pw) if not prev_pw.empty else None
 
@@ -16978,6 +17076,10 @@ elif menu == "주간실적":
                             <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
                         </div>
                         <div class="metric-delta {weekly_delta_class(_mms_delta)}">{_weekly_compare_label} {_mms_delta}</div>
+                        <div class="weekly-mms-weekday-wrap">
+                            <div class="weekly-mms-weekday-label">월~금 MMS 실적 비중</div>
+                            <div class="weekly-mms-weekday-grid">{_weekday_share_html}</div>
+                        </div>
                     </div>
                 </div>
             </div>
