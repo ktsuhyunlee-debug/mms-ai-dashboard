@@ -10835,11 +10835,11 @@ def render_monthly_send_carousel(
     selected_month: int,
     monthly_v2: bool = False,
 ) -> None:
-    """월간실적에서 선택 월의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
+    """월간실적에서 선택 기간의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
     items = _build_weekly_send_carousel_items(pw, sw, messages_df)
     st.markdown('<div class="subsection-title">MMS 발송 소재 · 문구</div>', unsafe_allow_html=True)
     if not items:
-        st.info("선택 월의 MMS 발송 소재가 없습니다.")
+        st.info("선택 기간의 MMS 발송 소재가 없습니다.")
         return
 
     state_key = f"monthly_send_carousel_index_{selected_year}_{selected_month}"
@@ -14806,12 +14806,16 @@ def _date_range_rows(df: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
 
 
 def _monthly_previous_aligned_range(start_date, end_date) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """선택 월의 일자 구간을 전월 동일 일자 구간으로 이동합니다."""
+    """선택 기간이 걸친 월 수만큼 이전으로 이동해 동일 일자 구간을 비교합니다."""
     start_ts = pd.Timestamp(start_date).normalize()
     end_ts = pd.Timestamp(end_date).normalize()
+    month_span = max(
+        1,
+        (end_ts.year - start_ts.year) * 12 + (end_ts.month - start_ts.month) + 1,
+    )
     return (
-        (start_ts - pd.DateOffset(months=1)).normalize(),
-        (end_ts - pd.DateOffset(months=1)).normalize(),
+        (start_ts - pd.DateOffset(months=month_span)).normalize(),
+        (end_ts - pd.DateOffset(months=month_span)).normalize(),
     )
 
 
@@ -16511,7 +16515,8 @@ elif menu == "주간실적":
     _set_weekly_deeplink(selected_year, week)
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 이 주차 화면으로 바로 연결됩니다.")
 
-    # 주차를 빠른 선택값으로 사용하되, 해당 주차 안에서 실제 조회 기간을 직접 조정할 수 있습니다.
+    # 연도/주차 선택은 조회 기간의 기본값을 잡는 빠른 선택으로만 사용합니다.
+    # 실제 기간은 전체 데이터 범위에서 자유롭게 지정하여 여러 주차를 합산 조회할 수 있습니다.
     _selected_week_products = year_products[year_products["주차"].astype(str) == week].copy()
     _week_start, _week_end = _weekly_period_bounds(
         int(selected_year), str(week), _selected_week_products
@@ -16520,14 +16525,21 @@ elif menu == "주간실적":
         st.info("선택한 주차의 날짜 범위를 확인할 수 없습니다.")
         st.stop()
 
+    _weekly_all_dates = pd.concat([
+        pd.to_datetime(products.get("_date"), errors="coerce"),
+        pd.to_datetime(sends.get("_date"), errors="coerce"),
+    ], ignore_index=True).dropna().dt.normalize()
+    _weekly_min_date = _weekly_all_dates.min()
+    _weekly_max_date = _weekly_all_dates.max()
+
     _weekly_period_value = st.date_input(
         "기간 설정",
         value=(_week_start.date(), _week_end.date()),
-        min_value=_week_start.date(),
-        max_value=_week_end.date(),
+        min_value=_weekly_min_date.date(),
+        max_value=_weekly_max_date.date(),
         format="YYYY-MM-DD",
         key=f"weekly_period_{selected_year}_{week}",
-        help="선택한 주차 안에서 조회할 시작일과 종료일을 지정합니다. 전주 비교도 동일한 요일 구간으로 자동 적용됩니다.",
+        help="전체 데이터 범위에서 시작일과 종료일을 자유롭게 지정합니다. 여러 주차를 선택하면 해당 기간 실적을 합산해 보여줍니다.",
     )
     if isinstance(_weekly_period_value, (tuple, list)):
         if len(_weekly_period_value) >= 2:
@@ -16543,11 +16555,17 @@ elif menu == "주간실적":
         _period_start, _period_end = _period_end, _period_start
 
     _weekly_period_token = f"{_period_start:%Y%m%d}_{_period_end:%Y%m%d}"
-    _prev_period_start = (_period_start - pd.Timedelta(days=7)).normalize()
-    _prev_period_end = (_period_end - pd.Timedelta(days=7)).normalize()
+    _period_start_week = _period_start - pd.Timedelta(days=int(_period_start.dayofweek))
+    _period_end_week = _period_end - pd.Timedelta(days=int(_period_end.dayofweek))
+    _weekly_span_weeks = max(1, int((_period_end_week - _period_start_week).days // 7) + 1)
+    _weekly_compare_offset = pd.Timedelta(days=7 * _weekly_span_weeks)
+    _prev_period_start = (_period_start - _weekly_compare_offset).normalize()
+    _prev_period_end = (_period_end - _weekly_compare_offset).normalize()
+    _weekly_compare_label = "전주 대비" if _weekly_span_weeks == 1 else "이전 기간 대비"
+    _weekly_compare_caption = "전주 비교" if _weekly_span_weeks == 1 else f"이전 {_weekly_span_weeks}주 비교"
     st.caption(
         f"조회 기간 {_period_start:%Y-%m-%d} ~ {_period_end:%Y-%m-%d} · "
-        f"전주 비교 {_prev_period_start:%Y-%m-%d} ~ {_prev_period_end:%Y-%m-%d}"
+        f"{_weekly_compare_caption} {_prev_period_start:%Y-%m-%d} ~ {_prev_period_end:%Y-%m-%d}"
     )
 
     _all_product_dates = pd.to_datetime(products["_date"], errors="coerce").dt.normalize()
@@ -16586,7 +16604,7 @@ elif menu == "주간실적":
     aov = amount / order_count if order_count else 0
     spm = amount / send_count if send_count else 0
 
-    # 전주 대비는 선택 기간과 같은 요일 구간을 7일 전에서 비교합니다.
+    # 비교 기간은 선택 범위가 걸친 주 수만큼 이전으로 이동한 동일 요일 구간을 사용합니다.
     prev_pw = products.loc[
         _all_product_dates.notna()
         & _all_product_dates.between(_prev_period_start, _prev_period_end, inclusive="both")
@@ -16633,7 +16651,7 @@ elif menu == "주간실적":
                 f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
                 '<div class="weekly-kpi-value-row">'
                 f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta {weekly_delta_class(delta)}">전주 대비 {delta}</div>'
+                f'<div class="metric-delta {weekly_delta_class(delta)}">{_weekly_compare_label} {delta}</div>'
                 '</div></div>',
                 unsafe_allow_html=True,
             )
@@ -16719,7 +16737,7 @@ elif menu == "주간실적":
                 '<div class="weekly-target-metric-name">CTR</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
-                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">전주 대비 {target_ctr_delta}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">{_weekly_compare_label} {target_ctr_delta}</div>'
                 '</div>'
                 f'<div class="weekly-target-tooltip">{_ctr_hover_html}</div>'
                 '</div>'
@@ -16727,7 +16745,7 @@ elif menu == "주간실적":
                 '<div class="weekly-target-metric-name">SPM</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
-                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">전주 대비 {target_spm_delta}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">{_weekly_compare_label} {target_spm_delta}</div>'
                 '</div>'
                 f'<div class="weekly-target-tooltip">{_spm_hover_html}</div>'
                 '</div></div></div>',
@@ -16826,7 +16844,7 @@ elif menu == "주간실적":
                             <div class="weekly-mms-amount-label">전체 주문금액</div>
                             <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
                         </div>
-                        <div class="metric-delta {weekly_delta_class(_mms_delta)}">전주 대비 {_mms_delta}</div>
+                        <div class="metric-delta {weekly_delta_class(_mms_delta)}">{_weekly_compare_label} {_mms_delta}</div>
                     </div>
                 </div>
             </div>
@@ -16847,19 +16865,19 @@ elif menu == "주간실적":
                         <div class="weekly-mix-name">재편성</div>
                         <div class="weekly-mix-value">{_mix["재편성"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["재편성"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_rerun_delta)}">전주 대비 {_rerun_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_rerun_delta)}">{_weekly_compare_label} {_rerun_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">유사신규</div>
                         <div class="weekly-mix-value">{_mix["유사신규"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["유사신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_similar_delta)}">전주 대비 {_similar_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_similar_delta)}">{_weekly_compare_label} {_similar_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">신규</div>
                         <div class="weekly-mix-value">{_mix["신규"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_new_delta)}">전주 대비 {_new_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_new_delta)}">{_weekly_compare_label} {_new_delta}</div>
                     </div>
                 </div>
                 {_mix_note}
@@ -17327,21 +17345,23 @@ elif menu in {"월간실적", "월간실적 V2"}:
     with _month_filter_note:
         st.markdown(
             '<div style="padding-top:2rem;color:#6b7280;font-size:13px;">'
-            '전월 동일 일자 구간 대비 · 발송횟수는 같은 날짜·같은 시간대를 1회로 계산'
+            '연도·월은 기간 기본값 선택용 · 실제 조회 기간은 여러 달을 자유롭게 합산 가능'
             '</div>',
             unsafe_allow_html=True,
         )
 
     _month_start = pd.Timestamp(year=int(monthly_year), month=int(monthly_month), day=1).normalize()
     _month_end = (_month_start + pd.offsets.MonthEnd(0)).normalize()
+    _monthly_min_date = _monthly_dates.min().normalize()
+    _monthly_max_date = _monthly_dates.max().normalize()
     _monthly_period_value = st.date_input(
         "기간 설정",
         value=(_month_start.date(), _month_end.date()),
-        min_value=_month_start.date(),
-        max_value=_month_end.date(),
+        min_value=_monthly_min_date.date(),
+        max_value=_monthly_max_date.date(),
         format="YYYY-MM-DD",
         key=f"monthly_period_{'v2' if monthly_v2 else 'v1'}_{monthly_year}_{monthly_month}",
-        help="선택한 월 안에서 조회할 시작일과 종료일을 지정합니다. 전월 비교도 동일한 일자 구간으로 자동 적용됩니다.",
+        help="전체 데이터 범위에서 시작일과 종료일을 자유롭게 지정합니다. 여러 달을 선택하면 해당 기간 실적을 합산해 보여줍니다.",
     )
     if isinstance(_monthly_period_value, (tuple, list)):
         if len(_monthly_period_value) >= 2:
@@ -17359,10 +17379,17 @@ elif menu in {"월간실적", "월간실적 V2"}:
     _monthly_prev_start, _monthly_prev_end = _monthly_previous_aligned_range(
         _monthly_period_start, _monthly_period_end
     )
+    _monthly_span_months = max(
+        1,
+        (_monthly_period_end.year - _monthly_period_start.year) * 12
+        + (_monthly_period_end.month - _monthly_period_start.month) + 1,
+    )
+    _monthly_compare_label = "전월 대비" if _monthly_span_months == 1 else "이전 기간 대비"
+    _monthly_compare_caption = "전월 비교" if _monthly_span_months == 1 else f"이전 {_monthly_span_months}개월 비교"
     _monthly_period_token = f"{_monthly_period_start:%Y%m%d}_{_monthly_period_end:%Y%m%d}"
     st.caption(
         f"조회 기간 {_monthly_period_start:%Y-%m-%d} ~ {_monthly_period_end:%Y-%m-%d} · "
-        f"전월 비교 {_monthly_prev_start:%Y-%m-%d} ~ {_monthly_prev_end:%Y-%m-%d}"
+        f"{_monthly_compare_caption} {_monthly_prev_start:%Y-%m-%d} ~ {_monthly_prev_end:%Y-%m-%d}"
     )
 
     try:
@@ -17467,7 +17494,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
                     f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
                     '<div class="weekly-kpi-value-row">'
                     f'<div class="metric-value">{value}</div>'
-                    f'<div class="metric-delta {weekly_delta_class(delta)}">전월 대비 {delta}</div>'
+                    f'<div class="metric-delta {weekly_delta_class(delta)}">{_monthly_compare_label} {delta}</div>'
                     '</div></div>',
                     unsafe_allow_html=True,
                 )
@@ -17544,7 +17571,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
                                 <div class="weekly-mms-amount-label">전체 주문금액</div>
                                 <div class="weekly-mms-amount-value">{overall_amount_display}</div>
                             </div>
-                            <div class="metric-delta {weekly_delta_class(mms_delta)}">전월 대비 {mms_delta}</div>
+                            <div class="metric-delta {weekly_delta_class(mms_delta)}">{_monthly_compare_label} {mms_delta}</div>
                         </div>
                     </div>
                 </div>
@@ -17565,19 +17592,19 @@ elif menu in {"월간실적", "월간실적 V2"}:
                             <div class="weekly-mix-name">재편성</div>
                             <div class="weekly-mix-value">{monthly_mix["재편성"]["share"]*100:.1f}%</div>
                             <div class="weekly-mix-meta">{monthly_mix["재편성"]["count"]:,}건</div>
-                            <div class="weekly-mix-meta {weekly_delta_class(rerun_delta)}">전월 대비 {rerun_delta}</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(rerun_delta)}">{_monthly_compare_label} {rerun_delta}</div>
                         </div>
                         <div class="weekly-mix-item">
                             <div class="weekly-mix-name">유사신규</div>
                             <div class="weekly-mix-value">{monthly_mix["유사신규"]["share"]*100:.1f}%</div>
                             <div class="weekly-mix-meta">{monthly_mix["유사신규"]["count"]:,}건</div>
-                            <div class="weekly-mix-meta {weekly_delta_class(similar_delta)}">전월 대비 {similar_delta}</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(similar_delta)}">{_monthly_compare_label} {similar_delta}</div>
                         </div>
                         <div class="weekly-mix-item">
                             <div class="weekly-mix-name">신규</div>
                             <div class="weekly-mix-value">{monthly_mix["신규"]["share"]*100:.1f}%</div>
                             <div class="weekly-mix-meta">{monthly_mix["신규"]["count"]:,}건</div>
-                            <div class="weekly-mix-meta {weekly_delta_class(new_delta)}">전월 대비 {new_delta}</div>
+                            <div class="weekly-mix-meta {weekly_delta_class(new_delta)}">{_monthly_compare_label} {new_delta}</div>
                         </div>
                     </div>
                     {monthly_mix_note}
@@ -17804,11 +17831,11 @@ elif menu in {"월간실적", "월간실적 V2"}:
         if has_previous:
             ctr_change = float(metrics.get("CTR", 0) or 0) - float(prev_metrics.get("CTR", 0) or 0)
             if ctr_change > 0:
-                rise_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+                rise_lines.append(f'CTR {_monthly_compare_label} {_monthly_delta("CTR", pp=True)}')
             elif ctr_change < 0:
-                decline_lines.append(f'CTR 전월 대비 {_monthly_delta("CTR", pp=True)}')
+                decline_lines.append(f'CTR {_monthly_compare_label} {_monthly_delta("CTR", pp=True)}')
         else:
-            decline_lines.append("전월 비교 데이터 없음")
+            decline_lines.append(f"{_monthly_compare_label.replace(' 대비', '')} 데이터 없음")
 
         insight_contents = [
             (
