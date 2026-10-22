@@ -16532,13 +16532,23 @@ elif menu == "주간실적":
     _weekly_min_date = _weekly_all_dates.min()
     _weekly_max_date = _weekly_all_dates.max()
 
+    # 선택 주차의 기본 범위가 실제 데이터 최대/최소일을 넘지 않도록 보정합니다.
+    # (예: 진행 중인 현재 주차는 주차 종료일이 아직 데이터 최대일보다 뒤일 수 있음)
+    _weekly_default_start = max(_week_start, _weekly_min_date)
+    _weekly_default_end = min(_week_end, _weekly_max_date)
+    if _weekly_default_start > _weekly_default_end:
+        _weekly_default_start = _weekly_default_end = min(
+            max(_week_start, _weekly_min_date), _weekly_max_date
+        )
+    _weekly_period_key = f"weekly_period_v2_{selected_year}_{week}"
+
     _weekly_period_value = st.date_input(
         "기간 설정",
-        value=(_week_start.date(), _week_end.date()),
+        value=(_weekly_default_start.date(), _weekly_default_end.date()),
         min_value=_weekly_min_date.date(),
         max_value=_weekly_max_date.date(),
         format="YYYY-MM-DD",
-        key=f"weekly_period_{selected_year}_{week}",
+        key=_weekly_period_key,
         help="전체 데이터 범위에서 시작일과 종료일을 자유롭게 지정합니다. 여러 주차를 선택하면 해당 기간 실적을 합산해 보여줍니다.",
     )
     if isinstance(_weekly_period_value, (tuple, list)):
@@ -17354,13 +17364,26 @@ elif menu in {"월간실적", "월간실적 V2"}:
     _month_end = (_month_start + pd.offsets.MonthEnd(0)).normalize()
     _monthly_min_date = _monthly_dates.min().normalize()
     _monthly_max_date = _monthly_dates.max().normalize()
+    # 선택 월의 기본 범위가 실제 데이터 최대/최소일을 넘지 않도록 보정합니다.
+    # 진행 중인 현재 월은 월말(예: 10/31)이 실제 데이터 마지막 날(예: 10/22)보다 뒤일 수 있습니다.
+    _monthly_default_start = max(_month_start, _monthly_min_date)
+    _monthly_default_end = min(_month_end, _monthly_max_date)
+    if _monthly_default_start > _monthly_default_end:
+        _monthly_default_start = _monthly_default_end = min(
+            max(_month_start, _monthly_min_date), _monthly_max_date
+        )
+    _monthly_period_key = (
+        f"monthly_period_v2_{'v2' if monthly_v2 else 'v1'}_"
+        f"{monthly_year}_{monthly_month}"
+    )
+
     _monthly_period_value = st.date_input(
         "기간 설정",
-        value=(_month_start.date(), _month_end.date()),
+        value=(_monthly_default_start.date(), _monthly_default_end.date()),
         min_value=_monthly_min_date.date(),
         max_value=_monthly_max_date.date(),
         format="YYYY-MM-DD",
-        key=f"monthly_period_{'v2' if monthly_v2 else 'v1'}_{monthly_year}_{monthly_month}",
+        key=_monthly_period_key,
         help="전체 데이터 범위에서 시작일과 종료일을 자유롭게 지정합니다. 여러 달을 선택하면 해당 기간 실적을 합산해 보여줍니다.",
     )
     if isinstance(_monthly_period_value, (tuple, list)):
