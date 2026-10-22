@@ -15991,24 +15991,147 @@ if menu == "홈":
     monthly = filter_monthly_period(monthly_all, month_option, start_month, end_month)
     weekly = weekly_all.copy()
 
-    # KPI
-    latest_df = monthly if not monthly.empty else monthly_all
-    if not latest_df.empty:
-        latest = latest_df.iloc[-1]
+    # KPI: 월간 조회기간에 포함된 모든 행을 합산해 홈 상단 카드를 계산합니다.
+    # 기존처럼 마지막 월 1개 값만 표시하지 않고, 표의 총합계와 같은 기준을 사용합니다.
+    def _home_total_metrics(period_df: pd.DataFrame) -> dict:
+        if period_df is None or period_df.empty:
+            return {}
+        sent = float(pd.to_numeric(period_df.get("발송건수", 0), errors="coerce").fillna(0).sum())
+        clicks = float(pd.to_numeric(period_df.get("클릭수", 0), errors="coerce").fillna(0).sum())
+        orders = float(pd.to_numeric(period_df.get("주문건수", 0), errors="coerce").fillna(0).sum())
+        amount = float(pd.to_numeric(period_df.get("주문금액", 0), errors="coerce").fillna(0).sum())
+        send_runs = float(pd.to_numeric(period_df.get("발송횟수", 0), errors="coerce").fillna(0).sum())
+        return {
+            "주문금액": amount,
+            "발송건수": sent,
+            "CTR": (clicks / sent) if sent else 0.0,
+            "클릭 CVR": (orders / clicks) if clicks else 0.0,
+            "SPM": (amount / sent) if sent else 0.0,
+            "발송당매출": (amount / send_runs) if send_runs else 0.0,
+        }
+
+    def _home_total_delta(current_value: float, previous_value: float, pp: bool = False) -> str:
+        if previous_value is None or pd.isna(previous_value):
+            return "-"
+        if pp:
+            return change_label(float(current_value) - float(previous_value), pp=True)
+        if float(previous_value) == 0:
+            return "-"
+        return change_label((float(current_value) - float(previous_value)) / abs(float(previous_value)))
+
+    card_df = monthly if not monthly.empty else monthly_all
+    if not card_df.empty:
+        current_totals = _home_total_metrics(card_df)
+
+        # 현재 선택 월 수와 동일한 개수의 직전 월을 비교기간으로 사용합니다.
+        previous_df = monthly_all.iloc[0:0].copy()
+        selected_labels = card_df["_label"].astype(str).tolist()
+        all_labels = monthly_all["_label"].astype(str).tolist() if not monthly_all.empty else []
+        if selected_labels and all_labels and selected_labels[0] in all_labels:
+            first_pos = all_labels.index(selected_labels[0])
+            period_count = len(selected_labels)
+            if first_pos >= period_count:
+                previous_df = monthly_all.iloc[first_pos - period_count:first_pos].copy()
+        previous_totals = _home_total_metrics(previous_df) if len(previous_df) == len(card_df) else {}
+
+        # MMS 실적 비중도 홈 분석조건 + 월간 조회기간을 동일하게 적용합니다.
+        selected_months = set(selected_labels)
+        selected_send_dates = pd.to_datetime(home_applied_sends.get("_date"), errors="coerce")
+        selected_sends_for_share = home_applied_sends.loc[
+            selected_send_dates.dt.strftime("%Y-%m").isin(selected_months)
+        ].copy() if selected_months and not home_applied_sends.empty else home_applied_sends.iloc[0:0].copy()
+
+        home_applied_overall = apply_home_analysis_date_filter(
+            overall_performance,
+            applied["mode"],
+            applied["base_start"],
+            applied["base_end"],
+            applied["include_ranges"],
+            applied["exclude_ranges"],
+        )
+        overall_dates_for_share = pd.to_datetime(home_applied_overall.get("_date"), errors="coerce")
+        selected_overall_for_share = home_applied_overall.loc[
+            overall_dates_for_share.dt.strftime("%Y-%m").isin(selected_months)
+        ].copy() if selected_months and not home_applied_overall.empty else home_applied_overall.iloc[0:0].copy()
+
+        send_types_for_share = _weekly_send_type_series(selected_sends_for_share) if not selected_sends_for_share.empty else pd.Series(dtype=str)
+        send_amounts_for_share = pd.to_numeric(
+            selected_sends_for_share.get("주문금액", pd.Series(0, index=selected_sends_for_share.index)),
+            errors="coerce",
+        ).fillna(0) if not selected_sends_for_share.empty else pd.Series(dtype=float)
+        mms_amount = float(send_amounts_for_share.loc[send_types_for_share.eq("MMS")].sum()) if not selected_sends_for_share.empty else 0.0
+        overall_amount = float(pd.to_numeric(
+            selected_overall_for_share.get("주문금액", pd.Series(0, index=selected_overall_for_share.index)),
+            errors="coerce",
+        ).fillna(0).sum()) if not selected_overall_for_share.empty else 0.0
+        mms_share = (mms_amount / overall_amount) if overall_amount > 0 else None
+
+        previous_mms_share = None
+        if not previous_df.empty:
+            previous_months = set(previous_df["_label"].astype(str).tolist())
+            prev_send_dates = pd.to_datetime(home_applied_sends.get("_date"), errors="coerce")
+            prev_sends = home_applied_sends.loc[
+                prev_send_dates.dt.strftime("%Y-%m").isin(previous_months)
+            ].copy() if previous_months else home_applied_sends.iloc[0:0].copy()
+            prev_overall_dates = pd.to_datetime(home_applied_overall.get("_date"), errors="coerce")
+            prev_overall = home_applied_overall.loc[
+                prev_overall_dates.dt.strftime("%Y-%m").isin(previous_months)
+            ].copy() if previous_months else home_applied_overall.iloc[0:0].copy()
+            prev_types = _weekly_send_type_series(prev_sends) if not prev_sends.empty else pd.Series(dtype=str)
+            prev_amounts = pd.to_numeric(
+                prev_sends.get("주문금액", pd.Series(0, index=prev_sends.index)), errors="coerce"
+            ).fillna(0) if not prev_sends.empty else pd.Series(dtype=float)
+            prev_mms_amount = float(prev_amounts.loc[prev_types.eq("MMS")].sum()) if not prev_sends.empty else 0.0
+            prev_total_amount = float(pd.to_numeric(
+                prev_overall.get("주문금액", pd.Series(0, index=prev_overall.index)), errors="coerce"
+            ).fillna(0).sum()) if not prev_overall.empty else 0.0
+            if prev_total_amount > 0:
+                previous_mms_share = prev_mms_amount / prev_total_amount
+
         cards = [
-            ("주문금액", f"{fmt_num(latest['주문금액'])}원", delta_for_latest(latest_df, "주문금액")),
-            ("발송건수", fmt_num(latest["발송건수"]), delta_for_latest(latest_df, "발송건수")),
-            ("CTR", fmt_pct(latest["반응율(Uniq CTR)"]), delta_for_latest(latest_df, "반응율(Uniq CTR)", pp=True)),
-            ("클릭 CVR", fmt_pct(latest["클릭 CVR"]), delta_for_latest(latest_df, "클릭 CVR", pp=True)),
-            ("SPM", f"{latest['발송대비매출(SPM)']:.1f}", delta_for_latest(latest_df, "발송대비매출(SPM)")),
-            ("발송당매출", f"{fmt_num(latest['발송당매출(발송횟수)'])}원", delta_for_latest(latest_df, "발송당매출(발송횟수)")),
+            (
+                "주문금액",
+                f"{fmt_num(current_totals['주문금액'])}원",
+                _home_total_delta(current_totals["주문금액"], previous_totals.get("주문금액")),
+            ),
+            (
+                "발송건수",
+                fmt_num(current_totals["발송건수"]),
+                _home_total_delta(current_totals["발송건수"], previous_totals.get("발송건수")),
+            ),
+            (
+                "CTR",
+                fmt_pct(current_totals["CTR"]),
+                _home_total_delta(current_totals["CTR"], previous_totals.get("CTR"), pp=True),
+            ),
+            (
+                "클릭 CVR",
+                fmt_pct(current_totals["클릭 CVR"]),
+                _home_total_delta(current_totals["클릭 CVR"], previous_totals.get("클릭 CVR"), pp=True),
+            ),
+            (
+                "SPM",
+                f"{current_totals['SPM']:.1f}",
+                _home_total_delta(current_totals["SPM"], previous_totals.get("SPM")),
+            ),
+            (
+                "발송당매출",
+                f"{fmt_num(current_totals['발송당매출'])}원",
+                _home_total_delta(current_totals["발송당매출"], previous_totals.get("발송당매출")),
+            ),
+            (
+                "MMS 실적 비중",
+                f"{mms_share * 100:.1f}%" if mms_share is not None else "-",
+                _home_total_delta(mms_share, previous_mms_share, pp=True)
+                if mms_share is not None else "-",
+            ),
         ]
-        cols = st.columns(6)
+        cols = st.columns(7)
         for col, (label, value, delta) in zip(cols, cards):
             col.markdown(
                 f'<div class="metric-card"><div class="metric-label">{label}</div>'
                 f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta">직전 대비 {delta}</div></div>',
+                f'<div class="metric-delta">이전 동일기간 대비 {delta}</div></div>',
                 unsafe_allow_html=True,
             )
 
