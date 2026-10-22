@@ -323,9 +323,11 @@ html, body, [class*="css"] {
     bottom: calc(100% + 10px);
     left: 0;
     z-index: 99999;
-    min-width: 250px;
-    max-width: 380px;
-    max-height: 320px;
+    width: max-content;
+    min-width: 320px;
+    max-width: min(520px, calc(100vw - 48px));
+    max-height: 360px;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: 10px 12px;
     border-radius: 9px;
@@ -333,9 +335,12 @@ html, body, [class*="css"] {
     color: #ffffff;
     font-size: 12px;
     font-weight: 500;
-    line-height: 1.55;
+    line-height: 1.5;
     text-align: left;
     white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: keep-all;
+    box-sizing: border-box;
     box-shadow: 0 8px 24px rgba(15, 23, 42, 0.24);
     pointer-events: none;
 }
@@ -359,17 +364,70 @@ html, body, [class*="css"] {
     right: 22px;
 }
 
+/* 오른쪽 절반의 타겟 카드는 툴팁을 우측 기준으로 열어 화면 밖 이탈을 방지 */
+.weekly-target-card-pos-right .weekly-target-tooltip {
+    left: auto;
+    right: 0;
+}
+
+.weekly-target-card-pos-right .weekly-target-tooltip::after {
+    left: auto;
+    right: 22px;
+}
+
 .weekly-target-metric:hover .weekly-target-tooltip {
     display: block;
 }
 
 .weekly-target-tooltip-title {
     font-weight: 800;
-    margin-bottom: 5px;
+    margin-bottom: 7px;
 }
 
 .weekly-target-tooltip-line {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: keep-all;
+}
+
+.weekly-target-tooltip-table {
+    display: grid;
+    grid-template-columns: minmax(120px, 2.2fr) minmax(82px, 1fr) minmax(58px, .7fr) minmax(52px, .6fr);
+    width: 100%;
+    gap: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 7px;
+    overflow: hidden;
+}
+
+.weekly-target-tooltip-cell {
+    min-width: 0;
+    padding: 6px 7px;
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: keep-all;
+    box-sizing: border-box;
+}
+
+.weekly-target-tooltip-cell:nth-child(4n) {
+    border-right: 0;
+}
+
+.weekly-target-tooltip-cell:nth-last-child(-n + 4) {
+    border-bottom: 0;
+}
+
+.weekly-target-tooltip-head {
+    font-weight: 800;
+    background: rgba(255, 255, 255, 0.10);
     white-space: nowrap;
+}
+
+.weekly-target-tooltip-cell:nth-child(4n),
+.weekly-target-tooltip-head:nth-child(4n) {
+    text-align: right;
 }
 
 .weekly-target-metric + .weekly-target-metric {
@@ -3727,7 +3785,7 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame, pw: pd.DataFrame | None = Non
             "label": f"{gender} {age}",
             "ctr": None,
             "spm": None,
-            "ctr_hover": "소재별 CTR\n데이터 없음",
+            "ctr_hover": [],
             "spm_hover": "상품별 주문금액\n데이터 없음",
         }
         for gender, age in targets
@@ -3765,14 +3823,29 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame, pw: pd.DataFrame | None = Non
         target_click = float(pd.to_numeric(target_rows[click_col], errors="coerce").fillna(0).sum())
         target_amount = float(pd.to_numeric(target_rows["주문금액"], errors="coerce").fillna(0).sum())
 
-        # CTR hover: 해당 타겟의 소재별 CTR을 실제 발송건수/클릭수 합산 기준으로 계산합니다.
+        # CTR hover: 소재 · 발송일 · 시간대 단위로 실제 발송건수/클릭수를 합산해 CTR을 표시합니다.
         material_col = first_col(target_rows, ["소재", "소재명"])
-        ctr_lines = ["소재별 CTR"]
+        ctr_rows = []
         if material_col and not target_rows.empty:
             material_detail = target_rows.copy()
             material_detail["_hover_material"] = (
                 material_detail[material_col].fillna("").astype(str).str.strip()
                 .replace({"": "소재명 없음", "nan": "소재명 없음", "None": "소재명 없음"})
+            )
+            if "_date" in material_detail.columns:
+                material_detail["_hover_date"] = pd.to_datetime(
+                    material_detail["_date"], errors="coerce"
+                ).dt.strftime("%Y-%m-%d").fillna("-")
+            else:
+                date_col = first_col(material_detail, ["발송일", "날짜", "일자"])
+                material_detail["_hover_date"] = (
+                    parse_yyyymmdd_date(material_detail[date_col]).dt.strftime("%Y-%m-%d").fillna("-")
+                    if date_col else "-"
+                )
+            time_col = first_col(material_detail, ["시간대", "발송시간", "시간"])
+            material_detail["_hover_time"] = (
+                material_detail[time_col].map(_v4482_time_key).fillna("").replace({"": "-"})
+                if time_col else "-"
             )
             material_detail["_hover_send"] = pd.to_numeric(
                 material_detail[send_col], errors="coerce"
@@ -3781,15 +3854,23 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame, pw: pd.DataFrame | None = Non
                 material_detail[click_col], errors="coerce"
             ).fillna(0)
             material_grouped = material_detail.groupby(
-                "_hover_material", sort=False, as_index=False
-            ).agg(_hover_send=("_hover_send", "sum"), _hover_click=("_hover_click", "sum"))
+                ["_hover_material", "_hover_date", "_hover_time"],
+                sort=False,
+                as_index=False,
+            ).agg(
+                _hover_send=("_hover_send", "sum"),
+                _hover_click=("_hover_click", "sum"),
+            )
             for _, material_row in material_grouped.iterrows():
                 material_send = float(material_row["_hover_send"] or 0)
                 material_click = float(material_row["_hover_click"] or 0)
                 material_ctr = material_click / material_send if material_send > 0 else 0
-                ctr_lines.append(f'{material_row["_hover_material"]} {material_ctr * 100:.1f}%')
-        if len(ctr_lines) == 1:
-            ctr_lines.append("데이터 없음")
+                ctr_rows.append({
+                    "material": str(material_row["_hover_material"]),
+                    "date": str(material_row["_hover_date"]),
+                    "time": str(material_row["_hover_time"]),
+                    "ctr": f"{material_ctr * 100:.1f}%",
+                })
 
         # SPM hover: 해당 타겟으로 편성된 상품의 주문금액을 상품명별로 합산합니다.
         matched_products = pd.DataFrame()
@@ -3844,7 +3925,7 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame, pw: pd.DataFrame | None = Non
             "label": f"{gender} {age}",
             "ctr": (target_click / target_send) if target_send > 0 else None,
             "spm": (target_amount / target_send) if target_send > 0 else None,
-            "ctr_hover": "\n".join(ctr_lines),
+            "ctr_hover": ctr_rows,
             "spm_hover": "\n".join(spm_lines),
         })
     return result
@@ -16404,9 +16485,9 @@ elif menu == "주간실적":
     target_card_cols = st.columns(4)
     target_metrics = _weekly_target_ctr_spm_cards(sw, pw)
     prev_target_metrics = _weekly_target_ctr_spm_cards(prev_sw, prev_pw)
-    for target_col, target_metric, prev_target_metric in zip(
+    for target_idx, (target_col, target_metric, prev_target_metric) in enumerate(zip(
         target_card_cols, target_metrics, prev_target_metrics
-    ):
+    )):
         target_ctr_display = (
             f'{float(target_metric["ctr"])*100:.1f}%'
             if target_metric["ctr"] is not None
@@ -16437,28 +16518,42 @@ elif menu == "주간실적":
             else "-"
         )
         with target_col:
-            _ctr_hover_lines = [
-                _html.escape(line)
-                for line in str(target_metric.get("ctr_hover", "")).splitlines()
-                if str(line).strip()
-            ]
+            _ctr_hover_rows = target_metric.get("ctr_hover", [])
+            if isinstance(_ctr_hover_rows, list) and _ctr_hover_rows:
+                _ctr_hover_html = (
+                    '<div class="weekly-target-tooltip-title">소재별 CTR</div>'
+                    '<div class="weekly-target-tooltip-table">'
+                    '<div class="weekly-target-tooltip-cell weekly-target-tooltip-head">소재</div>'
+                    '<div class="weekly-target-tooltip-cell weekly-target-tooltip-head">발송일</div>'
+                    '<div class="weekly-target-tooltip-cell weekly-target-tooltip-head">시간대</div>'
+                    '<div class="weekly-target-tooltip-cell weekly-target-tooltip-head">CTR</div>'
+                    + "".join(
+                        '<div class="weekly-target-tooltip-cell">' + _html.escape(str(row.get("material", "-"))) + '</div>'
+                        '<div class="weekly-target-tooltip-cell">' + _html.escape(str(row.get("date", "-"))) + '</div>'
+                        '<div class="weekly-target-tooltip-cell">' + _html.escape(str(row.get("time", "-"))) + '</div>'
+                        '<div class="weekly-target-tooltip-cell">' + _html.escape(str(row.get("ctr", "-"))) + '</div>'
+                        for row in _ctr_hover_rows
+                    )
+                    + '</div>'
+                )
+            else:
+                _ctr_hover_html = (
+                    '<div class="weekly-target-tooltip-title">소재별 CTR</div>'
+                    '<div class="weekly-target-tooltip-line">데이터 없음</div>'
+                )
             _spm_hover_lines = [
                 _html.escape(line)
                 for line in str(target_metric.get("spm_hover", "")).splitlines()
                 if str(line).strip()
             ]
-            _ctr_hover_html = "".join(
-                (f'<div class="weekly-target-tooltip-title">{line}</div>' if idx == 0
-                 else f'<div class="weekly-target-tooltip-line">{line}</div>')
-                for idx, line in enumerate(_ctr_hover_lines)
-            )
             _spm_hover_html = "".join(
                 (f'<div class="weekly-target-tooltip-title">{line}</div>' if idx == 0
                  else f'<div class="weekly-target-tooltip-line">{line}</div>')
                 for idx, line in enumerate(_spm_hover_lines)
             )
+            _target_position_class = " weekly-target-card-pos-right" if target_idx >= 2 else ""
             st.markdown(
-                '<div class="metric-card weekly-target-card">'
+                f'<div class="metric-card weekly-target-card{_target_position_class}">'
                 f'<div class="metric-label">{target_metric["label"]}</div>'
                 '<div class="weekly-target-metrics">'
                 '<div class="weekly-target-metric">'
