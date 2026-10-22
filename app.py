@@ -3644,8 +3644,8 @@ def grouped_send_table(sw: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     return g.fillna(0)
 
 
-def _weekly_target_ctr_spm_cards(sw: pd.DataFrame) -> list[dict]:
-    """선택 주차의 4개 성별·연령 타겟별 CTR/SPM 카드 값을 반환합니다."""
+def _weekly_target_ctr_spm_cards(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> list[dict]:
+    """선택 주차의 4개 성별·연령 타겟별 CTR/SPM 카드 값과 hover 상세를 반환합니다."""
     targets = [
         ("남성", "3040"),
         ("남성", "5060"),
@@ -3653,7 +3653,13 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame) -> list[dict]:
         ("여성", "5060"),
     ]
     empty = [
-        {"label": f"{gender} {age}", "ctr": None, "spm": None}
+        {
+            "label": f"{gender} {age}",
+            "ctr": None,
+            "spm": None,
+            "ctr_hover": "소재별 CTR\n데이터 없음",
+            "spm_hover": "상품별 주문금액\n데이터 없음",
+        }
         for gender, age in targets
     ]
     if sw is None or sw.empty or not {"성별", "연령"}.issubset(sw.columns):
@@ -3671,19 +3677,105 @@ def _weekly_target_ctr_spm_cards(sw: pd.DataFrame) -> list[dict]:
     )
     work["_weekly_target_age"] = work["연령"].map(clean_identifier_value)
 
+    product_work = pw.copy() if isinstance(pw, pd.DataFrame) else pd.DataFrame()
+    if not product_work.empty and {"성별", "연령"}.issubset(product_work.columns):
+        product_work["_weekly_target_gender"] = (
+            product_work["성별"].fillna("").astype(str).str.strip()
+            .replace({"남자": "남성", "남": "남성", "여자": "여성", "여": "여성"})
+        )
+        product_work["_weekly_target_age"] = product_work["연령"].map(clean_identifier_value)
+
     result = []
     for gender, age in targets:
         target_rows = work[
             work["_weekly_target_gender"].eq(gender)
             & work["_weekly_target_age"].eq(age)
-        ]
+        ].copy()
         target_send = float(pd.to_numeric(target_rows[send_col], errors="coerce").fillna(0).sum())
         target_click = float(pd.to_numeric(target_rows[click_col], errors="coerce").fillna(0).sum())
         target_amount = float(pd.to_numeric(target_rows["주문금액"], errors="coerce").fillna(0).sum())
+
+        # CTR hover: 해당 타겟의 소재별 CTR을 실제 발송건수/클릭수 합산 기준으로 계산합니다.
+        material_col = first_col(target_rows, ["소재", "소재명"])
+        ctr_lines = ["소재별 CTR"]
+        if material_col and not target_rows.empty:
+            material_detail = target_rows.copy()
+            material_detail["_hover_material"] = (
+                material_detail[material_col].fillna("").astype(str).str.strip()
+                .replace({"": "소재명 없음", "nan": "소재명 없음", "None": "소재명 없음"})
+            )
+            material_detail["_hover_send"] = pd.to_numeric(
+                material_detail[send_col], errors="coerce"
+            ).fillna(0)
+            material_detail["_hover_click"] = pd.to_numeric(
+                material_detail[click_col], errors="coerce"
+            ).fillna(0)
+            material_grouped = material_detail.groupby(
+                "_hover_material", sort=False, as_index=False
+            ).agg(_hover_send=("_hover_send", "sum"), _hover_click=("_hover_click", "sum"))
+            for _, material_row in material_grouped.iterrows():
+                material_send = float(material_row["_hover_send"] or 0)
+                material_click = float(material_row["_hover_click"] or 0)
+                material_ctr = material_click / material_send if material_send > 0 else 0
+                ctr_lines.append(f'{material_row["_hover_material"]} {material_ctr * 100:.1f}%')
+        if len(ctr_lines) == 1:
+            ctr_lines.append("데이터 없음")
+
+        # SPM hover: 해당 타겟으로 편성된 상품의 주문금액을 상품명별로 합산합니다.
+        matched_products = pd.DataFrame()
+        if not product_work.empty:
+            if {"_weekly_target_gender", "_weekly_target_age"}.issubset(product_work.columns):
+                matched_products = product_work[
+                    product_work["_weekly_target_gender"].eq(gender)
+                    & product_work["_weekly_target_age"].eq(age)
+                ].copy()
+
+            # 상품 시트에 타겟값이 없거나 직접 매칭 결과가 없으면 타겟 발송행의 일자·시간·소재로 연결합니다.
+            if matched_products.empty and not target_rows.empty:
+                matched_parts = []
+                for _, target_send_row in target_rows.iterrows():
+                    current_match = _weekly_send_carousel_match_products(target_send_row, product_work)
+                    if not current_match.empty:
+                        matched_parts.append(current_match)
+                if matched_parts:
+                    matched_products = pd.concat(matched_parts, axis=0)
+                    matched_products = matched_products.loc[
+                        ~matched_products.index.duplicated(keep="first")
+                    ].copy()
+
+        spm_lines = ["상품별 주문금액"]
+        if not matched_products.empty and "상품명" in matched_products.columns:
+            matched_products = matched_products.copy()
+            matched_products["_hover_product_name"] = (
+                matched_products["상품명"].fillna("").astype(str).str.strip()
+                .replace({"": "상품명 없음", "nan": "상품명 없음", "None": "상품명 없음"})
+            )
+            product_amount_source = (
+                matched_products["주문금액"]
+                if "주문금액" in matched_products.columns
+                else pd.Series(0, index=matched_products.index)
+            )
+            matched_products["_hover_product_amount"] = pd.to_numeric(
+                product_amount_source, errors="coerce"
+            ).fillna(0)
+            product_grouped = (
+                matched_products.groupby("_hover_product_name", as_index=False)["_hover_product_amount"]
+                .sum()
+                .sort_values("_hover_product_amount", ascending=False, kind="stable")
+            )
+            for _, product_row in product_grouped.iterrows():
+                spm_lines.append(
+                    f'{product_row["_hover_product_name"]} {int(round(float(product_row["_hover_product_amount"]))):,}원'
+                )
+        if len(spm_lines) == 1:
+            spm_lines.append("데이터 없음")
+
         result.append({
             "label": f"{gender} {age}",
             "ctr": (target_click / target_send) if target_send > 0 else None,
             "spm": (target_amount / target_send) if target_send > 0 else None,
+            "ctr_hover": "\n".join(ctr_lines),
+            "spm_hover": "\n".join(spm_lines),
         })
     return result
 
@@ -16240,8 +16332,8 @@ elif menu == "주간실적":
 
     # 3번째 줄: 성별·연령 타겟별 CTR / SPM 4개 카드
     target_card_cols = st.columns(4)
-    target_metrics = _weekly_target_ctr_spm_cards(sw)
-    prev_target_metrics = _weekly_target_ctr_spm_cards(prev_sw)
+    target_metrics = _weekly_target_ctr_spm_cards(sw, pw)
+    prev_target_metrics = _weekly_target_ctr_spm_cards(prev_sw, prev_pw)
     for target_col, target_metric, prev_target_metric in zip(
         target_card_cols, target_metrics, prev_target_metrics
     ):
@@ -16279,14 +16371,14 @@ elif menu == "주간실적":
                 '<div class="metric-card weekly-target-card">'
                 f'<div class="metric-label">{target_metric["label"]}</div>'
                 '<div class="weekly-target-metrics">'
-                '<div class="weekly-target-metric">'
+                f'<div class="weekly-target-metric" title="{_html.escape(str(target_metric.get("ctr_hover", "")), quote=True)}" style="cursor: help;">'
                 '<div class="weekly-target-metric-name">CTR</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
                 f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">전주 대비 {target_ctr_delta}</div>'
                 '</div>'
                 '</div>'
-                '<div class="weekly-target-metric">'
+                f'<div class="weekly-target-metric" title="{_html.escape(str(target_metric.get("spm_hover", "")), quote=True)}" style="cursor: help;">'
                 '<div class="weekly-target-metric-name">SPM</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
