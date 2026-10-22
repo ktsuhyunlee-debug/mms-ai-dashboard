@@ -300,6 +300,76 @@ html, body, [class*="css"] {
 
 .weekly-target-metric {
     min-width: 0;
+    position: relative;
+    cursor: help;
+}
+
+.weekly-target-card {
+    overflow: visible !important;
+    position: relative;
+}
+
+.weekly-target-card:hover {
+    z-index: 1000;
+}
+
+.weekly-target-metrics {
+    overflow: visible !important;
+}
+
+.weekly-target-tooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 0;
+    z-index: 99999;
+    min-width: 250px;
+    max-width: 380px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: rgba(17, 24, 39, 0.97);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.55;
+    text-align: left;
+    white-space: normal;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.24);
+    pointer-events: none;
+}
+
+.weekly-target-tooltip::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 22px;
+    border: 6px solid transparent;
+    border-top-color: rgba(17, 24, 39, 0.97);
+}
+
+.weekly-target-metric:last-child .weekly-target-tooltip {
+    left: auto;
+    right: 0;
+}
+
+.weekly-target-metric:last-child .weekly-target-tooltip::after {
+    left: auto;
+    right: 22px;
+}
+
+.weekly-target-metric:hover .weekly-target-tooltip {
+    display: block;
+}
+
+.weekly-target-tooltip-title {
+    font-weight: 800;
+    margin-bottom: 5px;
+}
+
+.weekly-target-tooltip-line {
+    white-space: nowrap;
 }
 
 .weekly-target-metric + .weekly-target-metric {
@@ -16367,23 +16437,45 @@ elif menu == "주간실적":
             else "-"
         )
         with target_col:
+            _ctr_hover_lines = [
+                _html.escape(line)
+                for line in str(target_metric.get("ctr_hover", "")).splitlines()
+                if str(line).strip()
+            ]
+            _spm_hover_lines = [
+                _html.escape(line)
+                for line in str(target_metric.get("spm_hover", "")).splitlines()
+                if str(line).strip()
+            ]
+            _ctr_hover_html = "".join(
+                (f'<div class="weekly-target-tooltip-title">{line}</div>' if idx == 0
+                 else f'<div class="weekly-target-tooltip-line">{line}</div>')
+                for idx, line in enumerate(_ctr_hover_lines)
+            )
+            _spm_hover_html = "".join(
+                (f'<div class="weekly-target-tooltip-title">{line}</div>' if idx == 0
+                 else f'<div class="weekly-target-tooltip-line">{line}</div>')
+                for idx, line in enumerate(_spm_hover_lines)
+            )
             st.markdown(
                 '<div class="metric-card weekly-target-card">'
                 f'<div class="metric-label">{target_metric["label"]}</div>'
                 '<div class="weekly-target-metrics">'
-                f'<div class="weekly-target-metric" title="{_html.escape(str(target_metric.get("ctr_hover", "")), quote=True)}" style="cursor: help;">'
+                '<div class="weekly-target-metric">'
                 '<div class="weekly-target-metric-name">CTR</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
                 f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">전주 대비 {target_ctr_delta}</div>'
                 '</div>'
+                f'<div class="weekly-target-tooltip">{_ctr_hover_html}</div>'
                 '</div>'
-                f'<div class="weekly-target-metric" title="{_html.escape(str(target_metric.get("spm_hover", "")), quote=True)}" style="cursor: help;">'
+                '<div class="weekly-target-metric">'
                 '<div class="weekly-target-metric-name">SPM</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
                 f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">전주 대비 {target_spm_delta}</div>'
                 '</div>'
+                f'<div class="weekly-target-tooltip">{_spm_hover_html}</div>'
                 '</div></div></div>',
                 unsafe_allow_html=True,
             )
