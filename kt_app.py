@@ -15105,7 +15105,11 @@ def _monthly_small_categories(product_rows: pd.DataFrame, top_n: int = 10) -> pd
 
 
 def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
-    columns = ["주차", "기간", "주문금액", "SPM", "CTR", "CVR"]
+    columns = [
+        "주차", "기간", "주문금액", "SPM", "CTR", "CVR",
+        "발송횟수", "MMS발송횟수", "RCS발송횟수", "상품수",
+        "MMS평균CTR", "RCS평균CTR",
+    ]
     if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
         return pd.DataFrame(columns=columns)
     work = send_rows.copy()
@@ -15130,24 +15134,99 @@ def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
     grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
     grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
     grouped["CVR"] = grouped["_orders"].div(grouped["_click"].replace(0, pd.NA)).fillna(0)
+
+    # Hover용 상세값은 v1/v2 분할행을 실제 발송일·시간대·발송유형 기준으로 먼저 합칩니다.
+    graph_rows = _weekly_graph_aggregate(work)
+    detail_rows = []
+    if graph_rows is not None and not graph_rows.empty:
+        graph_rows = graph_rows.copy()
+        graph_rows["_week_start"] = _monthly_week_start_series(graph_rows)
+        if "_graph_channel" not in graph_rows.columns:
+            graph_rows["_graph_channel"] = _weekly_send_type_series(graph_rows)
+        else:
+            graph_rows["_graph_channel"] = graph_rows["_graph_channel"].fillna("MMS").astype(str)
+        graph_rows["_graph_send"] = pd.to_numeric(
+            graph_rows.get("_graph_send", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["_graph_click_uniq"] = pd.to_numeric(
+            graph_rows.get("_graph_click_uniq", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["상품수"] = pd.to_numeric(
+            graph_rows.get("상품수", 0), errors="coerce"
+        ).fillna(0)
+        for week_start, week_rows in graph_rows.groupby("_week_start", sort=False):
+            mms_rows = week_rows[week_rows["_graph_channel"].eq("MMS")]
+            rcs_rows = week_rows[week_rows["_graph_channel"].eq("RCS")]
+
+            def _channel_ctr(rows: pd.DataFrame):
+                sent = float(rows["_graph_send"].sum()) if not rows.empty else 0.0
+                clicks = float(rows["_graph_click_uniq"].sum()) if not rows.empty else 0.0
+                return (clicks / sent) if sent > 0 else None
+
+            detail_rows.append({
+                "_week_start": week_start,
+                "발송횟수": int(len(week_rows)),
+                "MMS발송횟수": int(len(mms_rows)),
+                "RCS발송횟수": int(len(rcs_rows)),
+                "상품수": int(round(float(week_rows["상품수"].sum()))),
+                "MMS평균CTR": _channel_ctr(mms_rows),
+                "RCS평균CTR": _channel_ctr(rcs_rows),
+            })
+    details = pd.DataFrame(detail_rows)
+    if not details.empty:
+        grouped = grouped.merge(details, on="_week_start", how="left")
+    for count_col in ["발송횟수", "MMS발송횟수", "RCS발송횟수", "상품수"]:
+        if count_col not in grouped.columns:
+            grouped[count_col] = 0
+        grouped[count_col] = pd.to_numeric(grouped[count_col], errors="coerce").fillna(0).astype(int)
+    for rate_col in ["MMS평균CTR", "RCS평균CTR"]:
+        if rate_col not in grouped.columns:
+            grouped[rate_col] = pd.NA
     return grouped[columns]
 
 
 def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     labels = trend["주차"].tolist() if not trend.empty else []
     hover_dates = trend["기간"].tolist() if not trend.empty else []
+
+    amount_hover = []
+    rate_hover = []
+    if not trend.empty:
+        for _, row in trend.iterrows():
+            amount_hover.append(
+                f'<b>{_html.escape(str(row.get("주차", "")))}</b> · {_html.escape(str(row.get("기간", "")))}'
+                f'<br>발송 횟수 : {int(row.get("발송횟수", 0) or 0):,}회'
+                f'<br>MMS 발송 : {int(row.get("MMS발송횟수", 0) or 0):,}회'
+                f'<br>RCS 발송 : {int(row.get("RCS발송횟수", 0) or 0):,}회'
+                f'<br>상품수 : {int(row.get("상품수", 0) or 0):,}개'
+            )
+            mms_ctr = row.get("MMS평균CTR")
+            rcs_ctr = row.get("RCS평균CTR")
+            mms_ctr_text = f'{float(mms_ctr)*100:.1f}%' if pd.notna(mms_ctr) else '-'
+            rcs_ctr_text = f'{float(rcs_ctr)*100:.1f}%' if pd.notna(rcs_ctr) else '-'
+            rate_hover.append(
+                f'<b>{_html.escape(str(row.get("주차", "")))}</b> · {_html.escape(str(row.get("기간", "")))}'
+                f'<br>MMS 발송 횟수 : {int(row.get("MMS발송횟수", 0) or 0):,}회'
+                f'<br>MMS 평균 CTR : {mms_ctr_text}'
+                f'<br>RCS 발송 횟수 : {int(row.get("RCS발송횟수", 0) or 0):,}회'
+                f'<br>RCS 평균 CTR : {rcs_ctr_text}'
+            )
+
     amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
         text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
         cliponaxis=False,
-        customdata=hover_dates, hovertemplate="%{customdata}<br>주문금액 %{y:.1f}백만원<extra></extra>",
+        customdata=amount_hover,
+        hovertemplate="%{customdata}<br><br>주문금액 : %{y:.1f}백만원<extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
         mode="lines+markers+text", line=dict(color="#27ae60", width=3),
         text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
+        customdata=amount_hover,
+        hovertemplate="%{customdata}<br><br>SPM : %{y:.1f}<extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
     amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
@@ -15155,6 +15234,7 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         title=dict(text="주차별 주문금액 · SPM", x=.5, xanchor="center"), height=410,
         margin=dict(l=55, r=60, t=60, b=80), plot_bgcolor="#fff",
         legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+        hoverlabel=dict(align="left"),
     )
 
     rate_fig = go.Figure()
@@ -15162,17 +15242,22 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
         mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
+        customdata=rate_hover,
+        hovertemplate="%{customdata}<br><br>전체 CTR : %{y:.1f}%<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
         mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
+        customdata=rate_hover,
+        hovertemplate="%{customdata}<br><br>전체 CVR : %{y:.1f}%<extra></extra>",
     ))
     rate_fig.update_layout(
         title=dict(text="주차별 CTR · CVR", x=.5, xanchor="center"), height=410,
         margin=dict(l=55, r=35, t=60, b=80), plot_bgcolor="#fff",
         yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
         legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+        hoverlabel=dict(align="left"),
     )
     return amount_fig, rate_fig
 
@@ -15182,8 +15267,8 @@ def _monthly_daily_trend(
     send_rows: pd.DataFrame,
     product_rows: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR과 상품 상세를 생성합니다."""
-    columns = ["일자", "주문금액", "SPM", "CTR", "CVR", "상품상세"]
+    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR과 상품·시간대 상세를 생성합니다."""
+    columns = ["일자", "주문금액", "SPM", "CTR", "CVR", "상품상세", "시간대상세"]
     if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
         return pd.DataFrame(columns=columns)
     work = send_rows.copy()
@@ -15237,6 +15322,48 @@ def _monthly_daily_trend(
             )
 
     grouped["상품상세"] = grouped["_monthly_date"].map(product_details).fillna("상품별 데이터 없음")
+
+    # CTR hover에 실제 시간대·발송유형별 발송건수/클릭수/CTR을 표시합니다.
+    time_details = {}
+    graph_rows = _weekly_graph_aggregate(work)
+    if graph_rows is not None and not graph_rows.empty:
+        graph_rows = graph_rows.copy()
+        graph_rows["_monthly_date"] = pd.to_datetime(
+            graph_rows.get("_date"), errors="coerce"
+        ).dt.normalize()
+        if "_graph_channel" not in graph_rows.columns:
+            graph_rows["_graph_channel"] = _weekly_send_type_series(graph_rows)
+        else:
+            graph_rows["_graph_channel"] = graph_rows["_graph_channel"].fillna("MMS").astype(str)
+        graph_rows["_graph_time"] = (
+            graph_rows["_graph_time"].map(_v4482_time_key)
+            if "_graph_time" in graph_rows.columns
+            else (graph_rows["시간대"].map(_v4482_time_key) if "시간대" in graph_rows.columns else "")
+        )
+        graph_rows["_graph_send"] = pd.to_numeric(
+            graph_rows.get("_graph_send", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["_graph_click_uniq"] = pd.to_numeric(
+            graph_rows.get("_graph_click_uniq", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows = graph_rows[graph_rows["_monthly_date"].notna()].copy()
+        graph_rows = graph_rows.sort_values(
+            ["_monthly_date", "_graph_time", "_graph_channel"], kind="stable"
+        )
+        for detail_date, detail_group in graph_rows.groupby("_monthly_date", sort=False):
+            lines = ["<b>시간대별 발송 상세</b>"]
+            for _, detail_row in detail_group.iterrows():
+                sent = float(detail_row.get("_graph_send", 0) or 0)
+                clicks = float(detail_row.get("_graph_click_uniq", 0) or 0)
+                ctr = (clicks / sent) if sent > 0 else 0.0
+                time_text = str(detail_row.get("_graph_time", "") or "-")
+                channel_text = str(detail_row.get("_graph_channel", "") or "-")
+                lines.append(
+                    f'{_html.escape(time_text)} / {_html.escape(channel_text)} / '
+                    f'발송건수 {int(round(sent)):,} / 클릭수 {int(round(clicks)):,} / CTR {ctr*100:.1f}%'
+                )
+            time_details[detail_date] = "<br>".join(lines)
+    grouped["시간대상세"] = grouped["_monthly_date"].map(time_details).fillna("시간대별 데이터 없음")
     return grouped[columns]
 
 
@@ -15271,7 +15398,10 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
         mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
-        hovertemplate="%{x}<br>CTR %{y:.1f}%<extra></extra>",
+        customdata=trend.get(
+            "시간대상세", pd.Series("시간대별 데이터 없음", index=trend.index)
+        ).tolist(),
+        hovertemplate="<b>%{x}</b><br>CTR %{y:.1f}%<br><br>%{customdata}<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
@@ -15285,6 +15415,7 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         xaxis=dict(tickangle=-45),
         yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
         legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+        hoverlabel=dict(align="left"),
     )
     return amount_fig, rate_fig
 
