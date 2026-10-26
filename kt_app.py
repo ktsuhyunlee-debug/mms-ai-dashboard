@@ -14912,12 +14912,17 @@ def _monthly_previous_period(year: int, month: int) -> tuple[int, int]:
 
 
 def _monthly_clean_product_name(value) -> str:
-    """월간 리포트 표시용 상품명: [M] 제거, 나머지 대괄호 문자는 제거합니다."""
+    """월간 리포트 표시용 상품명: 맨 앞 [M]/M 태그 제거, 나머지 대괄호 문자는 제거합니다."""
     if pd.isna(value):
         return ""
     text = str(value).strip()
-    # [M]은 태그 내용까지 통째로 제거합니다.
-    text = re.sub(r"(?i)\[\s*M\s*\]\s*", "", text)
+    # 상품명 맨 앞의 운영 태그 [M] 또는 단독 M을 반복 제거합니다.
+    # 예: "[M] 종가 김치", "M 종가 김치", "[M] M 종가 김치" -> "종가 김치"
+    while True:
+        cleaned = re.sub(r"(?i)^\s*(?:\[\s*M\s*\]|M(?=\s|[-_:·|/]))\s*[-_:·|/]*\s*", "", text, count=1)
+        if cleaned == text:
+            break
+        text = cleaned
     # 그 외 [브랜드/본사] 표기는 내용은 남기고 대괄호 문자만 제거합니다.
     text = text.replace("[", "").replace("]", "")
     text = re.sub(r"\s{2,}", " ", text).strip()
