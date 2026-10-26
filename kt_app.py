@@ -3529,8 +3529,10 @@ def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _send_run_key_series(df: pd.DataFrame) -> pd.Series:
-    """모든 메뉴에서 공통으로 사용하는 실제 발송일·시간대 회차 키입니다.
+    """모든 메뉴에서 공통으로 사용하는 실제 발송 회차 키입니다.
 
+    같은 날짜·시간대라도 MMS와 RCS는 서로 다른 발송으로 계산합니다.
+    기준: 날짜 + 시간대 + 발송유형(MMS/RCS)
     날짜 또는 시간대가 없는 예외 행은 서로 합치지 않아 임의 과소 집계를 막습니다.
     """
     if df is None or df.empty:
@@ -3546,16 +3548,21 @@ def _send_run_key_series(df: pd.DataFrame) -> pd.Series:
         df[time_col].map(_v4482_time_key)
         if time_col else pd.Series("", index=df.index, dtype="object")
     )
+    channels = _weekly_send_type_series(df).reindex(df.index).fillna("MMS")
     valid = dates.notna() & times.ne("")
     keys = pd.Series(index=df.index, dtype="object")
-    keys.loc[valid] = dates.loc[valid].dt.strftime("%Y-%m-%d") + "|" + times.loc[valid]
+    keys.loc[valid] = (
+        dates.loc[valid].dt.strftime("%Y-%m-%d")
+        + "|" + times.loc[valid].astype(str)
+        + "|" + channels.loc[valid].astype(str)
+    )
     fallback_positions = pd.Series(range(len(df)), index=df.index).astype(str)
     keys.loc[~valid] = "ROW|" + fallback_positions.loc[~valid]
     return keys
 
 
 def _unique_send_count(df: pd.DataFrame) -> int:
-    """같은 실제 발송일·시간대를 1회로 계산합니다."""
+    """같은 날짜·시간대·발송유형을 1회로 계산합니다."""
     if df is None or df.empty:
         return 0
     return int(_send_run_key_series(df).nunique(dropna=True))
@@ -14901,6 +14908,42 @@ def _monthly_previous_period(year: int, month: int) -> tuple[int, int]:
     return int(previous.year), int(previous.month)
 
 
+def _monthly_clean_product_name(value) -> str:
+    """월간 리포트 표시용 상품명: [M] 제거, 나머지 대괄호 문자는 제거합니다."""
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    # [M]은 태그 내용까지 통째로 제거합니다.
+    text = re.sub(r"(?i)\[\s*M\s*\]\s*", "", text)
+    # 그 외 [브랜드/본사] 표기는 내용은 남기고 대괄호 문자만 제거합니다.
+    text = text.replace("[", "").replace("]", "")
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
+def _monthly_clean_product_names(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    if "상품명" in out.columns:
+        out["상품명"] = out["상품명"].map(_monthly_clean_product_name)
+    return out
+
+
+def _monthly_send_product_count(send_rows: pd.DataFrame, product_rows: pd.DataFrame | None = None) -> int:
+    """날짜·시간대·채널별 상품수 max를 1회 편성수로 보고 기간 합계를 반환합니다.
+
+    발송 데이터에 상품수 값이 없을 때만 상품 RAW 행 수를 보조값으로 사용합니다.
+    """
+    if send_rows is not None and not send_rows.empty:
+        graph_rows = _weekly_graph_aggregate(send_rows)
+        if graph_rows is not None and not graph_rows.empty and "상품수" in graph_rows.columns:
+            counts = pd.to_numeric(graph_rows["상품수"], errors="coerce").fillna(0)
+            if float(counts.sum()) > 0:
+                return int(round(float(counts.sum())))
+    return int(len(product_rows)) if product_rows is not None else 0
+
+
 def _monthly_summary_metrics(product_rows: pd.DataFrame, send_rows: pd.DataFrame) -> dict:
     send_col = first_col(send_rows, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(send_rows, ["클릭 수(uniq)", "클릭 수"])
@@ -14916,7 +14959,7 @@ def _monthly_summary_metrics(product_rows: pd.DataFrame, send_rows: pd.DataFrame
     amount = _sum(send_rows, "주문금액")
     return {
         "발송횟수": _weekly_unique_send_count(send_rows),
-        "상품수": int(len(product_rows)) if product_rows is not None else 0,
+        "상품수": _monthly_send_product_count(send_rows, product_rows),
         "발송건수": sent,
         "클릭수": clicks,
         "주문건수": orders,
@@ -15515,10 +15558,10 @@ def _build_monthly_performance_bundle(
     year: int,
     month: int,
 ) -> dict:
-    product_rows = _monthly_period_rows(products_df, year, month)
+    product_rows = _monthly_clean_product_names(_monthly_period_rows(products_df, year, month))
     send_rows = _monthly_period_rows(sends_df, year, month)
     prev_year, prev_month = _monthly_previous_period(year, month)
-    prev_products = _monthly_period_rows(products_df, prev_year, prev_month)
+    prev_products = _monthly_clean_product_names(_monthly_period_rows(products_df, prev_year, prev_month))
     prev_sends = _monthly_period_rows(sends_df, prev_year, prev_month)
     trend = _monthly_weekly_trend(send_rows)
     amount_chart, rate_chart = _monthly_trend_charts(trend)
@@ -15561,9 +15604,9 @@ def _build_monthly_performance_bundle_range(
     end_ts = pd.Timestamp(end_date).normalize()
     prev_start, prev_end = _monthly_previous_aligned_range(start_ts, end_ts)
 
-    product_rows = _date_range_rows(products_df, start_ts, end_ts)
+    product_rows = _monthly_clean_product_names(_date_range_rows(products_df, start_ts, end_ts))
     send_rows = _date_range_rows(sends_df, start_ts, end_ts)
-    prev_products = _date_range_rows(products_df, prev_start, prev_end)
+    prev_products = _monthly_clean_product_names(_date_range_rows(products_df, prev_start, prev_end))
     prev_sends = _date_range_rows(sends_df, prev_start, prev_end)
 
     trend = _monthly_weekly_trend(send_rows)
@@ -17806,6 +17849,17 @@ elif menu in {"월간실적", "월간실적 V2"}:
         ),
         max_entries=72,
     )
+    # MMS 실적 비중은 발송유형 선택값과 무관하게 전체 발송 데이터에서 계산합니다.
+    # 예: 화면을 RCS로 필터링해도 MMS 실적 비중은 선택 기간 전체의 실제 MMS 주문금액 기준입니다.
+    _monthly_all_share_rows = _date_range_rows(sends, _monthly_period_start, _monthly_period_end)
+    _monthly_all_prev_share_rows = _date_range_rows(sends, _monthly_prev_start, _monthly_prev_end)
+    monthly_bundle["mms"] = _monthly_mms_share_stats_range(
+        _monthly_all_share_rows, overall_performance, _monthly_period_start, _monthly_period_end
+    )
+    monthly_bundle["previous_mms"] = _monthly_mms_share_stats_range(
+        _monthly_all_prev_share_rows, overall_performance, _monthly_prev_start, _monthly_prev_end
+    )
+
     mp = monthly_bundle["products"].copy()
     ms = monthly_bundle["sends"].copy()
     metrics = monthly_bundle["metrics"]
