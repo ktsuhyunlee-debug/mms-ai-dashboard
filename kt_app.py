@@ -67,7 +67,7 @@ import streamlit.components.v1 as components
 
 
 st.set_page_config(
-    page_title="MMS AI Dashboard · 월간실적",
+    page_title="쇼핑라운지 실적 리포트",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -15225,6 +15225,26 @@ def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
     return grouped[columns]
 
 
+def _monthly_hoverlabel_style() -> dict:
+    """월간 리포트 Plotly hover 공통 스타일: 검은 배경·흰 글씨·고정폭 글꼴."""
+    return dict(
+        bgcolor="#111827",
+        bordercolor="#111827",
+        font=dict(
+            color="#ffffff",
+            family='"Noto Sans Mono CJK KR", "D2Coding", "Consolas", "Menlo", monospace',
+            size=13,
+        ),
+        align="left",
+        namelength=-1,
+    )
+
+
+def _monthly_apply_hover_style(fig: go.Figure) -> go.Figure:
+    fig.update_layout(hoverlabel=_monthly_hoverlabel_style(), hovermode="closest")
+    return fig
+
+
 def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     labels = trend["주차"].tolist() if not trend.empty else []
 
@@ -15237,12 +15257,12 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
 
             amount_hover.append(
                 f'<b>{week_text} · {period_text}</b>'
-                f'<br>━━━━━━━━━━━━━━━━━━━━'
-                f'<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b>'
-                f'<br>발송 횟수&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):,}회'
-                f'<br>MMS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):,}회'
-                f'<br>RCS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):,}회'
-                f'<br>상품수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("상품수", 0) or 0):,}개'
+                f'<br>────────────────────────'
+                f'<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b>'
+                f'<br>발송 횟수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):,}회'
+                f'<br>MMS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):,}회'
+                f'<br>RCS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):,}회'
+                f'<br>상품수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("상품수", 0) or 0):,}개'
             )
 
             mms_ctr = row.get("MMS평균CTR")
@@ -15253,7 +15273,7 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
 
             rate_hover.append(
                 f'<b>{week_text} · {period_text}</b>'
-                f'<br>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+                f'<br>────────────────────────────────────'
                 f'<br><b>구분&nbsp;&nbsp;발송횟수&nbsp;&nbsp;&nbsp;발송건수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;&nbsp;CTR</b>'
                 f'<br>MMS&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
                 f'{int(round(float(row.get("MMS발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
@@ -15261,18 +15281,13 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
                 f'<br>RCS&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
                 f'{int(round(float(row.get("RCS발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
                 f'{int(round(float(row.get("RCS클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{rcs_ctr_text}'
-                f'<br>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+                f'<br>────────────────────────────────────'
                 f'<br><b>전체&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
                 f'{int(round(float(row.get("전체발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
                 f'{int(round(float(row.get("전체클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{total_ctr*100:.1f}%</b>'
             )
 
-    dark_hover = dict(
-        bgcolor="#111111",
-        bordercolor="#111111",
-        font=dict(color="#ffffff", family="Consolas, Menlo, monospace", size=12),
-        align="left",
-    )
+    dark_hover = _monthly_hoverlabel_style()
 
     amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
     amount_fig.add_trace(go.Bar(
@@ -15281,14 +15296,14 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
         cliponaxis=False,
         customdata=amount_hover,
-        hovertemplate="%{customdata}<br>━━━━━━━━━━━━━━━━━━━━<br><b>주문금액&nbsp;&nbsp;%{y:.1f}백만원</b><extra></extra>",
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>주문금액&nbsp;&nbsp;&nbsp;%{y:.1f}백만원</b><extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
         mode="lines+markers+text", line=dict(color="#27ae60", width=3),
         text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
         customdata=amount_hover,
-        hovertemplate="%{customdata}<br>━━━━━━━━━━━━━━━━━━━━<br><b>SPM&nbsp;&nbsp;%{y:.1f}</b><extra></extra>",
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>SPM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{y:.1f}</b><extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
     amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
@@ -15312,7 +15327,7 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
         customdata=rate_hover,
-        hovertemplate="%{customdata}<br>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br><b>전체 CVR&nbsp;&nbsp;%{y:.1f}%</b><extra></extra>",
+        hovertemplate="%{customdata}<br>────────────────────────────────────<br><b>전체 CVR&nbsp;&nbsp;%{y:.1f}%</b><extra></extra>",
     ))
     rate_fig.update_layout(
         title=dict(text="주차별 CTR · CVR", x=.5, xanchor="center"), height=410,
@@ -15414,7 +15429,7 @@ def _monthly_daily_trend(
         for detail_date, detail_group in graph_rows.groupby("_monthly_date", sort=False):
             lines = [
                 "<b>시간대별 CTR 상세</b>",
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "────────────────────────────────────",
                 "<b>시간&nbsp;&nbsp;&nbsp;&nbsp;유형&nbsp;&nbsp;&nbsp;발송건수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;&nbsp;CTR</b>",
             ]
             for _, detail_row in detail_group.iterrows():
@@ -15434,20 +15449,28 @@ def _monthly_daily_trend(
 
 def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     labels = trend["일자"].tolist() if not trend.empty else []
+    product_details = trend.get(
+        "상품상세", pd.Series("상품별 데이터 없음", index=trend.index)
+    ).tolist()
+    amount_custom = [
+        f"<b>{_html.escape(str(day))}</b><br>────────────────────────<br>"
+        f"<b>상품별 주문금액</b><br>{details}"
+        for day, details in zip(labels, product_details)
+    ]
+
     amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
         text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
-        cliponaxis=False,
-        customdata=trend.get("상품상세", pd.Series("상품별 데이터 없음", index=trend.index)).tolist(),
-        hovertemplate="%{x}<br>주문금액 %{y:.1f}백만원<br><br><b>상품별 주문금액</b><br>%{customdata}<extra></extra>",
+        cliponaxis=False, customdata=amount_custom,
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>주문금액&nbsp;&nbsp;&nbsp;%{y:.1f}백만원</b><extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
         mode="lines+markers+text", line=dict(color="#27ae60", width=3),
         text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
-        hovertemplate="%{x}<br>SPM %{y:.1f}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>────────────────────────<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b><br>SPM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{y:.1f}<extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
     amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
@@ -15456,6 +15479,7 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         margin=dict(l=55, r=60, t=60, b=90), plot_bgcolor="#fff",
         xaxis=dict(tickangle=-45),
         legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+        hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
     )
 
     rate_fig = go.Figure()
@@ -15466,13 +15490,13 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         customdata=trend.get(
             "시간대상세", pd.Series("시간대별 데이터 없음", index=trend.index)
         ).tolist(),
-        hovertemplate="<b>%{x}</b><br>CTR %{y:.1f}%<br><br>%{customdata}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>────────────────────────────────────<br><b>전체 CTR&nbsp;&nbsp;%{y:.1f}%</b><br><br>%{customdata}<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
         mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
-        hovertemplate="%{x}<br>CVR %{y:.1f}%<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>────────────────────────<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b><br>CVR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{y:.1f}%<extra></extra>",
     ))
     rate_fig.update_layout(
         title=dict(text="일자별 CTR · CVR", x=.5, xanchor="center"), height=410,
@@ -15480,12 +15504,7 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         xaxis=dict(tickangle=-45),
         yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
         legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
-        hoverlabel=dict(
-            bgcolor="#111111",
-            bordercolor="#111111",
-            font=dict(color="#ffffff", family="Consolas, Menlo, monospace", size=12),
-            align="left",
-        ),
+        hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
     )
     return amount_fig, rate_fig
 
@@ -17649,7 +17668,7 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 elif menu in {"월간실적", "월간실적 V2"}:
     monthly_v2 = menu == "월간실적 V2"
-    _monthly_title = "📅 월간실적"
+    _monthly_title = "📊 쇼핑라운지 실적 리포트"
     st.markdown(f'<div class="section-title">{_monthly_title}</div>', unsafe_allow_html=True)
 
     _monthly_dates = pd.concat([
@@ -18093,18 +18112,37 @@ elif menu in {"월간실적", "월간실적 V2"}:
     else:
         category_chart_col, category_table_col = st.columns([1.05, 1])
         with category_chart_col:
+            category_custom = [
+                [
+                    int(row.get("상품수", 0) or 0),
+                    float(row.get("상품 비중", 0) or 0) * 100,
+                    float(row.get("주문 비중", 0) or 0) * 100,
+                    float(row.get("평균금액", 0) or 0),
+                ]
+                for _, row in categories.iterrows()
+            ]
             category_chart = go.Figure(go.Bar(
                 x=categories["주문금액"] / 1_000_000,
                 y=categories["소카테고리"], orientation="h",
                 marker_color="#5b8def",
                 text=[f"{value/1_000_000:.1f}백만원" for value in categories["주문금액"]],
-                textposition="outside",
+                textposition="outside", customdata=category_custom,
+                hovertemplate=(
+                    "<b>%{y}</b><br>────────────────────────"
+                    "<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b>"
+                    "<br>주문금액&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{x:.1f}백만원"
+                    "<br>상품수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[0]:,.0f}건"
+                    "<br>상품 비중&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[1]:.1f}%"
+                    "<br>주문 비중&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[2]:.1f}%"
+                    "<br>평균 주문금액&nbsp;%{customdata[3]:,.0f}원<extra></extra>"
+                ),
             ))
             category_chart.update_layout(
                 title=dict(text="소카테고리 주문금액 TOP10", x=.5, xanchor="center"),
                 height=430, margin=dict(l=30, r=80, t=55, b=45), plot_bgcolor="#fff",
                 xaxis=dict(title="주문금액(백만원)", rangemode="tozero", gridcolor="#e5e7eb"),
                 yaxis=dict(autorange="reversed"), showlegend=False,
+                hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
             )
             st.plotly_chart(_weekly_black_plotly_text(category_chart), use_container_width=True, config={"displayModeBar": False})
         with category_table_col:
