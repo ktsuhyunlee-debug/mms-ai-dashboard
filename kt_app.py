@@ -67,10 +67,10 @@ import streamlit.components.v1 as components
 
 
 st.set_page_config(
-    page_title="MMS AI Dashboard · 월간실적 V2",
+    page_title="MMS AI Dashboard · 월간실적",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown(
@@ -112,6 +112,14 @@ html, body, [class*="css"] {
 
 [data-testid="stSidebar"] .block-container {
     padding-top: 1.5rem;
+}
+
+/* 월간실적 전용 앱: 메뉴가 하나뿐이므로 사이드바와 좌상단 열기/닫기 토글을 숨깁니다. */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"] {
+    display: none !important;
 }
 
 .sidebar-navigation-title {
@@ -10982,7 +10990,7 @@ def render_monthly_send_carousel(
             if monthly_v2:
                 display_product_view = display_product_view.drop(
                     columns=[
-                        c for c in ["최저가 여부", "재편성"]
+                        c for c in ["MD", "최저가 여부", "재편성"]
                         if c in display_product_view.columns
                     ]
                 )
@@ -15556,10 +15564,10 @@ menu = "월간실적 V2"
 st.session_state.dashboard_active_menu = menu
 
 st.sidebar.markdown(
-    '<div class="sidebar-navigation-title">월간실적 V2</div>',
+    '<div class="sidebar-navigation-title">월간실적</div>',
     unsafe_allow_html=True,
 )
-st.sidebar.caption("월간실적 V2 전용 대시보드")
+st.sidebar.caption("월간실적 전용 대시보드")
 
 # 전용 앱 URL은 항상 월간실적 V2 상태를 유지합니다.
 try:
@@ -17440,7 +17448,7 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 elif menu in {"월간실적", "월간실적 V2"}:
     monthly_v2 = menu == "월간실적 V2"
-    _monthly_title = "📅 월간실적 V2" if monthly_v2 else "📅 월간실적"
+    _monthly_title = "📅 월간실적"
     st.markdown(f'<div class="section-title">{_monthly_title}</div>', unsafe_allow_html=True)
 
     _monthly_dates = pd.concat([
