@@ -14912,17 +14912,35 @@ def _monthly_previous_period(year: int, month: int) -> tuple[int, int]:
 
 
 def _monthly_clean_product_name(value) -> str:
-    """월간 리포트 표시용 상품명: 맨 앞 [M]/M 태그 제거, 나머지 대괄호 문자는 제거합니다."""
+    """월간 리포트 표시용 상품명에서 앞쪽 운영용 M 태그와 대괄호 문자를 정리합니다.
+
+    - [M] 햇반 / M 햇반 / Ｍ 햇반 / M햇반 -> 햇반
+    - [AHC/본사] 마스크 -> AHC/본사 마스크
+    - MCM/MLB처럼 실제 영문 상품·브랜드명은 유지
+    """
     if pd.isna(value):
         return ""
-    text = str(value).strip()
-    # 상품명 맨 앞의 운영 태그 [M] 또는 단독 M을 반복 제거합니다.
-    # 예: "[M] 종가 김치", "M 종가 김치", "[M] M 종가 김치" -> "종가 김치"
+    text = str(value)
+    # 복사/RAW에서 섞일 수 있는 zero-width 문자를 먼저 제거합니다.
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text).strip()
+
+    # 상품명 맨 앞의 운영 태그를 반복 제거합니다.
+    # 괄호형 [M]/[Ｍ]은 항상 제거하고, 단독 M/Ｍ은 공백·구분자·한글 앞에서만 제거합니다.
+    # 따라서 MCM, MLB 같은 실제 영문 브랜드명은 유지됩니다.
     while True:
-        cleaned = re.sub(r"(?i)^\s*(?:\[\s*M\s*\]|M(?=\s|[-_:·|/]))\s*[-_:·|/]*\s*", "", text, count=1)
+        cleaned = re.sub(
+            r"(?i)^\s*(?:"
+            r"\[\s*[MＭ]\s*\]"
+            r"|[MＭ](?=(?:\s|[-_:·|/]|[가-힣]))"
+            r")\s*[-_:·|/]*\s*",
+            "",
+            text,
+            count=1,
+        )
         if cleaned == text:
             break
         text = cleaned
+
     # 그 외 [브랜드/본사] 표기는 내용은 남기고 대괄호 문자만 제거합니다.
     text = text.replace("[", "").replace("]", "")
     text = re.sub(r"\s{2,}", " ", text).strip()
@@ -15110,28 +15128,74 @@ def _monthly_operation_performance(product_rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def _monthly_top_products(product_rows: pd.DataFrame, top_n: int | None = 10) -> pd.DataFrame:
+    """TOP 상품을 동일 알파코드+쇼라코드 기준으로 한 상품으로 합산합니다.
+
+    같은 코드 조합의 상품명이 시점별로 조금 다르거나 신규/재편성 구분이 달라도
+    TOP 상품 표에서는 한 행으로 합치고 주문금액과 실제 발송횟수를 누적합니다.
+    코드가 모두 없는 행만 정리된 상품명을 대체 식별키로 사용합니다.
+    """
     columns = ["구분", "알파코드", "쇼라코드", "상품명", "발송횟수", "주문금액", "평균금액"]
     if product_rows is None or product_rows.empty or "상품명" not in product_rows.columns:
         return pd.DataFrame(columns=columns)
+
     work = product_rows.copy()
+    work["상품명"] = work["상품명"].map(_monthly_clean_product_name)
     labels = _weekly_normalize_operation_labels(work)
     work["구분"] = labels.reindex(work.index).fillna("") if labels is not None else ""
     work["구분"] = work["구분"].map(
         lambda value: "재편성" if "재편성" in str(value)
         else ("유사신규" if "유사신규" in str(value) else ("신규" if "신규" in str(value) else "미분류"))
     )
+
     for col in ["알파코드", "쇼라코드"]:
         if col not in work.columns:
             work[col] = ""
+        work[col] = work[col].map(clean_identifier_value)
+
     work["주문금액"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
     work["_send_run_key"] = _send_run_key_series(work)
-    group_cols = ["구분", "알파코드", "쇼라코드", "상품명"]
-    grouped = work.groupby(group_cols, as_index=False, dropna=False).agg(
-        발송횟수=("_send_run_key", "nunique"),
-        주문금액=("주문금액", "sum"),
+    work["_date_sort"] = pd.to_datetime(work.get("_date"), errors="coerce")
+
+    # 같은 알파+쇼라 코드 조합은 무조건 하나의 상품으로 봅니다.
+    # 코드가 둘 다 없을 때만 상품명을 대체키로 사용해 서로 다른 무코드 상품이 합쳐지는 것을 막습니다.
+    code_present = work["알파코드"].ne("") | work["쇼라코드"].ne("")
+    work["_product_group_key"] = (
+        "CODE|" + work["알파코드"].astype(str) + "|" + work["쇼라코드"].astype(str)
     )
-    grouped["평균금액"] = grouped["주문금액"].div(grouped["발송횟수"].replace(0, pd.NA)).fillna(0)
-    grouped = grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False])
+    work.loc[~code_present, "_product_group_key"] = (
+        "NAME|" + work.loc[~code_present, "상품명"].fillna("").astype(str).str.strip()
+    )
+
+    rows = []
+    for _, group in work.groupby("_product_group_key", sort=False, dropna=False):
+        ordered = group.sort_values(["_date_sort"], kind="stable", na_position="first")
+        latest = ordered.iloc[-1]
+
+        # 최신 비어있지 않은 상품명/구분을 대표값으로 사용합니다.
+        nonblank_names = ordered["상품명"].fillna("").astype(str).str.strip()
+        nonblank_names = nonblank_names[nonblank_names.ne("")]
+        product_name = nonblank_names.iloc[-1] if not nonblank_names.empty else ""
+
+        nonblank_types = ordered["구분"].fillna("").astype(str).str.strip()
+        nonblank_types = nonblank_types[nonblank_types.ne("")]
+        operation_type = nonblank_types.iloc[-1] if not nonblank_types.empty else "미분류"
+
+        send_count = int(group["_send_run_key"].nunique(dropna=True))
+        amount = float(pd.to_numeric(group["주문금액"], errors="coerce").fillna(0).sum())
+        rows.append({
+            "구분": operation_type,
+            "알파코드": clean_identifier_value(latest.get("알파코드", "")),
+            "쇼라코드": clean_identifier_value(latest.get("쇼라코드", "")),
+            "상품명": _monthly_clean_product_name(product_name),
+            "발송횟수": send_count,
+            "주문금액": amount,
+            "평균금액": (amount / send_count) if send_count else 0.0,
+        })
+
+    grouped = pd.DataFrame(rows, columns=columns)
+    if grouped.empty:
+        return grouped
+    grouped = grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False], kind="stable")
     if top_n is not None:
         grouped = grouped.head(int(top_n))
     return grouped[columns]
