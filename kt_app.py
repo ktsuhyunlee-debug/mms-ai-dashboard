@@ -3427,6 +3427,11 @@ def _weekly_send_type_series(df: pd.DataFrame) -> pd.Series:
     """주간 그래프에서 MMS/RCS 색상을 구분하기 위한 발송유형을 반환합니다."""
     if df is None or df.empty:
         return pd.Series(dtype="object")
+    # 월간 상세에서 RAW의 `유형`과 발송 정보로 확인한 확정 채널을 우선합니다.
+    if "_monthly_send_channel" in df.columns:
+        confirmed = df["_monthly_send_channel"].fillna("").astype(str).str.upper().str.strip()
+        if confirmed.isin(["MMS", "RCS"]).all():
+            return confirmed
 
     def _normalize(value) -> str:
         raw = str(value or "").strip()
@@ -10896,12 +10901,14 @@ def render_monthly_send_carousel(
     selected_year: int,
     selected_month: int,
     monthly_v2: bool = False,
+    send_type: str = "전체",
 ) -> None:
     """월간실적에서 선택 기간의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
     items = _build_weekly_send_carousel_items(pw, sw, messages_df)
-    st.markdown('<div class="subsection-title">MMS 발송 소재 · 문구</div>', unsafe_allow_html=True)
+    heading = f"{send_type} 발송 소재 · 문구" if send_type in {"MMS", "RCS"} else "발송 소재 · 문구"
+    st.markdown(f'<div class="subsection-title">{heading}</div>', unsafe_allow_html=True)
     if not items:
-        st.info("선택 기간의 MMS 발송 소재가 없습니다.")
+        st.info(f"선택 기간의 {send_type} 발송 소재가 없습니다.")
         return
 
     state_key = f"monthly_send_carousel_index_{selected_year}_{selected_month}"
@@ -10977,12 +10984,36 @@ def render_monthly_send_carousel(
         )
 
     with message_col:
-        st.markdown("**MMS 문구**")
+        st.markdown("**RCS 문구**" if send_type == "RCS" else "**MMS 문구**")
         message_text = str(item["message_text"] or "").lstrip()
+        if send_type == "RCS":
+            # 문구 시트에는 MMS 문구만 있는 경우가 있습니다. RCS 원문은
+            # RCS 발송 RAW에 명시된 필드에서만 사용해 서로 잘못 연결하지 않습니다.
+            message_text = ""
+            for _col in ["RCS문구", "RCS 문구", "RCS본문", "RCS 본문", "메시지본문", "본문", "발송문구", "문구", "MMS문구", "MMS 문구"]:
+                _value = item["send_row"].get(_col, "")
+                if pd.notna(_value) and str(_value).strip():
+                    message_text = str(_value).strip()
+                    break
+            if not message_text and messages_df is not None and not messages_df.empty:
+                # 문구 RAW가 실제 RCS 소재명과 일치할 때만 문구를 연결합니다.
+                # 시간만 같다는 이유로 다른 MMS 문구를 가져오지 않습니다.
+                _asset_material = str(item.get("material", "") or "").strip()
+                _asset_date = date_text
+                if _asset_material and {"_msg_material", "_msg_date", "_msg_time", "MMS문구"}.issubset(messages_df.columns):
+                    _matched_msg = messages_df[
+                        messages_df["_msg_date"].astype(str).eq(_asset_date)
+                        & messages_df["_msg_time"].map(_v4482_time_key).eq(item.get("time", ""))
+                        & messages_df["_msg_material"].fillna("").astype(str).str.strip().eq(_asset_material)
+                    ]
+                    for _value in _matched_msg["MMS문구"].tolist():
+                        _text = clean_mms_message(_value)
+                        if _text:
+                            message_text = _text
         if message_text:
             message_body = _html.escape(message_text).replace("\n", "<br>")
         else:
-            message_body = "연결된 MMS 문구가 없습니다."
+            message_body = "연결된 RCS 문구가 없습니다." if send_type == "RCS" else "연결된 MMS 문구가 없습니다."
         st.markdown(
             '<div class="asset-card asset-message-card weekly-message-card" '
             'style="min-height:390px; max-height:390px; overflow-y:auto;">'
@@ -14881,14 +14912,128 @@ def _monthly_previous_aligned_range(start_date, end_date) -> tuple[pd.Timestamp,
     )
 
 
-def _monthly_filter_send_type(df: pd.DataFrame, send_type: str) -> pd.DataFrame:
-    """월간실적의 상품·발송 데이터를 동일한 MMS/RCS 기준으로 필터링합니다."""
+def _monthly_channel_hints(df: pd.DataFrame) -> pd.Series:
+    """월간실적용 채널 힌트: 상품 RAW의 단순 `유형` 열도 확인합니다.
+
+    확인 가능한 RCS/MMS 표기가 없는 데이터는 아직 MMS로 결정하지 않고
+    발송 RAW와 연결할 수 있도록 빈 문자열로 남깁니다.
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype="object", index=df.index if isinstance(df, pd.DataFrame) else None)
+
+    def _channel(value) -> str:
+        if pd.isna(value):
+            return ""
+        raw = str(value).strip()
+        upper = raw.upper()
+        is_rcs = "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw
+        is_mms = "MMS" in upper or "멀티미디어" in raw
+        if is_rcs and is_mms:
+            return ""  # 유형 안내문처럼 두 채널이 함께 표기된 경우는 판단하지 않습니다.
+        return "RCS" if is_rcs else ("MMS" if is_mms else "")
+
+    detected = pd.Series("", index=df.index, dtype="object")
+    # 상품 RAW는 `유형`으로 발송 채널을 표시하기도 합니다.
+    explicit_cols = [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+        "발송구분", "발송 구분", "발송형태", "발송 형태", "유형",
+    ]
+    for col in explicit_cols:
+        if col in df.columns:
+            hint = df[col].map(_channel)
+            mask = detected.eq("") & hint.ne("")
+            detected.loc[mask] = hint.loc[mask]
+
+    # 소재/캠페인명에 RCS 또는 캐러셀 표기만 있는 경우도 잡습니다.
+    for col in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]:
+        if col in df.columns:
+            hint = df[col].map(_channel)
+            mask = detected.eq("") & hint.ne("")
+            detected.loc[mask] = hint.loc[mask]
+    return detected
+
+
+def _monthly_product_channels(product_rows: pd.DataFrame, send_rows: pd.DataFrame | None) -> pd.Series:
+    """상품 자체 유형을 우선하고, 미표기 행은 실제 발송 RAW로 채널을 복원합니다.
+
+    조인 우선순위: 날짜·시간·소재 → 날짜·시간·캠페인 → 날짜·시간.
+    MMS/RCS가 섞인 회차는 유일하게 일치할 때만 분류해 오분류를 막습니다.
+    """
+    assigned = _monthly_channel_hints(product_rows)
+    if send_rows is None or send_rows.empty or product_rows.empty:
+        return assigned.replace("", "MMS")
+
+    reference = send_rows.copy()
+    reference["_monthly_channel"] = _monthly_channel_hints(reference)
+    reference.loc[reference["_monthly_channel"].eq(""), "_monthly_channel"] = (
+        _weekly_send_type_series(reference).loc[reference["_monthly_channel"].eq("")]
+    )
+    reference["_monthly_date_key"] = pd.to_datetime(reference.get("_date"), errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    reference["_monthly_time_key"] = (
+        reference["시간대"].map(_v4482_time_key) if "시간대" in reference.columns
+        else pd.Series("", index=reference.index)
+    )
+    products_key = product_rows.copy()
+    products_key["_monthly_date_key"] = pd.to_datetime(products_key.get("_date"), errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    products_key["_monthly_time_key"] = (
+        products_key["시간대"].map(_v4482_time_key) if "시간대" in products_key.columns
+        else pd.Series("", index=products_key.index)
+    )
+
+    def _apply_unique_mapping(keys: list[str], raw_col: str | None = None, ref_col: str | None = None):
+        nonlocal assigned
+        src = reference.copy()
+        dest = products_key.copy()
+        if raw_col and ref_col:
+            src["_monthly_extra_key"] = src[ref_col].fillna("").astype(str).str.strip().str.casefold()
+            dest["_monthly_extra_key"] = dest[raw_col].fillna("").astype(str).str.strip().str.casefold()
+            keys = keys + ["_monthly_extra_key"]
+        src = src[src["_monthly_date_key"].ne("") & src["_monthly_time_key"].ne("")]
+        dest_valid = dest["_monthly_date_key"].ne("") & dest["_monthly_time_key"].ne("")
+        if "_monthly_extra_key" in keys:
+            src = src[src["_monthly_extra_key"].ne("")]
+            dest_valid &= dest["_monthly_extra_key"].ne("")
+        if src.empty:
+            return
+        group = src.groupby(keys, dropna=False)["_monthly_channel"]
+        single = group.agg(lambda v: v.iloc[0] if v.nunique() == 1 else "")
+        lookups = pd.MultiIndex.from_frame(dest[keys])
+        found = pd.Series(single.reindex(lookups).to_numpy(), index=dest.index).fillna("")
+        mask = assigned.eq("") & dest_valid & found.ne("")
+        assigned.loc[mask] = found.loc[mask]
+
+    keys = ["_monthly_date_key", "_monthly_time_key"]
+    for name_group in (["소재", "소재명"], ["캠페인명", "캠페인"]):
+        pcol = next((x for x in name_group if x in products_key.columns), None)
+        scol = next((x for x in name_group if x in reference.columns), None)
+        if pcol and scol:
+            _apply_unique_mapping(keys, pcol, scol)
+    _apply_unique_mapping(keys)
+    # 양 채널이 같은 날짜·시간에 있고 상품 자체에도 구분 정보가 없으면
+    # RCS 주문금액을 임의로 생성하지 않도록 기존 MMS 기본값을 유지합니다.
+    return assigned.replace("", "MMS")
+
+
+def _monthly_filter_send_type(
+    df: pd.DataFrame, send_type: str, reference_sends: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """월간실적 상품/소재 발송유형 필터: 상품에는 발송 RAW를 보조로 활용합니다."""
     if df is None or df.empty:
         return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
+    if reference_sends is not None:
+        channels = _monthly_product_channels(df, reference_sends)
+    else:
+        channels = _monthly_channel_hints(df).replace("", "MMS")
     if send_type not in {"MMS", "RCS"}:
-        return df.copy()
-    channels = _weekly_send_type_series(df).reindex(df.index).fillna("MMS")
-    return df.loc[channels.eq(send_type)].copy()
+        result = df.copy()
+    else:
+        result = df.loc[channels.eq(send_type)].copy()
+    # 발송 RAW를 필터링한 경우 차트/hover의 분류도 같은 판별값을 사용합니다.
+    if reference_sends is None:
+        result["_monthly_send_channel"] = channels.reindex(result.index)
+    return result
 
 
 def _monthly_week_start_series(df: pd.DataFrame) -> pd.Series:
@@ -15067,7 +15212,7 @@ def _monthly_mms_share_stats_range(
     if send_rows is None or send_rows.empty:
         return result
     channel = "RCS" if str(channel).upper() == "RCS" else "MMS"
-    send_types = _weekly_send_type_series(send_rows)
+    send_types = _monthly_channel_hints(send_rows).replace("", "MMS")
     amounts = pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0)
     result["amount"] = float(amounts.loc[send_types.eq(channel)].sum())
 
@@ -17967,7 +18112,8 @@ elif menu in {"월간실적", "월간실적 V2"}:
     except Exception:
         pass
 
-    _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
+    # 상품 RAW는 채널 유형이 비어 있는 경우가 있어 발송 RAW와 날짜·시간·소재로 연결합니다.
+    _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type, sends)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
         "monthly_performance_bundle_v8_period",
@@ -17999,6 +18145,12 @@ elif menu in {"월간실적", "월간실적 V2"}:
 
     mp = monthly_bundle["products"].copy()
     ms = monthly_bundle["sends"].copy()
+    if monthly_send_type == "RCS" and not ms.empty and mp.empty:
+        st.warning(
+            "RCS 발송 실적은 확인되지만 상품 시트에서 RCS로 식별 가능한 상품 행이 없습니다. "
+            "상품 RAW의 '유형/발송유형'이나 소재 시트와 연결할 수 있는 발송일·시간대를 확인해주세요. "
+            "상품·카테고리 데이터를 임의로 MMS에서 가져오지는 않습니다."
+        )
     metrics = monthly_bundle["metrics"]
     prev_metrics = monthly_bundle["previous_metrics"]
     has_previous = not monthly_bundle["previous_sends"].empty or not monthly_bundle["previous_products"].empty
@@ -18224,7 +18376,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
     # 주간실적과 동일한 발송 소재·문구·상품 실적 캐러셀을 선택 월 전체 발송 기준으로 표시합니다.
     render_monthly_send_carousel(
         mp, ms, messages, int(monthly_year), f"{monthly_month}_{_monthly_period_token}",
-        monthly_v2=monthly_v2,
+        monthly_v2=monthly_v2, send_type=monthly_send_type,
     )
 
     st.markdown('<div class="subsection-title">타겟별 성과</div>', unsafe_allow_html=True)
