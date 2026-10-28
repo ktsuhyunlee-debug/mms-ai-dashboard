@@ -10878,12 +10878,14 @@ def render_monthly_send_carousel(
     selected_year: int,
     selected_month: int,
     monthly_v2: bool = False,
+    send_type: str = "전체",
 ) -> None:
     """월간실적에서 선택 기간의 발송별 이미지·문구·상품표를 주간실적과 동일한 UI로 표시합니다."""
     items = _build_weekly_send_carousel_items(pw, sw, messages_df)
-    st.markdown('<div class="subsection-title">MMS 발송 소재 · 문구</div>', unsafe_allow_html=True)
+    heading = f"{send_type} 발송 소재 · 문구" if send_type in {"MMS", "RCS"} else "발송 소재 · 문구"
+    st.markdown(f'<div class="subsection-title">{heading}</div>', unsafe_allow_html=True)
     if not items:
-        st.info("선택 기간의 MMS 발송 소재가 없습니다.")
+        st.info(f"선택 기간의 {send_type} 발송 소재가 없습니다.")
         return
 
     state_key = f"monthly_send_carousel_index_{selected_year}_{selected_month}"
@@ -10959,12 +10961,36 @@ def render_monthly_send_carousel(
         )
 
     with message_col:
-        st.markdown("**MMS 문구**")
+        st.markdown("**RCS 문구**" if send_type == "RCS" else "**MMS 문구**")
         message_text = str(item["message_text"] or "").lstrip()
+        if send_type == "RCS":
+            # 문구 시트에는 MMS 문구만 있는 경우가 있습니다. RCS 원문은
+            # RCS 발송 RAW에 명시된 필드에서만 사용해 서로 잘못 연결하지 않습니다.
+            message_text = ""
+            for _col in ["RCS문구", "RCS 문구", "RCS본문", "RCS 본문", "메시지본문", "본문", "발송문구", "문구", "MMS문구", "MMS 문구"]:
+                _value = item["send_row"].get(_col, "")
+                if pd.notna(_value) and str(_value).strip():
+                    message_text = str(_value).strip()
+                    break
+            if not message_text and messages_df is not None and not messages_df.empty:
+                # 문구 RAW가 실제 RCS 소재명과 일치할 때만 문구를 연결합니다.
+                # 시간만 같다는 이유로 다른 MMS 문구를 가져오지 않습니다.
+                _asset_material = str(item.get("material", "") or "").strip()
+                _asset_date = date_text
+                if _asset_material and {"_msg_material", "_msg_date", "_msg_time", "MMS문구"}.issubset(messages_df.columns):
+                    _matched_msg = messages_df[
+                        messages_df["_msg_date"].astype(str).eq(_asset_date)
+                        & messages_df["_msg_time"].map(_v4482_time_key).eq(item.get("time", ""))
+                        & messages_df["_msg_material"].fillna("").astype(str).str.strip().eq(_asset_material)
+                    ]
+                    for _value in _matched_msg["MMS문구"].tolist():
+                        _text = clean_mms_message(_value)
+                        if _text:
+                            message_text = _text
         if message_text:
             message_body = _html.escape(message_text).replace("\n", "<br>")
         else:
-            message_body = "연결된 MMS 문구가 없습니다."
+            message_body = "연결된 RCS 문구가 없습니다." if send_type == "RCS" else "연결된 MMS 문구가 없습니다."
         st.markdown(
             '<div class="asset-card asset-message-card weekly-message-card" '
             'style="min-height:390px; max-height:390px; overflow-y:auto;">'
@@ -10982,7 +11008,7 @@ def render_monthly_send_carousel(
             if monthly_v2:
                 display_product_view = display_product_view.drop(
                     columns=[
-                        c for c in ["최저가 여부", "재편성"]
+                        c for c in ["MD", "최저가 여부", "재편성"]
                         if c in display_product_view.columns
                     ]
                 )
@@ -14831,6 +14857,332 @@ def _segv_insights(asis_summary: dict, tobe_summary: dict, compare_df: pd.DataFr
     return lines[:4]
 
 
+# ── 월간실적 전용 최신 로직 (기존 다른 메뉴 공통 함수 영향 없음) ──
+def _monthly_channel_hints(df: pd.DataFrame) -> pd.Series:
+    """월간실적용 채널 힌트: 상품 RAW의 단순 `유형` 열도 확인합니다.
+
+    확인 가능한 RCS/MMS 표기가 없는 데이터는 아직 MMS로 결정하지 않고
+    발송 RAW와 연결할 수 있도록 빈 문자열로 남깁니다.
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype="object", index=df.index if isinstance(df, pd.DataFrame) else None)
+
+    def _channel(value) -> str:
+        if pd.isna(value):
+            return ""
+        raw = str(value).strip()
+        upper = raw.upper()
+        is_rcs = "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw
+        is_mms = "MMS" in upper or "멀티미디어" in raw
+        if is_rcs and is_mms:
+            return ""  # 유형 안내문처럼 두 채널이 함께 표기된 경우는 판단하지 않습니다.
+        return "RCS" if is_rcs else ("MMS" if is_mms else "")
+
+    detected = pd.Series("", index=df.index, dtype="object")
+    # 상품 RAW는 `유형`으로 발송 채널을 표시하기도 합니다.
+    explicit_cols = [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+        "발송구분", "발송 구분", "발송형태", "발송 형태", "유형",
+    ]
+    for col in explicit_cols:
+        if col in df.columns:
+            hint = df[col].map(_channel)
+            mask = detected.eq("") & hint.ne("")
+            detected.loc[mask] = hint.loc[mask]
+
+    # 소재/캠페인명에 RCS 또는 캐러셀 표기만 있는 경우도 잡습니다.
+    for col in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]:
+        if col in df.columns:
+            hint = df[col].map(_channel)
+            mask = detected.eq("") & hint.ne("")
+            detected.loc[mask] = hint.loc[mask]
+    return detected
+
+def _monthly_product_channels(product_rows: pd.DataFrame, send_rows: pd.DataFrame | None) -> pd.Series:
+    """상품 자체 유형을 우선하고, 미표기 행은 실제 발송 RAW로 채널을 복원합니다.
+
+    조인 우선순위: 날짜·시간·소재 → 날짜·시간·캠페인 → 날짜·시간.
+    MMS/RCS가 섞인 회차는 유일하게 일치할 때만 분류해 오분류를 막습니다.
+    """
+    assigned = _monthly_channel_hints(product_rows)
+    if send_rows is None or send_rows.empty or product_rows.empty:
+        return assigned.replace("", "MMS")
+
+    reference = send_rows.copy()
+    reference["_monthly_channel"] = _monthly_channel_hints(reference)
+    reference.loc[reference["_monthly_channel"].eq(""), "_monthly_channel"] = (
+        _monthly_send_type_series(reference).loc[reference["_monthly_channel"].eq("")]
+    )
+    reference["_monthly_date_key"] = pd.to_datetime(reference.get("_date"), errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    reference["_monthly_time_key"] = (
+        reference["시간대"].map(_v4482_time_key) if "시간대" in reference.columns
+        else pd.Series("", index=reference.index)
+    )
+    products_key = product_rows.copy()
+    products_key["_monthly_date_key"] = pd.to_datetime(products_key.get("_date"), errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    products_key["_monthly_time_key"] = (
+        products_key["시간대"].map(_v4482_time_key) if "시간대" in products_key.columns
+        else pd.Series("", index=products_key.index)
+    )
+
+    def _apply_unique_mapping(keys: list[str], raw_col: str | None = None, ref_col: str | None = None):
+        nonlocal assigned
+        src = reference.copy()
+        dest = products_key.copy()
+        if raw_col and ref_col:
+            src["_monthly_extra_key"] = src[ref_col].fillna("").astype(str).str.strip().str.casefold()
+            dest["_monthly_extra_key"] = dest[raw_col].fillna("").astype(str).str.strip().str.casefold()
+            keys = keys + ["_monthly_extra_key"]
+        src = src[src["_monthly_date_key"].ne("") & src["_monthly_time_key"].ne("")]
+        dest_valid = dest["_monthly_date_key"].ne("") & dest["_monthly_time_key"].ne("")
+        if "_monthly_extra_key" in keys:
+            src = src[src["_monthly_extra_key"].ne("")]
+            dest_valid &= dest["_monthly_extra_key"].ne("")
+        if src.empty:
+            return
+        group = src.groupby(keys, dropna=False)["_monthly_channel"]
+        single = group.agg(lambda v: v.iloc[0] if v.nunique() == 1 else "")
+        lookups = pd.MultiIndex.from_frame(dest[keys])
+        found = pd.Series(single.reindex(lookups).to_numpy(), index=dest.index).fillna("")
+        mask = assigned.eq("") & dest_valid & found.ne("")
+        assigned.loc[mask] = found.loc[mask]
+
+    keys = ["_monthly_date_key", "_monthly_time_key"]
+    for name_group in (["소재", "소재명"], ["캠페인명", "캠페인"]):
+        pcol = next((x for x in name_group if x in products_key.columns), None)
+        scol = next((x for x in name_group if x in reference.columns), None)
+        if pcol and scol:
+            _apply_unique_mapping(keys, pcol, scol)
+    _apply_unique_mapping(keys)
+    # 양 채널이 같은 날짜·시간에 있고 상품 자체에도 구분 정보가 없으면
+    # RCS 주문금액을 임의로 생성하지 않도록 기존 MMS 기본값을 유지합니다.
+    return assigned.replace("", "MMS")
+
+def _monthly_clean_product_name(value) -> str:
+    """월간 리포트 표시용 상품명에서 앞쪽 운영용 M 태그와 대괄호 문자를 정리합니다.
+
+    - [M] 햇반 / M 햇반 / Ｍ 햇반 / M햇반 -> 햇반
+    - [AHC/본사] 마스크 -> AHC/본사 마스크
+    - MCM/MLB처럼 실제 영문 상품·브랜드명은 유지
+    """
+    if pd.isna(value):
+        return ""
+    text = str(value)
+    # 복사/RAW에서 섞일 수 있는 zero-width 문자를 먼저 제거합니다.
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text).strip()
+
+    # 상품명 맨 앞의 운영 태그를 반복 제거합니다.
+    # 괄호형 [M]/[Ｍ]은 항상 제거하고, 단독 M/Ｍ은 공백·구분자·한글 앞에서만 제거합니다.
+    # 따라서 MCM, MLB 같은 실제 영문 브랜드명은 유지됩니다.
+    while True:
+        cleaned = re.sub(
+            r"(?i)^\s*(?:"
+            r"\[\s*[MＭ]\s*\]"
+            r"|[MＭ](?=(?:\s|[-_:·|/]|[가-힣]))"
+            r")\s*[-_:·|/]*\s*",
+            "",
+            text,
+            count=1,
+        )
+        if cleaned == text:
+            break
+        text = cleaned
+
+    # 그 외 [브랜드/본사] 표기는 내용은 남기고 대괄호 문자만 제거합니다.
+    text = text.replace("[", "").replace("]", "")
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+def _monthly_clean_product_names(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    if "상품명" in out.columns:
+        out["상품명"] = out["상품명"].map(_monthly_clean_product_name)
+    return out
+
+def _monthly_send_product_count(send_rows: pd.DataFrame, product_rows: pd.DataFrame | None = None) -> int:
+    """날짜·시간대·채널별 상품수 max를 1회 편성수로 보고 기간 합계를 반환합니다.
+
+    발송 데이터에 상품수 값이 없을 때만 상품 RAW 행 수를 보조값으로 사용합니다.
+    """
+    if send_rows is not None and not send_rows.empty:
+        graph_rows = _monthly_graph_aggregate(send_rows)
+        if graph_rows is not None and not graph_rows.empty and "상품수" in graph_rows.columns:
+            counts = pd.to_numeric(graph_rows["상품수"], errors="coerce").fillna(0)
+            if float(counts.sum()) > 0:
+                return int(round(float(counts.sum())))
+    return int(len(product_rows)) if product_rows is not None else 0
+
+def _monthly_hoverlabel_style() -> dict:
+    """월간 리포트 Plotly hover 공통 스타일: 검은 배경·흰 글씨·고정폭 글꼴."""
+    return dict(
+        bgcolor="#111827",
+        bordercolor="#111827",
+        font=dict(
+            color="#ffffff",
+            family='"Noto Sans Mono CJK KR", "D2Coding", "Consolas", "Menlo", monospace',
+            size=13,
+        ),
+        align="left",
+        namelength=-1,
+    )
+
+def _monthly_apply_hover_style(fig: go.Figure) -> go.Figure:
+    fig.update_layout(hoverlabel=_monthly_hoverlabel_style(), hovermode="closest")
+    return fig
+
+def _monthly_send_type_series(df: pd.DataFrame) -> pd.Series:
+    """주간 그래프에서 MMS/RCS 색상을 구분하기 위한 발송유형을 반환합니다."""
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+    # 월간 상세에서 RAW의 `유형`과 발송 정보로 확인한 확정 채널을 우선합니다.
+    if "_monthly_send_channel" in df.columns:
+        confirmed = df["_monthly_send_channel"].fillna("").astype(str).str.upper().str.strip()
+        if confirmed.isin(["MMS", "RCS"]).all():
+            return confirmed
+
+    def _normalize(value) -> str:
+        raw = str(value or "").strip()
+        upper = raw.upper()
+        if "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw:
+            return "RCS"
+        if "MMS" in upper or "멀티미디어" in raw:
+            return "MMS"
+        return ""
+
+    channel_col = first_col(df, [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "메시지유형", "메시지 유형",
+        "메시지타입", "메시지 타입", "발송타입", "발송 타입",
+    ])
+    channel = (
+        df[channel_col].map(_normalize)
+        if channel_col else pd.Series("", index=df.index, dtype="object")
+    )
+    text_cols = [
+        col for col in ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]
+        if col in df.columns
+    ]
+    if text_cols:
+        fallback = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).map(_normalize)
+        blank = channel.eq("")
+        channel.loc[blank] = fallback.loc[blank]
+    return channel.replace("", "MMS")
+
+def _monthly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
+    """v1/v2 분할행을 같은 발송일·요일·시간대·발송유형 단위로 합산합니다."""
+    if sw is None or sw.empty:
+        return pd.DataFrame()
+
+    d = sw.copy()
+    d["_graph_date"] = pd.to_datetime(d.get("_date"), errors="coerce").dt.normalize()
+    d["_graph_time"] = (
+        d["시간대"].map(_v4482_time_key)
+        if "시간대" in d.columns else ""
+    )
+    if "요일" in d.columns:
+        d["_graph_weekday"] = d["요일"].fillna("").astype(str).str.strip()
+    else:
+        weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+        d["_graph_weekday"] = d["_graph_date"].dt.dayofweek.map(weekday_map)
+    d["_graph_channel"] = _monthly_send_type_series(d)
+    material_col = first_col(d, ["소재", "소재명"])
+    d["_graph_material"] = (
+        d[material_col].fillna("").astype(str).str.strip() if material_col else ""
+    )
+
+    send_col = first_col(d, ["발송 성공 건수", "총 발송 건수"])
+    click_all_col = first_col(d, ["클릭 수", "클릭 수(uniq)"])
+    click_uniq_col = first_col(d, ["클릭 수(uniq)", "클릭 수"])
+    numeric_sources = {
+        "_graph_send": send_col,
+        "_graph_click_all": click_all_col,
+        "_graph_click_uniq": click_uniq_col,
+        "주문금액": "주문금액" if "주문금액" in d.columns else None,
+        "주문건수": "주문건수" if "주문건수" in d.columns else None,
+        "주문수량": "주문수량" if "주문수량" in d.columns else None,
+        "상품수": "상품수" if "상품수" in d.columns else None,
+    }
+    for target, source in numeric_sources.items():
+        d[target] = (
+            pd.to_numeric(d[source], errors="coerce").fillna(0)
+            if source else 0.0
+        )
+
+    base_keys = ["_graph_date", "_graph_weekday", "_graph_time", "_graph_channel"]
+    # 같은 소재의 v1/v2는 실적·클릭은 합산하고 상품수는 한 번만 반영합니다.
+    by_material = d.groupby(base_keys + ["_graph_material"], as_index=False, dropna=False).agg(
+        _graph_send=("_graph_send", "sum"),
+        _graph_click_all=("_graph_click_all", "sum"),
+        _graph_click_uniq=("_graph_click_uniq", "sum"),
+        주문금액=("주문금액", "sum"),
+        주문건수=("주문건수", "sum"),
+        주문수량=("주문수량", "sum"),
+        상품수=("상품수", "max"),
+    )
+    grouped = by_material.groupby(base_keys, as_index=False, dropna=False).agg(
+        _graph_send=("_graph_send", "sum"),
+        _graph_click_all=("_graph_click_all", "sum"),
+        _graph_click_uniq=("_graph_click_uniq", "sum"),
+        주문금액=("주문금액", "sum"),
+        주문건수=("주문건수", "sum"),
+        주문수량=("주문수량", "sum"),
+        # 소재명이 다르거나 V1/V2의 상품수가 달라도 같은 날짜·시간대는 큰 값 한 번만 반영합니다.
+        상품수=("상품수", "max"),
+    )
+    grouped["요일"] = grouped["_graph_weekday"]
+    grouped["시간대"] = grouped["_graph_time"]
+    grouped["_date"] = grouped["_graph_date"]
+    grouped["클릭 수"] = grouped["_graph_click_all"]
+    grouped["클릭 수(uniq)"] = grouped["_graph_click_uniq"]
+    grouped["반응율"] = safe_div(grouped["_graph_click_all"], grouped["_graph_send"])
+    grouped["반응율(uniq)"] = safe_div(grouped["_graph_click_uniq"], grouped["_graph_send"])
+    grouped = grouped.sort_values(
+        ["_graph_date", "_graph_time", "_graph_channel"], kind="stable"
+    ).reset_index(drop=True)
+    return grouped
+
+def _monthly_send_run_key_series(df: pd.DataFrame) -> pd.Series:
+    """모든 메뉴에서 공통으로 사용하는 실제 발송 회차 키입니다.
+
+    같은 날짜·시간대라도 MMS와 RCS는 서로 다른 발송으로 계산합니다.
+    기준: 날짜 + 시간대 + 발송유형(MMS/RCS)
+    날짜 또는 시간대가 없는 예외 행은 서로 합치지 않아 임의 과소 집계를 막습니다.
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+
+    date_col = first_col(df, ["_date", "발송일", "발송일자", "일자", "날짜"])
+    time_col = first_col(df, ["시간대", "_time", "발송시간", "시간"])
+    dates = (
+        pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+        if date_col else pd.Series(pd.NaT, index=df.index)
+    )
+    times = (
+        df[time_col].map(_v4482_time_key)
+        if time_col else pd.Series("", index=df.index, dtype="object")
+    )
+    channels = _monthly_send_type_series(df).reindex(df.index).fillna("MMS")
+    valid = dates.notna() & times.ne("")
+    keys = pd.Series(index=df.index, dtype="object")
+    keys.loc[valid] = (
+        dates.loc[valid].dt.strftime("%Y-%m-%d")
+        + "|" + times.loc[valid].astype(str)
+        + "|" + channels.loc[valid].astype(str)
+    )
+    fallback_positions = pd.Series(range(len(df)), index=df.index).astype(str)
+    keys.loc[~valid] = "ROW|" + fallback_positions.loc[~valid]
+    return keys
+
+def _monthly_unique_send_count(df: pd.DataFrame) -> int:
+    """월간실적 전용: 날짜·시간대·발송유형 기준 고유 발송 횟수."""
+    if df is None or df.empty:
+        return 0
+    return int(_monthly_send_run_key_series(df).nunique(dropna=True))
+
 def _monthly_period_rows(df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
     """원본 주차 표기와 무관하게 실제 발송일로 선택 월 데이터를 반환합니다."""
     if df is None or df.empty or "_date" not in df.columns:
@@ -14863,14 +15215,24 @@ def _monthly_previous_aligned_range(start_date, end_date) -> tuple[pd.Timestamp,
     )
 
 
-def _monthly_filter_send_type(df: pd.DataFrame, send_type: str) -> pd.DataFrame:
-    """월간실적의 상품·발송 데이터를 동일한 MMS/RCS 기준으로 필터링합니다."""
+def _monthly_filter_send_type(
+    df: pd.DataFrame, send_type: str, reference_sends: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """월간실적 상품/소재 발송유형 필터: 상품에는 발송 RAW를 보조로 활용합니다."""
     if df is None or df.empty:
         return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else [])
+    if reference_sends is not None:
+        channels = _monthly_product_channels(df, reference_sends)
+    else:
+        channels = _monthly_channel_hints(df).replace("", "MMS")
     if send_type not in {"MMS", "RCS"}:
-        return df.copy()
-    channels = _weekly_send_type_series(df).reindex(df.index).fillna("MMS")
-    return df.loc[channels.eq(send_type)].copy()
+        result = df.copy()
+    else:
+        result = df.loc[channels.eq(send_type)].copy()
+    # 발송 RAW를 필터링한 경우 차트/hover의 분류도 같은 판별값을 사용합니다.
+    if reference_sends is None:
+        result["_monthly_send_channel"] = channels.reindex(result.index)
+    return result
 
 
 def _monthly_week_start_series(df: pd.DataFrame) -> pd.Series:
@@ -14907,8 +15269,8 @@ def _monthly_summary_metrics(product_rows: pd.DataFrame, send_rows: pd.DataFrame
     orders = _sum(send_rows, "주문건수")
     amount = _sum(send_rows, "주문금액")
     return {
-        "발송횟수": _weekly_unique_send_count(send_rows),
-        "상품수": int(len(product_rows)) if product_rows is not None else 0,
+        "발송횟수": _monthly_unique_send_count(send_rows),
+        "상품수": _monthly_send_product_count(send_rows, product_rows),
         "발송건수": sent,
         "클릭수": clicks,
         "주문건수": orders,
@@ -14961,7 +15323,7 @@ def _monthly_mms_share_stats(
     result = {"amount": 0.0, "total_amount": 0.0, "share": None, "available": False}
     if send_rows is None or send_rows.empty:
         return result
-    send_types = _weekly_send_type_series(send_rows)
+    send_types = _monthly_send_type_series(send_rows)
     amounts = pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0)
     result["amount"] = float(amounts.loc[send_types.eq("MMS")].sum())
 
@@ -14983,14 +15345,16 @@ def _monthly_mms_share_stats_range(
     overall_df: pd.DataFrame | None,
     start_date,
     end_date,
+    channel: str = "MMS",
 ) -> dict:
-    """선택 기간의 전체실적 주문금액 대비 MMS 주문금액 비중을 계산합니다."""
+    """선택 기간의 전체실적 주문금액 대비 선택 채널(MMS/RCS) 주문금액 비중을 계산합니다."""
     result = {"amount": 0.0, "total_amount": 0.0, "share": None, "available": False}
     if send_rows is None or send_rows.empty:
         return result
-    send_types = _weekly_send_type_series(send_rows)
+    channel = "RCS" if str(channel).upper() == "RCS" else "MMS"
+    send_types = _monthly_channel_hints(send_rows).replace("", "MMS")
     amounts = pd.to_numeric(send_rows.get("주문금액", 0), errors="coerce").fillna(0)
-    result["amount"] = float(amounts.loc[send_types.eq("MMS")].sum())
+    result["amount"] = float(amounts.loc[send_types.eq(channel)].sum())
 
     if overall_df is None or overall_df.empty or "_date" not in overall_df.columns:
         return result
@@ -15049,28 +15413,74 @@ def _monthly_operation_performance(product_rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def _monthly_top_products(product_rows: pd.DataFrame, top_n: int | None = 10) -> pd.DataFrame:
+    """TOP 상품을 동일 알파코드+쇼라코드 기준으로 한 상품으로 합산합니다.
+
+    같은 코드 조합의 상품명이 시점별로 조금 다르거나 신규/재편성 구분이 달라도
+    TOP 상품 표에서는 한 행으로 합치고 주문금액과 실제 발송횟수를 누적합니다.
+    코드가 모두 없는 행만 정리된 상품명을 대체 식별키로 사용합니다.
+    """
     columns = ["구분", "알파코드", "쇼라코드", "상품명", "발송횟수", "주문금액", "평균금액"]
     if product_rows is None or product_rows.empty or "상품명" not in product_rows.columns:
         return pd.DataFrame(columns=columns)
+
     work = product_rows.copy()
+    work["상품명"] = work["상품명"].map(_monthly_clean_product_name)
     labels = _weekly_normalize_operation_labels(work)
     work["구분"] = labels.reindex(work.index).fillna("") if labels is not None else ""
     work["구분"] = work["구분"].map(
         lambda value: "재편성" if "재편성" in str(value)
         else ("유사신규" if "유사신규" in str(value) else ("신규" if "신규" in str(value) else "미분류"))
     )
+
     for col in ["알파코드", "쇼라코드"]:
         if col not in work.columns:
             work[col] = ""
+        work[col] = work[col].map(clean_identifier_value)
+
     work["주문금액"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
-    work["_send_run_key"] = _send_run_key_series(work)
-    group_cols = ["구분", "알파코드", "쇼라코드", "상품명"]
-    grouped = work.groupby(group_cols, as_index=False, dropna=False).agg(
-        발송횟수=("_send_run_key", "nunique"),
-        주문금액=("주문금액", "sum"),
+    work["_send_run_key"] = _monthly_send_run_key_series(work)
+    work["_date_sort"] = pd.to_datetime(work.get("_date"), errors="coerce")
+
+    # 같은 알파+쇼라 코드 조합은 무조건 하나의 상품으로 봅니다.
+    # 코드가 둘 다 없을 때만 상품명을 대체키로 사용해 서로 다른 무코드 상품이 합쳐지는 것을 막습니다.
+    code_present = work["알파코드"].ne("") | work["쇼라코드"].ne("")
+    work["_product_group_key"] = (
+        "CODE|" + work["알파코드"].astype(str) + "|" + work["쇼라코드"].astype(str)
     )
-    grouped["평균금액"] = grouped["주문금액"].div(grouped["발송횟수"].replace(0, pd.NA)).fillna(0)
-    grouped = grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False])
+    work.loc[~code_present, "_product_group_key"] = (
+        "NAME|" + work.loc[~code_present, "상품명"].fillna("").astype(str).str.strip()
+    )
+
+    rows = []
+    for _, group in work.groupby("_product_group_key", sort=False, dropna=False):
+        ordered = group.sort_values(["_date_sort"], kind="stable", na_position="first")
+        latest = ordered.iloc[-1]
+
+        # 최신 비어있지 않은 상품명/구분을 대표값으로 사용합니다.
+        nonblank_names = ordered["상품명"].fillna("").astype(str).str.strip()
+        nonblank_names = nonblank_names[nonblank_names.ne("")]
+        product_name = nonblank_names.iloc[-1] if not nonblank_names.empty else ""
+
+        nonblank_types = ordered["구분"].fillna("").astype(str).str.strip()
+        nonblank_types = nonblank_types[nonblank_types.ne("")]
+        operation_type = nonblank_types.iloc[-1] if not nonblank_types.empty else "미분류"
+
+        send_count = int(group["_send_run_key"].nunique(dropna=True))
+        amount = float(pd.to_numeric(group["주문금액"], errors="coerce").fillna(0).sum())
+        rows.append({
+            "구분": operation_type,
+            "알파코드": clean_identifier_value(latest.get("알파코드", "")),
+            "쇼라코드": clean_identifier_value(latest.get("쇼라코드", "")),
+            "상품명": _monthly_clean_product_name(product_name),
+            "발송횟수": send_count,
+            "주문금액": amount,
+            "평균금액": (amount / send_count) if send_count else 0.0,
+        })
+
+    grouped = pd.DataFrame(rows, columns=columns)
+    if grouped.empty:
+        return grouped
+    grouped = grouped.sort_values(["주문금액", "발송횟수"], ascending=[False, False], kind="stable")
     if top_n is not None:
         grouped = grouped.head(int(top_n))
     return grouped[columns]
@@ -15097,14 +15507,23 @@ def _monthly_small_categories(product_rows: pd.DataFrame, top_n: int = 10) -> pd
 
 
 def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
-    columns = ["주차", "기간", "주문금액", "SPM", "CTR", "CVR"]
+    columns = [
+        "주차", "기간", "주문금액", "SPM", "CTR", "CVR",
+        "발송횟수", "MMS발송횟수", "RCS발송횟수", "상품수",
+        "MMS발송건수", "MMS클릭수", "MMS평균CTR",
+        "RCS발송건수", "RCS클릭수", "RCS평균CTR",
+        "MMS주문건수", "MMSCVR", "RCS주문건수", "RCSCVR",
+        "전체발송건수", "전체클릭수", "전체주문건수",
+    ]
     if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
         return pd.DataFrame(columns=columns)
+
     work = send_rows.copy()
     work["_monthly_date"] = pd.to_datetime(work["_date"], errors="coerce").dt.normalize()
     work = work[work["_monthly_date"].notna()].copy()
     if work.empty:
         return pd.DataFrame(columns=columns)
+
     work["_week_start"] = _monthly_week_start_series(work)
     send_col = first_col(work, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(work, ["클릭 수(uniq)", "클릭 수"])
@@ -15112,34 +15531,198 @@ def _monthly_weekly_trend(send_rows: pd.DataFrame) -> pd.DataFrame:
     work["_click"] = pd.to_numeric(work[click_col], errors="coerce").fillna(0) if click_col else 0.0
     work["_orders"] = pd.to_numeric(work.get("주문건수", 0), errors="coerce").fillna(0)
     work["_amount"] = pd.to_numeric(work.get("주문금액", 0), errors="coerce").fillna(0)
+
+    # 주문금액/SPM/CVR은 기존 월간 집계 기준을 그대로 유지합니다.
     grouped = work.groupby("_week_start", as_index=False).agg(
         _sent=("_sent", "sum"), _click=("_click", "sum"),
         _orders=("_orders", "sum"), 주문금액=("_amount", "sum"),
         _min_date=("_monthly_date", "min"), _max_date=("_monthly_date", "max"),
     ).sort_values("_week_start")
     grouped["주차"] = grouped["_week_start"].dt.strftime("%m%d") + "주차"
-    grouped["기간"] = grouped.apply(lambda r: f"{r['_min_date'].month}/{r['_min_date'].day}~{r['_max_date'].month}/{r['_max_date'].day}", axis=1)
-    grouped["SPM"] = grouped["주문금액"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
-    grouped["CTR"] = grouped["_click"].div(grouped["_sent"].replace(0, pd.NA)).fillna(0)
-    grouped["CVR"] = grouped["_orders"].div(grouped["_click"].replace(0, pd.NA)).fillna(0)
+    grouped["기간"] = grouped.apply(
+        lambda r: f"{r['_min_date'].month}/{r['_min_date'].day}~{r['_max_date'].month}/{r['_max_date'].day}",
+        axis=1,
+    )
+
+    # CTR/SPM 및 hover 상세값은 모두 같은 실제 발송 집계 테이블을 사용합니다.
+    # CTR은 'CTR 값의 평균'이 아니라 반드시 클릭수(Uniq) 합계 ÷ 발송건수 합계입니다.
+    graph_rows = _monthly_graph_aggregate(work)
+    detail_rows = []
+    if graph_rows is not None and not graph_rows.empty:
+        graph_rows = graph_rows.copy()
+        graph_rows["_week_start"] = _monthly_week_start_series(graph_rows)
+        if "_graph_channel" not in graph_rows.columns:
+            graph_rows["_graph_channel"] = _monthly_send_type_series(graph_rows)
+        else:
+            graph_rows["_graph_channel"] = graph_rows["_graph_channel"].fillna("MMS").astype(str)
+        graph_rows["_graph_send"] = pd.to_numeric(
+            graph_rows.get("_graph_send", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["_graph_click_uniq"] = pd.to_numeric(
+            graph_rows.get("_graph_click_uniq", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["상품수"] = pd.to_numeric(
+            graph_rows.get("상품수", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["주문건수"] = pd.to_numeric(
+            graph_rows.get("주문건수", 0), errors="coerce"
+        ).fillna(0)
+
+        for week_start, week_rows in graph_rows.groupby("_week_start", sort=False):
+            mms_rows = week_rows[week_rows["_graph_channel"].eq("MMS")]
+            rcs_rows = week_rows[week_rows["_graph_channel"].eq("RCS")]
+
+            def _channel_totals(rows: pd.DataFrame):
+                sent = float(rows["_graph_send"].sum()) if not rows.empty else 0.0
+                clicks = float(rows["_graph_click_uniq"].sum()) if not rows.empty else 0.0
+                orders = float(rows["주문건수"].sum()) if not rows.empty else 0.0
+                ctr = (clicks / sent) if sent > 0 else None
+                cvr = (orders / clicks) if clicks > 0 else None
+                return sent, clicks, orders, ctr, cvr
+
+            mms_sent, mms_clicks, mms_orders, mms_ctr, mms_cvr = _channel_totals(mms_rows)
+            rcs_sent, rcs_clicks, rcs_orders, rcs_ctr, rcs_cvr = _channel_totals(rcs_rows)
+            total_sent = mms_sent + rcs_sent
+            total_clicks = mms_clicks + rcs_clicks
+            total_orders = mms_orders + rcs_orders
+
+            detail_rows.append({
+                "_week_start": week_start,
+                "발송횟수": int(len(week_rows)),
+                "MMS발송횟수": int(len(mms_rows)),
+                "RCS발송횟수": int(len(rcs_rows)),
+                "상품수": int(round(float(week_rows["상품수"].sum()))),
+                "MMS발송건수": mms_sent,
+                "MMS클릭수": mms_clicks,
+                "MMS평균CTR": mms_ctr,
+                "RCS발송건수": rcs_sent,
+                "RCS클릭수": rcs_clicks,
+                "RCS평균CTR": rcs_ctr,
+                "MMS주문건수": mms_orders,
+                "MMSCVR": mms_cvr,
+                "RCS주문건수": rcs_orders,
+                "RCSCVR": rcs_cvr,
+                "전체발송건수": total_sent,
+                "전체클릭수": total_clicks,
+                "전체주문건수": total_orders,
+            })
+
+    details = pd.DataFrame(detail_rows)
+    if not details.empty:
+        grouped = grouped.merge(details, on="_week_start", how="left")
+
+    for count_col in ["발송횟수", "MMS발송횟수", "RCS발송횟수", "상품수"]:
+        if count_col not in grouped.columns:
+            grouped[count_col] = 0
+        grouped[count_col] = pd.to_numeric(grouped[count_col], errors="coerce").fillna(0).astype(int)
+
+    for value_col in [
+        "MMS발송건수", "MMS클릭수", "RCS발송건수", "RCS클릭수",
+        "MMS주문건수", "RCS주문건수", "전체발송건수", "전체클릭수", "전체주문건수"
+    ]:
+        if value_col not in grouped.columns:
+            grouped[value_col] = 0.0
+        grouped[value_col] = pd.to_numeric(grouped[value_col], errors="coerce").fillna(0.0)
+
+    for rate_col in ["MMS평균CTR", "RCS평균CTR", "MMSCVR", "RCSCVR"]:
+        if rate_col not in grouped.columns:
+            grouped[rate_col] = pd.NA
+
+    # 메인 CTR도 hover와 동일하게 전체 클릭수(Uniq) ÷ 전체 발송건수로 계산합니다.
+    grouped["CTR"] = grouped["전체클릭수"].div(
+        grouped["전체발송건수"].replace(0, pd.NA)
+    ).fillna(0)
+    grouped["SPM"] = grouped["주문금액"].div(
+        grouped["_sent"].replace(0, pd.NA)
+    ).fillna(0)
+    grouped["CVR"] = grouped["_orders"].div(
+        grouped["_click"].replace(0, pd.NA)
+    ).fillna(0)
+
     return grouped[columns]
 
 
 def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     labels = trend["주차"].tolist() if not trend.empty else []
-    hover_dates = trend["기간"].tolist() if not trend.empty else []
+
+    amount_hover = []
+    ctr_hover = []
+    cvr_hover = []
+    if not trend.empty:
+        for _, row in trend.iterrows():
+            week_text = _html.escape(str(row.get("주차", "")))
+            period_text = _html.escape(str(row.get("기간", "")))
+
+            amount_hover.append(
+                f'<b>{week_text} · {period_text}</b>'
+                f'<br>────────────────────────'
+                f'<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b>'
+                f'<br>발송 횟수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):,}회'
+                f'<br>MMS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):,}회'
+                f'<br>RCS 발송&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):,}회'
+                f'<br>상품수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{int(row.get("상품수", 0) or 0):,}개'
+            )
+
+            mms_ctr = row.get("MMS평균CTR")
+            rcs_ctr = row.get("RCS평균CTR")
+            mms_ctr_text = f'{float(mms_ctr)*100:.1f}%' if pd.notna(mms_ctr) else '-'
+            rcs_ctr_text = f'{float(rcs_ctr)*100:.1f}%' if pd.notna(rcs_ctr) else '-'
+            total_ctr = float(row.get("CTR", 0) or 0)
+
+            ctr_hover.append(
+                f'<b>{week_text} · {period_text}</b>'
+                f'<br>────────────────────────────────────'
+                f'<br><b>구분&nbsp;&nbsp;발송횟수&nbsp;&nbsp;&nbsp;발송건수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;&nbsp;CTR</b>'
+                f'<br>MMS&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("MMS발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("MMS클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{mms_ctr_text}'
+                f'<br>RCS&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("RCS발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("RCS클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{rcs_ctr_text}'
+                f'<br>────────────────────────────────────'
+                f'<br><b>전체&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("전체발송건수", 0) or 0))):>9,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("전체클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{total_ctr*100:.1f}%</b>'
+            )
+
+            mms_cvr = row.get("MMSCVR")
+            rcs_cvr = row.get("RCSCVR")
+            mms_cvr_text = f'{float(mms_cvr)*100:.1f}%' if pd.notna(mms_cvr) else '-'
+            rcs_cvr_text = f'{float(rcs_cvr)*100:.1f}%' if pd.notna(rcs_cvr) else '-'
+            total_cvr = float(row.get("CVR", 0) or 0)
+            cvr_hover.append(
+                f'<b>{week_text} · {period_text}</b>'
+                f'<br>────────────────────────────────────'
+                f'<br><b>구분&nbsp;&nbsp;발송횟수&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;주문건수&nbsp;&nbsp;&nbsp;CVR</b>'
+                f'<br>MMS&nbsp;&nbsp;&nbsp;{int(row.get("MMS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("MMS클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("MMS주문건수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{mms_cvr_text}'
+                f'<br>RCS&nbsp;&nbsp;&nbsp;{int(row.get("RCS발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("RCS클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("RCS주문건수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{rcs_cvr_text}'
+                f'<br>────────────────────────────────────'
+                f'<br><b>전체&nbsp;&nbsp;&nbsp;{int(row.get("발송횟수", 0) or 0):>3,}회&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("전체클릭수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;'
+                f'{int(round(float(row.get("전체주문건수", 0) or 0))):>7,}&nbsp;&nbsp;&nbsp;{total_cvr*100:.1f}%</b>'
+            )
+
+    dark_hover = _monthly_hoverlabel_style()
+
     amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
         text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
         cliponaxis=False,
-        customdata=hover_dates, hovertemplate="%{customdata}<br>주문금액 %{y:.1f}백만원<extra></extra>",
+        customdata=amount_hover,
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>주문금액&nbsp;&nbsp;&nbsp;%{y:.1f}백만원</b><extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
         mode="lines+markers+text", line=dict(color="#27ae60", width=3),
         text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
+        customdata=amount_hover,
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>SPM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{y:.1f}</b><extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
     amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
@@ -15147,6 +15730,7 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         title=dict(text="주차별 주문금액 · SPM", x=.5, xanchor="center"), height=410,
         margin=dict(l=55, r=60, t=60, b=80), plot_bgcolor="#fff",
         legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+        hoverlabel=dark_hover,
     )
 
     rate_fig = go.Figure()
@@ -15154,17 +15738,22 @@ def _monthly_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
         x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
         mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
+        customdata=ctr_hover,
+        hovertemplate="%{customdata}<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
         mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
+        customdata=cvr_hover,
+        hovertemplate="%{customdata}<extra></extra>",
     ))
     rate_fig.update_layout(
         title=dict(text="주차별 CTR · CVR", x=.5, xanchor="center"), height=410,
         margin=dict(l=55, r=35, t=60, b=80), plot_bgcolor="#fff",
         yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
         legend=dict(orientation="h", y=-.22, x=.5, xanchor="center"),
+        hoverlabel=dark_hover,
     )
     return amount_fig, rate_fig
 
@@ -15174,8 +15763,8 @@ def _monthly_daily_trend(
     send_rows: pd.DataFrame,
     product_rows: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR과 상품 상세를 생성합니다."""
-    columns = ["일자", "주문금액", "SPM", "CTR", "CVR", "상품상세"]
+    """선택 월의 실제 발송일 기준 일자별 주문금액·SPM·CTR·CVR과 상품·시간대 상세를 생성합니다."""
+    columns = ["일자", "주문금액", "SPM", "CTR", "CVR", "상품상세", "시간대상세", "시간대CVR상세"]
     if send_rows is None or send_rows.empty or "_date" not in send_rows.columns:
         return pd.DataFrame(columns=columns)
     work = send_rows.copy()
@@ -15229,25 +15818,98 @@ def _monthly_daily_trend(
             )
 
     grouped["상품상세"] = grouped["_monthly_date"].map(product_details).fillna("상품별 데이터 없음")
+
+    # CTR hover에 실제 시간대·발송유형별 발송건수/클릭수/CTR을 표시합니다.
+    time_details = {}
+    graph_rows = _monthly_graph_aggregate(work)
+    if graph_rows is not None and not graph_rows.empty:
+        graph_rows = graph_rows.copy()
+        graph_rows["_monthly_date"] = pd.to_datetime(
+            graph_rows.get("_date"), errors="coerce"
+        ).dt.normalize()
+        if "_graph_channel" not in graph_rows.columns:
+            graph_rows["_graph_channel"] = _monthly_send_type_series(graph_rows)
+        else:
+            graph_rows["_graph_channel"] = graph_rows["_graph_channel"].fillna("MMS").astype(str)
+        graph_rows["_graph_time"] = (
+            graph_rows["_graph_time"].map(_v4482_time_key)
+            if "_graph_time" in graph_rows.columns
+            else (graph_rows["시간대"].map(_v4482_time_key) if "시간대" in graph_rows.columns else "")
+        )
+        graph_rows["_graph_send"] = pd.to_numeric(
+            graph_rows.get("_graph_send", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["_graph_click_uniq"] = pd.to_numeric(
+            graph_rows.get("_graph_click_uniq", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows["주문건수"] = pd.to_numeric(
+            graph_rows.get("주문건수", 0), errors="coerce"
+        ).fillna(0)
+        graph_rows = graph_rows[graph_rows["_monthly_date"].notna()].copy()
+        graph_rows = graph_rows.sort_values(
+            ["_monthly_date", "_graph_time", "_graph_channel"], kind="stable"
+        )
+        cvr_time_details = {}
+        for detail_date, detail_group in graph_rows.groupby("_monthly_date", sort=False):
+            ctr_lines = [
+                "<b>시간대별 CTR 상세</b>",
+                "────────────────────────────────────",
+                "<b>시간&nbsp;&nbsp;&nbsp;&nbsp;유형&nbsp;&nbsp;&nbsp;발송건수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;&nbsp;CTR</b>",
+            ]
+            cvr_lines = [
+                "<b>시간대별 CVR 상세</b>",
+                "────────────────────────────────────",
+                "<b>시간&nbsp;&nbsp;&nbsp;&nbsp;유형&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;클릭수&nbsp;&nbsp;&nbsp;주문건수&nbsp;&nbsp;&nbsp;CVR</b>",
+            ]
+            for _, detail_row in detail_group.iterrows():
+                sent = float(detail_row.get("_graph_send", 0) or 0)
+                clicks = float(detail_row.get("_graph_click_uniq", 0) or 0)
+                orders = float(detail_row.get("주문건수", 0) or 0)
+                ctr = (clicks / sent) if sent > 0 else 0.0
+                cvr = (orders / clicks) if clicks > 0 else 0.0
+                time_text = str(detail_row.get("_graph_time", "") or "-")
+                channel_text = str(detail_row.get("_graph_channel", "") or "-")
+                ctr_lines.append(
+                    f'{_html.escape(time_text):<7}&nbsp;{_html.escape(channel_text):<4}&nbsp;&nbsp;'
+                    f'{int(round(sent)):>9,}&nbsp;&nbsp;&nbsp;{int(round(clicks)):>7,}&nbsp;&nbsp;&nbsp;{ctr*100:.1f}%'
+                )
+                cvr_lines.append(
+                    f'{_html.escape(time_text):<7}&nbsp;{_html.escape(channel_text):<4}&nbsp;&nbsp;'
+                    f'{int(round(clicks)):>7,}&nbsp;&nbsp;&nbsp;{int(round(orders)):>7,}&nbsp;&nbsp;&nbsp;{cvr*100:.1f}%'
+                )
+            time_details[detail_date] = "<br>".join(ctr_lines)
+            cvr_time_details[detail_date] = "<br>".join(cvr_lines)
+    else:
+        cvr_time_details = {}
+    grouped["시간대상세"] = grouped["_monthly_date"].map(time_details).fillna("시간대별 데이터 없음")
+    grouped["시간대CVR상세"] = grouped["_monthly_date"].map(cvr_time_details).fillna("시간대별 데이터 없음")
     return grouped[columns]
 
 
 def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
     labels = trend["일자"].tolist() if not trend.empty else []
+    product_details = trend.get(
+        "상품상세", pd.Series("상품별 데이터 없음", index=trend.index)
+    ).tolist()
+    amount_custom = [
+        f"<b>{_html.escape(str(day))}</b><br>────────────────────────<br>"
+        f"<b>상품별 주문금액</b><br>{details}"
+        for day, details in zip(labels, product_details)
+    ]
+
     amount_fig = make_subplots(specs=[[{"secondary_y": True}]])
     amount_fig.add_trace(go.Bar(
         x=labels, y=trend.get("주문금액", pd.Series(dtype=float)) / 1_000_000,
         name="주문금액(백만원)", marker_color="#2f80ed",
         text=[f"{v/1_000_000:.1f}" for v in trend.get("주문금액", [])], textposition="outside",
-        cliponaxis=False,
-        customdata=trend.get("상품상세", pd.Series("상품별 데이터 없음", index=trend.index)).tolist(),
-        hovertemplate="%{x}<br>주문금액 %{y:.1f}백만원<br><br><b>상품별 주문금액</b><br>%{customdata}<extra></extra>",
+        cliponaxis=False, customdata=amount_custom,
+        hovertemplate="%{customdata}<br>────────────────────────<br><b>주문금액&nbsp;&nbsp;&nbsp;%{y:.1f}백만원</b><extra></extra>",
     ), secondary_y=False)
     amount_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("SPM", pd.Series(dtype=float)), name="SPM",
         mode="lines+markers+text", line=dict(color="#27ae60", width=3),
         text=[f"{v:.1f}" for v in trend.get("SPM", [])], textposition="top center",
-        hovertemplate="%{x}<br>SPM %{y:.1f}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>────────────────────────<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b><br>SPM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{y:.1f}<extra></extra>",
     ), secondary_y=True)
     amount_fig.update_yaxes(title_text="주문금액(백만원)", rangemode="tozero", secondary_y=False)
     amount_fig.update_yaxes(title_text="SPM", rangemode="tozero", showgrid=False, secondary_y=True)
@@ -15256,6 +15918,7 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         margin=dict(l=55, r=60, t=60, b=90), plot_bgcolor="#fff",
         xaxis=dict(tickangle=-45),
         legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+        hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
     )
 
     rate_fig = go.Figure()
@@ -15263,13 +15926,19 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         x=labels, y=trend.get("CTR", pd.Series(dtype=float)) * 100, name="CTR",
         mode="lines+markers+text", line=dict(color="#2f80ed", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CTR", [])], textposition="top center",
-        hovertemplate="%{x}<br>CTR %{y:.1f}%<extra></extra>",
+        customdata=trend.get(
+            "시간대상세", pd.Series("시간대별 데이터 없음", index=trend.index)
+        ).tolist(),
+        hovertemplate="<b>%{x}</b><br>────────────────────────────────────<br><b>전체 CTR&nbsp;&nbsp;%{y:.1f}%</b><br><br>%{customdata}<extra></extra>",
     ))
     rate_fig.add_trace(go.Scatter(
         x=labels, y=trend.get("CVR", pd.Series(dtype=float)) * 100, name="CVR",
         mode="lines+markers+text", line=dict(color="#8b5cf6", width=3),
         text=[f"{v*100:.1f}%" for v in trend.get("CVR", [])], textposition="bottom center",
-        hovertemplate="%{x}<br>CVR %{y:.1f}%<extra></extra>",
+        customdata=trend.get(
+            "시간대CVR상세", pd.Series("시간대별 데이터 없음", index=trend.index)
+        ).tolist(),
+        hovertemplate="<b>%{x}</b><br>────────────────────────────────────<br><b>전체 CVR&nbsp;&nbsp;%{y:.1f}%</b><br><br>%{customdata}<extra></extra>",
     ))
     rate_fig.update_layout(
         title=dict(text="일자별 CTR · CVR", x=.5, xanchor="center"), height=410,
@@ -15277,6 +15946,7 @@ def _monthly_daily_trend_charts(trend: pd.DataFrame) -> tuple[go.Figure, go.Figu
         xaxis=dict(tickangle=-45),
         yaxis=dict(ticksuffix="%", tickformat=".1f", rangemode="tozero", gridcolor="#e5e7eb"),
         legend=dict(orientation="h", y=-.27, x=.5, xanchor="center"),
+        hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
     )
     return amount_fig, rate_fig
 
@@ -15287,10 +15957,10 @@ def _build_monthly_performance_bundle(
     year: int,
     month: int,
 ) -> dict:
-    product_rows = _monthly_period_rows(products_df, year, month)
+    product_rows = _monthly_clean_product_names(_monthly_period_rows(products_df, year, month))
     send_rows = _monthly_period_rows(sends_df, year, month)
     prev_year, prev_month = _monthly_previous_period(year, month)
-    prev_products = _monthly_period_rows(products_df, prev_year, prev_month)
+    prev_products = _monthly_clean_product_names(_monthly_period_rows(products_df, prev_year, prev_month))
     prev_sends = _monthly_period_rows(sends_df, prev_year, prev_month)
     trend = _monthly_weekly_trend(send_rows)
     amount_chart, rate_chart = _monthly_trend_charts(trend)
@@ -15333,9 +16003,9 @@ def _build_monthly_performance_bundle_range(
     end_ts = pd.Timestamp(end_date).normalize()
     prev_start, prev_end = _monthly_previous_aligned_range(start_ts, end_ts)
 
-    product_rows = _date_range_rows(products_df, start_ts, end_ts)
+    product_rows = _monthly_clean_product_names(_date_range_rows(products_df, start_ts, end_ts))
     send_rows = _date_range_rows(sends_df, start_ts, end_ts)
-    prev_products = _date_range_rows(products_df, prev_start, prev_end)
+    prev_products = _monthly_clean_product_names(_date_range_rows(products_df, prev_start, prev_end))
     prev_sends = _date_range_rows(sends_df, prev_start, prev_end)
 
     trend = _monthly_weekly_trend(send_rows)
@@ -15547,7 +16217,7 @@ def _coupon_table_style(view: pd.DataFrame):
 
 
 _menu_options = [
-    "홈", "일일실적", "주간실적", "월간실적", "월간실적 V2", "쿠폰사용현황", "실적요인분석",
+    "홈", "일일실적", "주간실적", "월간실적", "쿠폰사용현황", "실적요인분석",
     "상품구성비교", "상품구분", "타겟별베스트상품",
     "타겟분석", "SEG분석", "편성 프로그램",
 ]
@@ -15556,7 +16226,6 @@ _menu_slug_to_name = {
     "daily": "일일실적",
     "weekly": "주간실적",
     "monthly": "월간실적",
-    "monthly-v2": "월간실적 V2",
     "coupon": "쿠폰사용현황",
     "performance-factor": "실적요인분석",
     "product": "상품구분",
@@ -15574,7 +16243,6 @@ _menu_groups = [
         ("일일실적", "일일실적"),
         ("주간실적", "주간실적"),
         ("월간실적", "월간실적"),
-        ("월간실적 V2", "월간실적 V2"),
         ("쿠폰 사용 현황", "쿠폰사용현황"),
         ("실적 요인 분석", "실적요인분석"),
     ]),
@@ -15604,6 +16272,8 @@ def _set_dashboard_active_menu(internal_name: str):
         pass
 
 _query_menu = _get_query_param("menu").strip().lower()
+if _query_menu == "monthly-v2":  # 이전 월간 V2 공유 URL은 통합 월간 메뉴로 연결
+    _query_menu = "monthly"
 _query_menu_name = _menu_slug_to_name.get(_query_menu, "홈")
 if _query_menu in _menu_slug_to_name:
     st.session_state.dashboard_active_menu = _query_menu_name
@@ -15643,13 +16313,13 @@ except Exception:
 
 # 메뉴별로 사용하지 않는 세부 query param은 정리
 try:
-    if menu not in {"주간실적", "월간실적", "월간실적 V2"} and "year" in st.query_params:
+    if menu not in {"주간실적", "월간실적"} and "year" in st.query_params:
         del st.query_params["year"]
     if menu != "주간실적" and "week" in st.query_params:
         del st.query_params["week"]
-    if menu not in {"월간실적", "월간실적 V2"} and "month" in st.query_params:
+    if menu not in {"월간실적"} and "month" in st.query_params:
         del st.query_params["month"]
-    if menu not in {"월간실적", "월간실적 V2"} and "send_type" in st.query_params:
+    if menu not in {"월간실적"} and "send_type" in st.query_params:
         del st.query_params["send_type"]
     if menu != "일일실적" and "date" in st.query_params:
         del st.query_params["date"]
@@ -17523,9 +18193,9 @@ elif menu == "주간실적":
 # ─────────────────────────────────────────────────────────────────────────────
 # 월간실적
 # ─────────────────────────────────────────────────────────────────────────────
-elif menu in {"월간실적", "월간실적 V2"}:
-    monthly_v2 = menu == "월간실적 V2"
-    _monthly_title = "📅 월간실적 V2" if monthly_v2 else "📅 월간실적"
+elif menu == "월간실적":
+    monthly_v2 = True  # kt_app.py 최신 V2 화면을 기본 월간실적으로 사용
+    _monthly_title = "📊 쇼핑라운지 실적 리포트"
     st.markdown(f'<div class="section-title">{_monthly_title}</div>', unsafe_allow_html=True)
 
     _monthly_dates = pd.concat([
@@ -17641,14 +18311,15 @@ elif menu in {"월간실적", "월간실적 V2"}:
     )
 
     try:
-        st.query_params["menu"] = "monthly-v2" if monthly_v2 else "monthly"
+        st.query_params["menu"] = "monthly"
         st.query_params["year"] = str(int(monthly_year))
         st.query_params["month"] = str(int(monthly_month))
         st.query_params["send_type"] = monthly_send_type
     except Exception:
         pass
 
-    _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type)
+    # 상품 RAW는 채널 유형이 비어 있는 경우가 있어 발송 RAW와 날짜·시간·소재로 연결합니다.
+    _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type, sends)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
         "monthly_performance_bundle_v8_period",
@@ -17663,8 +18334,29 @@ elif menu in {"월간실적", "월간실적 V2"}:
         ),
         max_entries=72,
     )
+    # 채널 실적 비중은 발송유형 필터 전 전체 발송 데이터에서 계산합니다.
+    # 전체/MMS 선택 시 MMS 비중, RCS 선택 시 RCS 비중을 표시합니다.
+    _monthly_share_channel = "RCS" if monthly_send_type == "RCS" else "MMS"
+    _monthly_share_label = f"{_monthly_share_channel} 실적 비중"
+    _monthly_all_share_rows = _date_range_rows(sends, _monthly_period_start, _monthly_period_end)
+    _monthly_all_prev_share_rows = _date_range_rows(sends, _monthly_prev_start, _monthly_prev_end)
+    monthly_bundle["mms"] = _monthly_mms_share_stats_range(
+        _monthly_all_share_rows, overall_performance, _monthly_period_start, _monthly_period_end,
+        channel=_monthly_share_channel,
+    )
+    monthly_bundle["previous_mms"] = _monthly_mms_share_stats_range(
+        _monthly_all_prev_share_rows, overall_performance, _monthly_prev_start, _monthly_prev_end,
+        channel=_monthly_share_channel,
+    )
+
     mp = monthly_bundle["products"].copy()
     ms = monthly_bundle["sends"].copy()
+    if monthly_send_type == "RCS" and not ms.empty and mp.empty:
+        st.warning(
+            "RCS 발송 실적은 확인되지만 상품 시트에서 RCS로 식별 가능한 상품 행이 없습니다. "
+            "상품 RAW의 '유형/발송유형'이나 소재 시트와 연결할 수 있는 발송일·시간대를 확인해주세요. "
+            "상품·카테고리 데이터를 임의로 MMS에서 가져오지는 않습니다."
+        )
     metrics = monthly_bundle["metrics"]
     prev_metrics = monthly_bundle["previous_metrics"]
     has_previous = not monthly_bundle["previous_sends"].empty or not monthly_bundle["previous_products"].empty
@@ -17733,7 +18425,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
         ("SPM", f'{metrics["SPM"]:.1f}', _monthly_delta("SPM")),
     ]
     if monthly_v2:
-        monthly_cards.append(("MMS 실적 비중", mms_share_text, mms_delta))
+        monthly_cards.append((_monthly_share_label, mms_share_text, mms_delta))
     for _monthly_card_row in [monthly_cards[:5], monthly_cards[5:]]:
         _monthly_card_cols = st.columns(len(_monthly_card_row))
         for _monthly_card_col, (label, value, delta) in zip(_monthly_card_cols, _monthly_card_row):
@@ -17890,7 +18582,7 @@ elif menu in {"월간실적", "월간실적 V2"}:
     # 주간실적과 동일한 발송 소재·문구·상품 실적 캐러셀을 선택 월 전체 발송 기준으로 표시합니다.
     render_monthly_send_carousel(
         mp, ms, messages, int(monthly_year), f"{monthly_month}_{_monthly_period_token}",
-        monthly_v2=monthly_v2,
+        monthly_v2=monthly_v2, send_type=monthly_send_type,
     )
 
     st.markdown('<div class="subsection-title">타겟별 성과</div>', unsafe_allow_html=True)
@@ -17931,36 +18623,35 @@ elif menu in {"월간실적", "월간실적 V2"}:
             )
 
     operation = monthly_bundle["operation"].copy()
-    if not monthly_v2:
-        st.markdown('<div class="subsection-title">상품 구성 · 성과 구간</div>', unsafe_allow_html=True)
-        operation_cols = st.columns(3)
-        for op_col, (_, row) in zip(operation_cols, operation.iterrows()):
-            with op_col:
-                st.markdown(
-                    f'''
-                    <div class="monthly-op-card">
-                      <div class="monthly-op-title">{row["구분"]}</div>
-                      <div class="monthly-op-main">{int(row["전체"]):,}건 <span style="font-size:15px;color:#64748b;">{row["전체 비중"]*100:.1f}%</span></div>
-                      <div class="monthly-op-row"><span>300만원 이상</span><b>{int(row["300만원 이상"]):,}건 · {row["300만원 이상 비중"]*100:.1f}%</b></div>
-                      <div class="monthly-op-row"><span>100만원 미만</span><b>{int(row["100만원 미만"]):,}건 · {row["100만원 미만 비중"]*100:.1f}%</b></div>
-                      <div class="monthly-op-row"><span>평균 주문금액</span><b>{_monthly_money_display(row["평균금액"])}</b></div>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True,
-                )
+    st.markdown('<div class="subsection-title">상품 구성 · 성과 구간</div>', unsafe_allow_html=True)
+    operation_cols = st.columns(3)
+    for op_col, (_, row) in zip(operation_cols, operation.iterrows()):
+        with op_col:
+            st.markdown(
+                f'''
+                <div class="monthly-op-card">
+                  <div class="monthly-op-title">{row["구분"]}</div>
+                  <div class="monthly-op-main">{int(row["전체"]):,}건 <span style="font-size:15px;color:#64748b;">{row["전체 비중"]*100:.1f}%</span></div>
+                  <div class="monthly-op-row"><span>300만원 이상</span><b>{int(row["300만원 이상"]):,}건 · {row["300만원 이상 비중"]*100:.1f}%</b></div>
+                  <div class="monthly-op-row"><span>100만원 미만</span><b>{int(row["100만원 미만"]):,}건 · {row["100만원 미만 비중"]*100:.1f}%</b></div>
+                  <div class="monthly-op-row"><span>평균 주문금액</span><b>{_monthly_money_display(row["평균금액"])}</b></div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
 
-        _operation_view = operation.copy()
-        for _pct_col in ["전체 비중", "300만원 이상 비중", "100만원 미만 비중"]:
-            _operation_view[_pct_col] = _operation_view[_pct_col].map(lambda value: f"{float(value)*100:.1f}%")
-        for _count_col in ["전체", "300만원 이상", "100만원 미만"]:
-            _operation_view[_count_col] = _operation_view[_count_col].map(lambda value: f"{int(value):,}건")
-        for _money_col in ["주문금액", "평균금액"]:
-            _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
-        selectable_dataframe(
-            clean_identifier_columns(_operation_view),
-            key=f"monthly_operation_{monthly_year}_{monthly_month}_{_monthly_period_token}",
-            use_container_width=True, hide_index=True,
-        )
+    _operation_view = operation.copy()
+    for _pct_col in ["전체 비중", "300만원 이상 비중", "100만원 미만 비중"]:
+        _operation_view[_pct_col] = _operation_view[_pct_col].map(lambda value: f"{float(value)*100:.1f}%")
+    for _count_col in ["전체", "300만원 이상", "100만원 미만"]:
+        _operation_view[_count_col] = _operation_view[_count_col].map(lambda value: f"{int(value):,}건")
+    for _money_col in ["주문금액", "평균금액"]:
+        _operation_view[_money_col] = _operation_view[_money_col].map(lambda value: f"{float(value):,.0f}원")
+    selectable_dataframe(
+        clean_identifier_columns(_operation_view),
+        key=f"monthly_operation_{monthly_year}_{monthly_month}_{_monthly_period_token}",
+        use_container_width=True, hide_index=True,
+    )
 
     st.markdown('<div class="subsection-title">주요 소카테고리</div>', unsafe_allow_html=True)
     categories = monthly_bundle["categories"].copy()
@@ -17969,18 +18660,37 @@ elif menu in {"월간실적", "월간실적 V2"}:
     else:
         category_chart_col, category_table_col = st.columns([1.05, 1])
         with category_chart_col:
+            category_custom = [
+                [
+                    int(row.get("상품수", 0) or 0),
+                    float(row.get("상품 비중", 0) or 0) * 100,
+                    float(row.get("주문 비중", 0) or 0) * 100,
+                    float(row.get("평균금액", 0) or 0),
+                ]
+                for _, row in categories.iterrows()
+            ]
             category_chart = go.Figure(go.Bar(
                 x=categories["주문금액"] / 1_000_000,
                 y=categories["소카테고리"], orientation="h",
                 marker_color="#5b8def",
                 text=[f"{value/1_000_000:.1f}백만원" for value in categories["주문금액"]],
-                textposition="outside",
+                textposition="outside", customdata=category_custom,
+                hovertemplate=(
+                    "<b>%{y}</b><br>────────────────────────"
+                    "<br><b>항목&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;값</b>"
+                    "<br>주문금액&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{x:.1f}백만원"
+                    "<br>상품수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[0]:,.0f}건"
+                    "<br>상품 비중&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[1]:.1f}%"
+                    "<br>주문 비중&nbsp;&nbsp;&nbsp;&nbsp;%{customdata[2]:.1f}%"
+                    "<br>평균 주문금액&nbsp;%{customdata[3]:,.0f}원<extra></extra>"
+                ),
             ))
             category_chart.update_layout(
                 title=dict(text="소카테고리 주문금액 TOP10", x=.5, xanchor="center"),
                 height=430, margin=dict(l=30, r=80, t=55, b=45), plot_bgcolor="#fff",
                 xaxis=dict(title="주문금액(백만원)", rangemode="tozero", gridcolor="#e5e7eb"),
                 yaxis=dict(autorange="reversed"), showlegend=False,
+                hoverlabel=_monthly_hoverlabel_style(), hovermode="closest",
             )
             st.plotly_chart(_weekly_black_plotly_text(category_chart), use_container_width=True, config={"displayModeBar": False})
         with category_table_col:
