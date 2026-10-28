@@ -18326,7 +18326,7 @@ elif menu == "월간실적":
     _monthly_products_source = _monthly_filter_send_type(products, monthly_send_type, sends)
     _monthly_sends_source = _monthly_filter_send_type(sends, monthly_send_type)
     monthly_bundle = _menu_cache_get(
-        "monthly_performance_bundle_v8_period",
+        "monthly_performance_bundle_v9_hover",
         (
             int(monthly_year), int(monthly_month), monthly_send_type,
             _monthly_period_start.strftime("%Y-%m-%d"),
@@ -18561,12 +18561,12 @@ elif menu == "월간실적":
     trend_left, trend_right = st.columns(2)
     with trend_left:
         st.plotly_chart(
-            _weekly_black_plotly_text(monthly_bundle["amount_chart"]),
+            _monthly_apply_hover_style(_weekly_black_plotly_text(monthly_bundle["amount_chart"])),
             use_container_width=True, config={"displayModeBar": False},
         )
     with trend_right:
         st.plotly_chart(
-            _weekly_black_plotly_text(monthly_bundle["rate_chart"]),
+            _monthly_apply_hover_style(_weekly_black_plotly_text(monthly_bundle["rate_chart"])),
             use_container_width=True, config={"displayModeBar": False},
         )
 
@@ -18574,12 +18574,12 @@ elif menu == "월간실적":
     daily_trend_left, daily_trend_right = st.columns(2)
     with daily_trend_left:
         st.plotly_chart(
-            _weekly_black_plotly_text(monthly_bundle["daily_amount_chart"]),
+            _monthly_apply_hover_style(_weekly_black_plotly_text(monthly_bundle["daily_amount_chart"])),
             use_container_width=True, config={"displayModeBar": False},
         )
     with daily_trend_right:
         st.plotly_chart(
-            _weekly_black_plotly_text(monthly_bundle["daily_rate_chart"]),
+            _monthly_apply_hover_style(_weekly_black_plotly_text(monthly_bundle["daily_rate_chart"])),
             use_container_width=True, config={"displayModeBar": False},
         )
 
