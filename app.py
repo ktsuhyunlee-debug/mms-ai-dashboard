@@ -16748,7 +16748,11 @@ if menu == "홈":
                 previous_df = monthly_all.iloc[first_pos - period_count:first_pos].copy()
         previous_totals = _home_total_metrics(previous_df) if len(previous_df) == len(card_df) else {}
 
-        # MMS 실적 비중도 홈 분석조건 + 월간 조회기간을 동일하게 적용합니다.
+        # 홈 실적 비중: 전체는 MMS+RCS 합계, MMS/RCS는 선택 채널 주문금액입니다.
+        # 분모는 발송유형 필터와 무관하게 동일 조회기간 전체 쇼핑라운지 주문금액입니다.
+        home_share_type = str(applied.get("send_type", "전체")).strip().upper()
+        home_share_channels = ("MMS", "RCS") if home_share_type == "전체" else (home_share_type,)
+        home_share_label = "MMS+RCS 실적 비중" if home_share_type == "전체" else f"{home_share_type} 실적 비중"
         selected_months = set(selected_labels)
         selected_send_dates = pd.to_datetime(home_applied_sends.get("_date"), errors="coerce")
         selected_sends_for_share = home_applied_sends.loc[
@@ -16773,14 +16777,14 @@ if menu == "홈":
             selected_sends_for_share.get("주문금액", pd.Series(0, index=selected_sends_for_share.index)),
             errors="coerce",
         ).fillna(0) if not selected_sends_for_share.empty else pd.Series(dtype=float)
-        mms_amount = float(send_amounts_for_share.loc[send_types_for_share.eq("MMS")].sum()) if not selected_sends_for_share.empty else 0.0
+        channel_amount = float(send_amounts_for_share.loc[send_types_for_share.isin(home_share_channels)].sum()) if not selected_sends_for_share.empty else 0.0
         overall_amount = float(pd.to_numeric(
             selected_overall_for_share.get("주문금액", pd.Series(0, index=selected_overall_for_share.index)),
             errors="coerce",
         ).fillna(0).sum()) if not selected_overall_for_share.empty else 0.0
-        mms_share = (mms_amount / overall_amount) if overall_amount > 0 else None
+        channel_share = (channel_amount / overall_amount) if overall_amount > 0 else None
 
-        previous_mms_share = None
+        previous_channel_share = None
         if not previous_df.empty:
             previous_months = set(previous_df["_label"].astype(str).tolist())
             prev_send_dates = pd.to_datetime(home_applied_sends.get("_date"), errors="coerce")
@@ -16795,12 +16799,12 @@ if menu == "홈":
             prev_amounts = pd.to_numeric(
                 prev_sends.get("주문금액", pd.Series(0, index=prev_sends.index)), errors="coerce"
             ).fillna(0) if not prev_sends.empty else pd.Series(dtype=float)
-            prev_mms_amount = float(prev_amounts.loc[prev_types.eq("MMS")].sum()) if not prev_sends.empty else 0.0
+            prev_channel_amount = float(prev_amounts.loc[prev_types.isin(home_share_channels)].sum()) if not prev_sends.empty else 0.0
             prev_total_amount = float(pd.to_numeric(
                 prev_overall.get("주문금액", pd.Series(0, index=prev_overall.index)), errors="coerce"
             ).fillna(0).sum()) if not prev_overall.empty else 0.0
             if prev_total_amount > 0:
-                previous_mms_share = prev_mms_amount / prev_total_amount
+                previous_channel_share = prev_channel_amount / prev_total_amount
 
         cards = [
             (
@@ -16834,10 +16838,10 @@ if menu == "홈":
                 _home_total_delta(current_totals["발송당매출"], previous_totals.get("발송당매출")),
             ),
             (
-                "MMS 실적 비중",
-                f"{mms_share * 100:.1f}%" if mms_share is not None else "-",
-                _home_total_delta(mms_share, previous_mms_share, pp=True)
-                if mms_share is not None else "-",
+                home_share_label,
+                f"{channel_share * 100:.1f}%" if channel_share is not None else "-",
+                _home_total_delta(channel_share, previous_channel_share, pp=True)
+                if channel_share is not None else "-",
             ),
         ]
         cols = st.columns(7)
