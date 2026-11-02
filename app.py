@@ -3718,29 +3718,16 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
 def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
     f = _weekly_graph_aggregate(sw)
     labels = _weekly_send_chart_labels(f)
-    click_all = first_col(f, ["클릭 수", "클릭 수(uniq)"])
-    click_uniq = first_col(f, ["클릭 수(uniq)", "클릭 수"])
+    click_uniq = "클릭 수(uniq)"
     ctr_all = first_col(f, ["반응율", "반응율(uniq)"])
     ctr_uniq = first_col(f, ["반응율(uniq)", "반응율"])
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    click_colors = {
-        "MMS": ("#5b9bd5", "#a5a5a5"),
-        "RCS": ("#8b5cf6", "#c4b5fd"),
-    }
-    fig.add_trace(
-        go.Bar(
-            x=labels, y=f[click_all], name="클릭 수",
-            marker_color=[click_colors.get(value, click_colors["MMS"])[0] for value in f["_graph_channel"]],
-            text=[fmt_num(v) for v in f[click_all]],
-            textposition="inside",
-        ),
-        secondary_y=False,
-    )
+    click_colors = {"MMS": "#a5a5a5", "RCS": "#c4b5fd"}
     fig.add_trace(
         go.Bar(
             x=labels, y=f[click_uniq], name="클릭 수(uniq)",
-            marker_color=[click_colors.get(value, click_colors["MMS"])[1] for value in f["_graph_channel"]],
+            marker_color=[click_colors.get(value, click_colors["MMS"]) for value in f["_graph_channel"]],
             text=[fmt_num(v) for v in f[click_uniq]],
             textposition="inside",
         ),
