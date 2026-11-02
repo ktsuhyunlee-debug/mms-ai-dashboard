@@ -3716,40 +3716,63 @@ def weekly_product_chart(sw: pd.DataFrame, pw: pd.DataFrame | None = None) -> go
 
 
 def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
+    """주간 발송 통계: 클릭수/CTR 모두 Uniq 기준, 발송별 상세 hover."""
     f = _weekly_graph_aggregate(sw)
     labels = _weekly_send_chart_labels(f)
     click_uniq = "클릭 수(uniq)"
-    ctr_all = first_col(f, ["반응율", "반응율(uniq)"])
-    ctr_uniq = first_col(f, ["반응율(uniq)", "반응율"])
+    ctr_uniq = "반응율(uniq)"
+
+    # 발송일·시간대·유형 단위로 통합된 값이므로 막대와 꺾은선에 동일한
+    # hover를 사용합니다. CTR은 반드시 Uniq 클릭수/발송 성공 건수입니다.
+    weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    hover_details = []
+    for _, row in f.iterrows():
+        date_value = pd.to_datetime(row.get("_date"), errors="coerce")
+        if pd.notna(date_value):
+            date_text = (
+                f"{date_value.month}/{date_value.day}"
+                f"({weekday_map[date_value.dayofweek]})"
+            )
+        else:
+            date_text = str(row.get("요일", "") or "-").strip()
+        time_text = _v4482_time_key(row.get("시간대", "")) or "-"
+        channel = str(row.get("_graph_channel", "MMS") or "MMS")
+        sent = float(row.get("_graph_send", 0) or 0)
+        clicked = float(row.get("_graph_click_uniq", 0) or 0)
+        ctr_text = f"{clicked / sent * 100:.1f}%" if sent > 0 else "-"
+        hover_details.append(
+            f"<b>{_html.escape(channel)}</b><br>"
+            f"{_html.escape(date_text)} {_html.escape(time_text)}<br>"
+            f"발송건수: {sent:,.0f}<br>"
+            f"클릭수: {clicked:,.0f}<br>"
+            f"CTR: {ctr_text}"
+        )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     click_colors = {"MMS": "#a5a5a5", "RCS": "#c4b5fd"}
     fig.add_trace(
         go.Bar(
             x=labels, y=f[click_uniq], name="클릭 수(uniq)",
-            marker_color=[click_colors.get(value, click_colors["MMS"]) for value in f["_graph_channel"]],
+            marker_color=[
+                click_colors.get(value, click_colors["MMS"])
+                for value in f["_graph_channel"]
+            ],
             text=[fmt_num(v) for v in f[click_uniq]],
             textposition="inside",
+            customdata=hover_details,
+            hovertemplate="%{customdata}<extra></extra>",
         ),
         secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(
-            x=labels, y=f[ctr_all] * 100, name="반응율",
-            mode="lines+markers+text",
-            line=dict(color="#ed7d31", width=3),
-            text=[f"{v*100:.0f}%" for v in f[ctr_all]],
-            textposition="top center",
-        ),
-        secondary_y=True,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=labels, y=f[ctr_uniq] * 100, name="반응율(uniq)",
+            x=labels, y=f[ctr_uniq] * 100, name="CTR(Uniq)",
             mode="lines+markers+text",
             line=dict(color="#f4b000", width=3),
-            text=[f"{v*100:.0f}%" for v in f[ctr_uniq]],
-            textposition="bottom center",
+            text=[f"{float(v)*100:.1f}%" if pd.notna(v) else "-" for v in f[ctr_uniq]],
+            textposition="top center",
+            customdata=hover_details,
+            hovertemplate="%{customdata}<extra></extra>",
         ),
         secondary_y=True,
     )
@@ -3779,6 +3802,13 @@ def weekly_send_chart(sw: pd.DataFrame) -> go.Figure:
             categoryarray=labels,
         ),
         legend=dict(orientation="h", y=-.24, x=0.5, xanchor="center"),
+        hovermode="closest",
+        hoverlabel=dict(
+            bgcolor="#111827",
+            bordercolor="#111827",
+            font=dict(color="#ffffff", size=13),
+            align="left",
+        ),
     )
     return fig
 
