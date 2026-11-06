@@ -5,3 +5,5 @@ plotly
 python-pptx
 requests
 xlsxwriter
+requests-oauthlib
+itsdangerous
