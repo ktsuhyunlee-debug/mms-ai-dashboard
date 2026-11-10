@@ -1965,68 +1965,72 @@ def trend_chart(
     color: str,
     metric: str = "SPM",
 ) -> go.Figure:
-    """Home 월별·주간·일별 SPM/CTR 막대 및 3구간 이동평균 추세 그래프."""
+    """홈 월별·주간·일별: 컴팩트한 시계열 선 그래프 (집계값·hover 유지)."""
     labels = df["_label"].astype(str).tolist()
     is_ctr = str(metric).upper() == "CTR"
     if is_ctr:
         vals = (df["반응율(Uniq CTR)"].astype(float) * 100).tolist()
-        series_name = "CTR"
-        value_text = [f"{v:.1f}%" for v in vals]
+        series_name = "CTR (Uniq)"
         yaxis_title = "CTR (%)"
-        minimum_ymax = 1
+        hover_suffix = "%"
     else:
         vals = df["발송대비매출(SPM)"].astype(float).tolist()
         series_name = "SPM"
-        value_text = [f"{v:.1f}" for v in vals]
         yaxis_title = "SPM"
-        minimum_ymax = 10
+        hover_suffix = ""
 
+    # 시간 흐름이 중요한 데이터라 막대보다 선 그래프가 적합하며,
+    # 일별 데이터가 많을 때는 마커와 수치라벨을 생략해 과밀을 방지합니다.
+    count = len(labels)
+    rgb = tuple(int(color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
     fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=labels,
-            y=vals,
-            marker_color=color,
-            name=series_name,
-            text=value_text,
-            textposition="outside",
-            cliponaxis=False,
-            hovertemplate=(
-                "%{x}<br>CTR %{y:.1f}%<extra></extra>"
-                if is_ctr else "%{x}<br>SPM %{y:.1f}<extra></extra>"
-            ),
-        )
+    fig.add_trace(go.Scatter(
+        x=labels,
+        y=vals,
+        mode="lines+markers" if count <= 45 else "lines",
+        line=dict(color=color, width=2.4),
+        marker=dict(size=6, color=color),
+        fill="tozeroy",
+        fillcolor=f"rgba({rgb[0]},{rgb[1]},{rgb[2]},0.09)",
+        name=series_name,
+        customdata=labels,
+        hovertemplate=f"%{{customdata}}<br>{series_name}: %{{y:,.1f}}{hover_suffix}<extra></extra>",
+        connectgaps=False,
+    ))
+    chart_max = max(vals, default=0)
+    # 길이가 긴 일별 데이터도 X축이 서로 겹치지 않게 대표 눈금만 표시합니다.
+    tick_step = max(1, math.ceil(count / 9))
+    xaxis_settings = dict(
+        type="category", showgrid=False,
+        tickangle=-30 if count > 9 else 0,
+        automargin=True,
+        tickfont=dict(size=10),
     )
-    if len(vals) >= 2:
-        trend = pd.Series(vals).rolling(3, min_periods=1).mean()
-        fig.add_trace(
-            go.Scatter(
-                x=labels,
-                y=trend,
-                mode="lines",
-                name="추세",
-                line=dict(color="#333", width=2, dash="dot"),
-            )
+    if count > 9:
+        xaxis_settings.update(
+            tickmode="array",
+            tickvals=[labels[i] for i in range(0, count, tick_step)],
+            ticktext=[labels[i] for i in range(0, count, tick_step)],
         )
-    ymax = max(vals) if vals else 0
     fig.update_layout(
-        title=dict(text=title, x=.5, font=dict(size=20)),
-        height=440,
-        margin=dict(l=55, r=22, t=68, b=92),
+        title=dict(text=title, x=0.5, xanchor="center", y=0.96,
+                   font=dict(size=15, color="#263244")),
+        height=280,
+        margin=dict(l=40, r=20, t=47, b=42),
         plot_bgcolor="#ffffff",
-        barmode="overlay",
+        paper_bgcolor="#ffffff",
+        hovermode="x",
+        showlegend=False,
+        xaxis=xaxis_settings,
         yaxis=dict(
-            title=yaxis_title,
+            title=dict(text=yaxis_title, font=dict(size=10)),
+            tickfont=dict(size=10),
             tickformat=",.1f",
             ticksuffix="%" if is_ctr else "",
-            gridcolor="#ddd",
-            range=[0, max(ymax * 1.22, minimum_ymax)],
+            gridcolor="#edf0f5",
+            zeroline=False,
+            range=[0, max(chart_max * 1.13, 1 if is_ctr else 10)],
         ),
-        xaxis=dict(
-            tickangle=-35 if len(labels) > 12 else 0,
-            automargin=True,
-        ),
-        legend=dict(orientation="h", y=-.23),
     )
     return fig
 
@@ -16472,7 +16476,9 @@ if menu == "홈":
         )
 
     st.markdown("**📅 기본 기간**")
-    base_col1, base_sep, base_col2 = st.columns([1, 0.08, 1])
+    base_col1, base_sep, base_col2, apply_col, reset_col = st.columns(
+        [1.35, 0.09, 1.35, 0.64, 0.64], gap="small", vertical_alignment="bottom",
+    )
     with base_col1:
         draft["base_start"] = st.date_input(
             "기본 시작일",
@@ -16484,7 +16490,7 @@ if menu == "홈":
             label_visibility="collapsed",
         )
     with base_sep:
-        st.markdown("<div style='text-align:center;padding-top:8px;'>~</div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center;padding-bottom:9px;'>~</div>", unsafe_allow_html=True)
     with base_col2:
         draft["base_end"] = st.date_input(
             "기본 종료일",
@@ -16495,8 +16501,16 @@ if menu == "홈":
             key="home_analysis_base_end",
             label_visibility="collapsed",
         )
-
     base_invalid = draft["base_start"] > draft["base_end"]
+    with apply_col:
+        apply_clicked = st.button(
+            "✔ 적용", key="home_analysis_apply", use_container_width=True,
+            disabled=base_invalid,
+        )
+    with reset_col:
+        reset_clicked = st.button(
+            "↺ 초기화", key="home_analysis_reset", use_container_width=True,
+        )
     if base_invalid:
         st.warning("기본 기간의 시작일은 종료일보다 늦을 수 없습니다.")
 
@@ -16611,32 +16625,12 @@ if menu == "홈":
             if invalid_exclude_count:
                 st.warning(f"시작일이 종료일보다 늦은 제외구간 {invalid_exclude_count}개는 적용에서 제외됩니다.")
 
-    base_preview_df = apply_home_analysis_date_filter(
-        sends, "전체", draft["base_start"], draft["base_end"], [], [],
-    ) if not base_invalid else sends.iloc[0:0].copy()
     preview_df = apply_home_analysis_date_filter(
         sends, draft["mode"], draft["base_start"], draft["base_end"],
         draft["include_ranges"], draft["exclude_ranges"],
     ) if not base_invalid else sends.iloc[0:0].copy()
-    base_preview_df = apply_home_send_type_filter(base_preview_df, draft["send_type"])
     preview_df = apply_home_send_type_filter(preview_df, draft["send_type"])
-
-    base_days = int(pd.to_datetime(base_preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not base_preview_df.empty else 0
     preview_days = int(pd.to_datetime(preview_df["_date"], errors="coerce").dt.normalize().nunique()) if not preview_df.empty else 0
-    preview_send_count = int(len(preview_df))
-
-    result_col, apply_col, reset_col = st.columns([3.2, 0.9, 0.9])
-    result_col.markdown(
-        f"**📋 분석 대상 : {draft['send_type']} · {preview_days:,}일 "
-        f"(발송 {preview_send_count:,}건) · 기본 {base_days:,}일 → 적용 {preview_days:,}일**"
-    )
-    apply_clicked = apply_col.button(
-        "✔ 적용", key="home_analysis_apply", use_container_width=True,
-        disabled=base_invalid or preview_days == 0,
-    )
-    reset_clicked = reset_col.button(
-        "↺ 초기화", key="home_analysis_reset", use_container_width=True,
-    )
 
     if preview_days == 0 and not base_invalid:
         st.warning("현재 조건에 해당하는 데이터가 없어 적용할 수 없습니다.")
@@ -16659,7 +16653,7 @@ if menu == "홈":
         st.session_state.home_analysis_notice = "Home 분석 조건을 초기화했습니다."
         st.rerun()
 
-    if apply_clicked:
+    if apply_clicked and not base_invalid and preview_days > 0:
         st.session_state.home_analysis_applied = {
             "mode": draft["mode"],
             "send_type": draft["send_type"],
@@ -16823,7 +16817,8 @@ if menu == "홈":
             if prev_total_amount > 0:
                 previous_channel_share = prev_channel_amount / prev_total_amount
 
-        cards = [
+        # 공통 실적 4개 카드: 전체 선택 시에는 MMS+RCS 합계입니다.
+        common_cards = [
             (
                 "주문금액",
                 f"{fmt_num(current_totals['주문금액'])}원",
@@ -16833,21 +16828,6 @@ if menu == "홈":
                 "발송건수",
                 fmt_num(current_totals["발송건수"]),
                 _home_total_delta(current_totals["발송건수"], previous_totals.get("발송건수")),
-            ),
-            (
-                "CTR",
-                fmt_pct(current_totals["CTR"]),
-                _home_total_delta(current_totals["CTR"], previous_totals.get("CTR"), pp=True),
-            ),
-            (
-                "클릭 CVR",
-                fmt_pct(current_totals["클릭 CVR"]),
-                _home_total_delta(current_totals["클릭 CVR"], previous_totals.get("클릭 CVR"), pp=True),
-            ),
-            (
-                "SPM",
-                f"{current_totals['SPM']:.1f}",
-                _home_total_delta(current_totals["SPM"], previous_totals.get("SPM")),
             ),
             (
                 "발송당매출",
@@ -16861,14 +16841,56 @@ if menu == "홈":
                 if channel_share is not None else "-",
             ),
         ]
-        cols = st.columns(7)
-        for col, (label, value, delta) in zip(cols, cards):
-            col.markdown(
-                f'<div class="metric-card"><div class="metric-label">{label}</div>'
-                f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta">이전 동일기간 대비 {delta}</div></div>',
-                unsafe_allow_html=True,
-            )
+
+        def _render_home_kpi_row(card_items: list[tuple]) -> None:
+            cols = st.columns(len(card_items), gap="small")
+            for col, (label, value, delta) in zip(cols, card_items):
+                col.markdown(
+                    f'<div class="metric-card"><div class="metric-label">{label}</div>'
+                    f'<div class="metric-value">{value}</div>'
+                    f'<div class="metric-delta">이전 동일기간 대비 {delta}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        _render_home_kpi_row(common_cards)
+
+        # 채널별 KPI: 동일 기간·채널별 유니크 클릭수/발송 성공 건수의 합산 비율을 사용합니다.
+        # 행별 CTR/CVR 단순평균을 사용하지 않으며, 원본 발송유형을 기준으로 정확히 분리합니다.
+        def _home_channel_totals(channel_sends: pd.DataFrame, channel: str) -> dict:
+            if channel_sends is None or channel_sends.empty:
+                return {}
+            only_channel = channel_sends.loc[
+                _weekly_send_type_series(channel_sends).eq(channel)
+            ].copy()
+            if only_channel.empty:
+                return {}
+            return _home_total_metrics(aggregate_send(only_channel, "Monthly"))
+
+        previous_sends_for_cards = (
+            prev_sends if not previous_df.empty else home_applied_sends.iloc[0:0].copy()
+        )
+        channel_cards = []
+        channels_to_show = ("MMS", "RCS") if home_share_type == "전체" else (home_share_type,)
+        for channel in channels_to_show:
+            channel_totals = _home_channel_totals(selected_sends_for_share, channel)
+            prior_channel_totals = _home_channel_totals(previous_sends_for_cards, channel)
+            for metric in ("CTR", "클릭 CVR", "SPM"):
+                if channel_totals:
+                    metric_value = (
+                        fmt_pct(channel_totals[metric]) if metric != "SPM"
+                        else f"{channel_totals[metric]:.1f}"
+                    )
+                    metric_delta = _home_total_delta(
+                        channel_totals[metric], prior_channel_totals.get(metric),
+                        pp=metric != "SPM",
+                    )
+                else:
+                    metric_value = "-"
+                    metric_delta = "-"
+                channel_cards.append((f"{channel} {metric}", metric_value, metric_delta))
+
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+        _render_home_kpi_row(channel_cards)
 
     # Home 반응 분포: 분석 조건 적용 후 실제 남은 발송일과 1:1로 동일한 날짜만 사용
     st.markdown('<div class="section-title">반응 분포</div>', unsafe_allow_html=True)
@@ -16903,7 +16925,7 @@ if menu == "홈":
         selectable_dataframe(
             _home_monthly_view,
             key="home_monthly_table",
-            use_container_width=True, hide_index=True, height=400,
+            use_container_width=True, hide_index=True, height=320,
         )
     st.markdown('<div class="home-section-spacer"></div>', unsafe_allow_html=True)
 
@@ -16932,7 +16954,7 @@ if menu == "홈":
         selectable_dataframe(
             _home_weekly_view,
             key="home_weekly_table",
-            use_container_width=True, hide_index=True, height=520,
+            use_container_width=True, hide_index=True, height=360,
         )
     st.markdown('<div class="home-section-spacer"></div>', unsafe_allow_html=True)
 
@@ -16966,7 +16988,7 @@ if menu == "홈":
         selectable_dataframe(
             _home_daily_view,
             key="home_daily_table",
-            use_container_width=True, hide_index=True, height=480,
+            use_container_width=True, hide_index=True, height=360,
         )
 
 
