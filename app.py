@@ -1965,7 +1965,7 @@ def trend_chart(
     color: str,
     metric: str = "SPM",
 ) -> go.Figure:
-    """홈 월별·주간·일별: 컴팩트한 시계열 선 그래프 (집계값·hover 유지)."""
+    """홈 월별·주간·일별: 간결한 선 그래프 + 데이터 포인트 수치 라벨."""
     labels = df["_label"].astype(str).tolist()
     is_ctr = str(metric).upper() == "CTR"
     if is_ctr:
@@ -1979,15 +1979,28 @@ def trend_chart(
         yaxis_title = "SPM"
         hover_suffix = ""
 
-    # 시간 흐름이 중요한 데이터라 막대보다 선 그래프가 적합하며,
-    # 일별 데이터가 많을 때는 마커와 수치라벨을 생략해 과밀을 방지합니다.
     count = len(labels)
     rgb = tuple(int(color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=labels,
-        y=vals,
-        mode="lines+markers" if count <= 45 else "lines",
+
+    # 짧은 월별 추이는 전부 표시하고, 긴 주·일별 추이는 그래프 폭에 맞게
+    # 약 10~12개 라벨만 표시합니다. 나머지 전체 값은 기존 hover로 확인할 수 있습니다.
+    max_visible_labels = 12
+    label_step = max(1, math.ceil(count / max_visible_labels))
+    labeled_indices = set(range(0, count, label_step))
+    if count:
+        labeled_indices.add(count - 1)  # 최신 실적은 항상 표시
+        # 마지막 두 라벨이 너무 가까우면 최신 값만 남깁니다.
+        last_gap = (count - 1) % label_step
+        if label_step > 1 and 0 < last_gap <= math.ceil(label_step / 2):
+            labeled_indices.discard(((count - 1) // label_step) * label_step)
+
+    value_labels = [
+        (f"{value:,.1f}%" if is_ctr else f"{value:,.1f}") if i in labeled_indices else ""
+        for i, value in enumerate(vals)
+    ]
+    line_kwargs = dict(
+        x=labels, y=vals,
         line=dict(color=color, width=2.4),
         marker=dict(size=6, color=color),
         fill="tozeroy",
@@ -1996,27 +2009,50 @@ def trend_chart(
         customdata=labels,
         hovertemplate=f"%{{customdata}}<br>{series_name}: %{{y:,.1f}}{hover_suffix}<extra></extra>",
         connectgaps=False,
-    ))
+    )
+    if count <= 45:
+        # 월별·짧은 기간: 각 점 위에 직접 숫자를 얹습니다.
+        fig.add_trace(go.Scatter(
+            mode="lines+markers+text",
+            text=value_labels,
+            textposition="top center",
+            textfont=dict(size=10, color="#263244"),
+            cliponaxis=False,
+            **line_kwargs,
+        ))
+    else:
+        # 일별 전체 기간: 선은 단정하게 유지하고 대표 지점만 숫자·마커로 표기합니다.
+        fig.add_trace(go.Scatter(mode="lines", **line_kwargs))
+        visible = sorted(labeled_indices)
+        fig.add_trace(go.Scatter(
+            x=[labels[i] for i in visible],
+            y=[vals[i] for i in visible],
+            mode="markers+text",
+            marker=dict(size=6, color=color),
+            text=[value_labels[i] for i in visible],
+            textposition="top center",
+            textfont=dict(size=10, color="#263244"),
+            cliponaxis=False,
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
     chart_max = max(vals, default=0)
-    # 길이가 긴 일별 데이터도 X축이 서로 겹치지 않게 대표 눈금만 표시합니다.
-    tick_step = max(1, math.ceil(count / 9))
+    # 그래프 위 숫자가 표시된 모든 지점에 X축 주차·날짜도 함께 표시합니다.
+    # 숫자 라벨과 하단 축 라벨이 서로 다른 간격으로 생략되지 않도록 같은 인덱스를 사용합니다.
+    visible_ticks = [labels[i] for i in sorted(labeled_indices)]
     xaxis_settings = dict(
         type="category", showgrid=False,
-        tickangle=-30 if count > 9 else 0,
+        tickmode="array", tickvals=visible_ticks, ticktext=visible_ticks,
+        tickangle=-45 if count > 9 else (-30 if count > 6 else 0),
         automargin=True,
-        tickfont=dict(size=10),
+        tickfont=dict(size=9 if count > 9 else 10),
     )
-    if count > 9:
-        xaxis_settings.update(
-            tickmode="array",
-            tickvals=[labels[i] for i in range(0, count, tick_step)],
-            ticktext=[labels[i] for i in range(0, count, tick_step)],
-        )
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center", y=0.96,
                    font=dict(size=15, color="#263244")),
         height=280,
-        margin=dict(l=40, r=20, t=47, b=42),
+        margin=dict(l=40, r=28, t=49, b=42),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
         hovermode="x",
@@ -2029,7 +2065,7 @@ def trend_chart(
             ticksuffix="%" if is_ctr else "",
             gridcolor="#edf0f5",
             zeroline=False,
-            range=[0, max(chart_max * 1.13, 1 if is_ctr else 10)],
+            range=[0, max(chart_max * 1.27, 1 if is_ctr else 10)],
         ),
     )
     return fig
