@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 인사이트 v3 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 인사이트 v4 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
 기존 Streamlit Secrets 유지:
 [google_oauth] client_id, client_secret, redirect_uri, state_signing_secret
@@ -44,7 +44,7 @@ NAV_HELP = ["UV/PV·구매·일별/시간대별", "기기·성별·연령·등�
 BLUE, TEAL, ORANGE, LIGHT = "#4765D2", "#169C99", "#F6A34F", "#ECF1FB"
 
 st.markdown("""<style>
-.block-container{padding:0.75rem 1.4rem 1rem!important;max-width:1700px!important}
+.block-container{padding:4.25rem 1.4rem 1.1rem!important;max-width:1700px!important}
 section[data-testid=stSidebar]{background:#F7F9FD}
 section[data-testid=stSidebar] .block-container{padding-top:1rem!important}
 [data-testid=stVerticalBlock]{gap:.47rem!important}
@@ -63,7 +63,7 @@ div[data-testid=stDataFrame]{margin-top:-8px}
 .kpi-value{color:#1E3150;font-size:clamp(1rem,1.55vw,1.62rem);font-weight:780;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi-foot{font-size:.68rem;color:#8B98AB;margin-top:4px}
 .scope-label{display:inline-block;border-radius:16px;background:#EDF2FF;color:#4055B6;font-size:.68rem;padding:3px 9px;font-weight:750}
-@media(max-width:900px){.block-container{padding:0.6rem!important}.kpi{padding:9px;min-height:70px}}
+@media(max-width:900px){.block-container{padding:3.8rem 0.65rem 1rem!important}.kpi{padding:9px;min-height:70px}}
 </style>""", unsafe_allow_html=True)
 
 # ------------------------ OAuth: compatible with existing Secrets ------------------------
@@ -230,14 +230,36 @@ def report(cfg,token,start,end,dimensions,metrics,filters=None,limit=250,sort=No
 
 
 def frame(raw):
-    ds=[x["name"] for x in raw.get("dimensionHeaders",[])]
-    ms=[x["name"] for x in raw.get("metricHeaders",[])]
+    """Convert a GA4 report without failing on repeated header names.
+
+    A column label can occur more than once in an API subreport. Selecting
+    df[label] in that case produces a DataFrame rather than the 1-D Series
+    expected by pd.to_numeric. Preserve the first metric's public name and
+    rename later occurrences instead of crashing the whole dashboard.
+    """
+    ds=[x.get("name", "") for x in raw.get("dimensionHeaders", [])]
+    ms=[x.get("name", "") for x in raw.get("metricHeaders", [])]
+    original=ds+ms
+    used=set()
+    columns=[]
+    for position,name in enumerate(original):
+        label=name or f"unnamed_{position}"
+        if label in used:
+            index=2
+            while f"{label}__{index}" in used:
+                index+=1
+            label=f"{label}__{index}"
+        used.add(label)
+        columns.append(label)
     rows=[]
-    for x in raw.get("rows",[]):
-        vals=[v.get("value","") for v in x.get("dimensionValues",[])]+[v.get("value","") for v in x.get("metricValues",[])]
-        rows.append(dict(zip(ds+ms,vals)))
-    df=pd.DataFrame(rows,columns=ds+ms)
-    for m in ms: df[m]=pd.to_numeric(df[m],errors="coerce").fillna(0)
+    for entry in raw.get("rows", []):
+        vals=([v.get("value", "") for v in entry.get("dimensionValues", [])]
+              +[v.get("value", "") for v in entry.get("metricValues", [])])
+        rows.append((vals+[""]*len(columns))[:len(columns)])
+    df=pd.DataFrame(rows, columns=columns)
+    for position in range(len(ds),len(columns)):
+        field=columns[position]
+        df[field]=pd.to_numeric(df[field],errors="coerce").fillna(0)
     return df
 
 
@@ -442,15 +464,38 @@ def funnel(cfg,token,start,end,field):
           ]},"limit":"10"}
     try:
         data=api(cfg,token,":runFunnelReport",body,alpha=True)
-        df=frame(data.get("funnelTable",{}))
-        if df.empty:return None
-        # v1alpha response contains funnelStepName + activeUsers, and often funnelStep/ completion rate columns
-        active=[x for x in df.columns if x=="activeUsers"]
-        if not active:return None
-        values=[float(v) for v in df["activeUsers"].tolist()]
-        if len(values)<2:return None
-        return values[0],values[1]
-    except GAError:return None
+        # Use the 2-step funnelVisualization first: funnelTable can include
+        # breakdown/total rows and must NOT be treated as a simple 2-row list.
+        for section in ("funnelVisualization", "funnelTable"):
+            part=data.get(section) or {}
+            metrics=[x.get("name") for x in part.get("metricHeaders", [])]
+            dimensions=[x.get("name") for x in part.get("dimensionHeaders", [])]
+            if "activeUsers" not in metrics or "funnelStepName" not in dimensions:
+                continue
+            mi=metrics.index("activeUsers")
+            di=dimensions.index("funnelStepName")
+            by_step={}
+            for row in part.get("rows", []):
+                dim_values=row.get("dimensionValues", [])
+                met_values=row.get("metricValues", [])
+                if di>=len(dim_values) or mi>=len(met_values):
+                    continue
+                label=dim_values[di].get("value", "")
+                value=met_values[mi].get("value", "")
+                try:
+                    number=float(value)
+                except (ValueError, TypeError):
+                    continue
+                if label.startswith("1.") or "쇼핑라운지 진입" in label:
+                    by_step[1]=number
+                elif label.startswith("2.") or "구매 완료" in label:
+                    by_step[2]=number
+            if 1 in by_step and 2 in by_step:
+                return by_step[1],by_step[2]
+        return None
+    except (GAError,TypeError,ValueError,KeyError,IndexError):
+        # An unavailable/malformed funnel never blocks the other KPIs.
+        return None
 
 
 def overview(cfg,token,start,end,fields):
