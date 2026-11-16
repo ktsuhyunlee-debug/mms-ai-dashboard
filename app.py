@@ -316,6 +316,107 @@ html, body, [class*="css"] {
     white-space: nowrap;
 }
 
+/* 주간 핵심실적 카드: 전체 9개 카드를 같은 높이로, 내부 내용은 중앙 정렬 */
+.weekly-core-kpi-card {
+    height: 105px;
+    min-height: 105px;
+    padding: 10px 12px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    overflow: visible !important;
+    position: relative;
+}
+.weekly-core-kpi-card .metric-label {
+    margin-bottom: 5px;
+}
+.weekly-core-kpi-card.weekly-channel-kpi-card {
+    height: 105px;
+    min-height: 105px;
+    z-index: 1;
+}
+.weekly-core-kpi-card.weekly-channel-kpi-card:hover,
+.weekly-core-kpi-card.weekly-channel-kpi-card:focus-within {
+    z-index: 10010;
+}
+.weekly-core-kpi-card .weekly-channel-kpi-name { margin-bottom: 2px; }
+.weekly-core-kpi-card .weekly-channel-kpi-delta { margin-top: 2px; }
+.weekly-channel-kpi-grid { overflow: visible !important; }
+.weekly-channel-kpi-cell {
+    position: relative;
+    cursor: help;
+    overflow: visible !important;
+}
+.weekly-channel-kpi-cell:hover { z-index: 10011; }
+.weekly-channel-kpi-tooltip {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: calc(100% - 2px);
+    bottom: auto;
+    z-index: 10020;
+    width: min(570px, calc(100vw - 44px));
+    min-width: 0;
+    max-height: 315px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px;
+    border-radius: 9px;
+    background: rgba(17, 24, 39, .98);
+    color: #fff;
+    text-align: left;
+    box-shadow: 0 9px 26px rgba(15, 23, 42, .25);
+    pointer-events: auto;
+    box-sizing: border-box;
+}
+.weekly-channel-kpi-cell:hover .weekly-channel-kpi-tooltip,
+.weekly-channel-kpi-cell:focus-within .weekly-channel-kpi-tooltip {
+    display: block;
+}
+.weekly-channel-kpi-cell:nth-child(3) .weekly-channel-kpi-tooltip {
+    left: auto;
+    right: 0;
+}
+.weekly-channel-kpi-tooltip-title {
+    font-size: 12px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    white-space: nowrap;
+}
+.weekly-channel-kpi-tooltip-table {
+    display: grid;
+    grid-template-columns: minmax(115px, 1.25fr) minmax(100px, 1.15fr) minmax(70px, .85fr) minmax(75px, .9fr) minmax(70px, .8fr);
+    font-size: 11px;
+    line-height: 1.4;
+    border: 1px solid rgba(255,255,255,.16);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.weekly-channel-kpi-tooltip-cell {
+    padding: 6px 5px;
+    border-right: 1px solid rgba(255,255,255,.12);
+    border-bottom: 1px solid rgba(255,255,255,.12);
+    overflow-wrap: anywhere;
+    word-break: keep-all;
+    min-width: 0;
+}
+.weekly-channel-kpi-tooltip-cell:nth-child(5n) {
+    border-right: none;
+}
+.weekly-channel-kpi-tooltip-cell:nth-last-child(-n + 5) {
+    border-bottom: none;
+}
+.weekly-channel-kpi-tooltip-head {
+    background: rgba(255,255,255,.1);
+    font-weight: 800;
+    white-space: nowrap;
+}
+.weekly-channel-kpi-tooltip-empty {
+    font-size: 12px;
+    color: #e5e7eb;
+}
+
 /* 주간실적 3번째 줄: 성별·연령 타겟별 CTR / SPM */
 .weekly-target-card {
     min-height: 92px;
@@ -3601,6 +3702,123 @@ def _weekly_channel_ctr_cvr_metrics(df: pd.DataFrame) -> dict[str, dict[str, flo
             "clicked": clicked,
         }
     return result
+
+def _weekly_core_channel_hover_rows(df: pd.DataFrame) -> dict[str, list[dict]]:
+    """주간 핵심실적의 전체/MMS/RCS hover: 날짜·시간·타겟 단위로 발송 통계를 집계합니다.
+
+    분할 발송 행은 같은 일시·타겟·채널에서 합산하고 상품수는 중복 합산하지 않습니다.
+    클릭수는 핵심 KPI와 동일한 유니크 클릭 수 컬럼을 우선 사용합니다.
+    """
+    result = {"전체": [], "MMS": [], "RCS": []}
+    if df is None or df.empty:
+        return result
+    send_col = first_col(df, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(df, ["클릭 수(uniq)", "클릭 수"])
+    if not send_col or not click_col:
+        return result
+
+    work = pd.DataFrame(index=df.index)
+    work["_channel"] = _weekly_kpi_channel_series(df)
+    date_source = df["_date"] if "_date" in df.columns else (
+        df[first_col(df, ["발송일", "날짜", "일자"])]
+        if first_col(df, ["발송일", "날짜", "일자"]) else pd.Series(pd.NaT, index=df.index)
+    )
+    work["_date"] = pd.to_datetime(date_source, errors="coerce").dt.normalize()
+    time_col = first_col(df, ["시간대", "발송시간", "시간"])
+    work["_time"] = (
+        df[time_col].map(_v4482_time_key).fillna("") if time_col
+        else pd.Series("", index=df.index, dtype="object")
+    )
+    gender = (
+        df["성별"].fillna("").astype(str).str.strip()
+        .replace({"남자": "남성", "남": "남성", "여자": "여성", "여": "여성"})
+        if "성별" in df.columns else pd.Series("", index=df.index, dtype="object")
+    )
+    age = (
+        df["연령"].fillna("").map(clean_identifier_value).astype(str).str.strip()
+        if "연령" in df.columns else pd.Series("", index=df.index, dtype="object")
+    )
+    age = age.replace({"nan": "", "None": ""})
+    work["_target"] = (gender + " " + age).str.strip()
+    target_col = first_col(df, ["타겟", "타겟명", "대상타겟"])
+    if target_col:
+        fallback_target = df[target_col].fillna("").astype(str).str.strip()
+        work["_target"] = work["_target"].where(work["_target"].ne(""), fallback_target)
+    work["_target"] = work["_target"].replace("", "미분류")
+    work["_send"] = pd.to_numeric(df[send_col], errors="coerce").fillna(0)
+    work["_click"] = pd.to_numeric(df[click_col], errors="coerce").fillna(0)
+    work["_orders"] = (
+        pd.to_numeric(df["주문건수"], errors="coerce").fillna(0)
+        if "주문건수" in df.columns else 0
+    )
+    work["_products"] = (
+        pd.to_numeric(df["상품수"], errors="coerce").fillna(0)
+        if "상품수" in df.columns else 0
+    )
+    grouped = (
+        work.groupby(["_date", "_time", "_channel", "_target"],
+                     as_index=False, dropna=False, sort=True)
+        .agg(_send=("_send", "sum"), _click=("_click", "sum"),
+             _orders=("_orders", "sum"), _products=("_products", "max"))
+        .sort_values(["_date", "_time", "_channel", "_target"], kind="stable")
+    )
+    weekday_ko = ("월", "화", "수", "목", "금", "토", "일")
+    for _, row in grouped.iterrows():
+        ts = pd.Timestamp(row["_date"]) if pd.notna(row["_date"]) else pd.NaT
+        date_label = (
+            f"{ts.month}/{ts.day}({weekday_ko[ts.weekday()]})" if pd.notna(ts) else "-"
+        )
+        time_label = str(row["_time"]).strip()
+        if time_label:
+            date_label += " " + time_label
+        channel = str(row["_channel"])
+        target = str(row["_target"])
+        send = float(row["_send"])
+        clicked = float(row["_click"])
+        detail = {
+            "date": date_label,
+            "target": target,
+            "sent": f"{int(round(send)):,}",
+            "clicked": f"{int(round(clicked)):,}",
+            "ctr": f"{clicked / send * 100:.1f}%" if send > 0 else "-",
+            "products": f"{int(round(float(row["_products"]))):,}",
+            "orders": f"{int(round(float(row["_orders"]))):,}",
+        }
+        if channel in result:
+            result[channel].append(detail)
+        result["전체"].append({**detail, "target": f"{channel} · {target}"})
+    return result
+
+
+def _weekly_core_channel_hover_html(rows: list[dict], metric: str, channel: str) -> str:
+    """주간 핵심실적 채널 KPI에 표시할 안전한 5열 표 형태 hover."""
+    headers = (
+        ["발송일", "타겟", "발송건수", "클릭수", "CTR"]
+        if metric == "CTR" else ["발송일", "타겟", "상품수", "주문건수", "클릭수"]
+    )
+    fields = (
+        ["date", "target", "sent", "clicked", "ctr"]
+        if metric == "CTR" else ["date", "target", "products", "orders", "clicked"]
+    )
+    title = _html.escape(f"{channel} · 발송별 {'CTR' if metric == 'CTR' else '클릭 CVR'}")
+    if not rows:
+        return (
+            f'<div class="weekly-channel-kpi-tooltip-title">{title}</div>'
+            '<div class="weekly-channel-kpi-tooltip-empty">해당 유형의 발송 데이터가 없습니다.</div>'
+        )
+    head = "".join(
+        f'<div class="weekly-channel-kpi-tooltip-cell weekly-channel-kpi-tooltip-head">{_html.escape(name)}</div>'
+        for name in headers
+    )
+    cells = "".join(
+        f'<div class="weekly-channel-kpi-tooltip-cell">{_html.escape(str(row.get(field, "-")))}</div>'
+        for row in rows for field in fields
+    )
+    return (
+        f'<div class="weekly-channel-kpi-tooltip-title">{title}</div>'
+        f'<div class="weekly-channel-kpi-tooltip-table">{head}{cells}</div>'
+    )
+
 
 def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
     """v1/v2 분할행을 같은 발송일·요일·시간대·발송유형 단위로 합산합니다."""
@@ -17675,6 +17893,7 @@ elif menu == "주간실적":
     # CTR / CVR은 전체·MMS·RCS 각각 합산하고, 동일 채널의 이전 기간과 비교합니다.
     _weekly_channels_current = _weekly_channel_ctr_cvr_metrics(sw)
     _weekly_channels_previous = _weekly_channel_ctr_cvr_metrics(prev_sw)
+    _weekly_core_hover_rows = _weekly_core_channel_hover_rows(sw)
 
     cards = [
         ("발송횟수", f"{weekly_send_runs:,}회", weekly_delta(weekly_send_runs, prev_weekly_send_runs) if not prev_sw.empty else "-"),
@@ -17701,15 +17920,19 @@ elif menu == "주간실적":
                     _channel_delta = _weekly_kpi_delta_label(
                         _current, _previous, label, has_previous_data=not prev_sw.empty
                     )
+                    _hover_html = _weekly_core_channel_hover_html(
+                        _weekly_core_hover_rows.get(_channel, []), label, _channel
+                    )
                     _channel_cells.append(
-                        '<div class="weekly-channel-kpi-cell">'
+                        '<div class="weekly-channel-kpi-cell" tabindex="0">'
                         f'<div class="weekly-channel-kpi-name">{_channel}</div>'
                         f'<div class="weekly-channel-kpi-value">{_channel_value}</div>'
                         f'<div class="weekly-channel-kpi-delta {weekly_delta_class(_channel_delta)}">{_channel_delta}</div>'
+                        f'<div class="weekly-channel-kpi-tooltip">{_hover_html}</div>'
                         '</div>'
                     )
                 st.markdown(
-                    '<div class="metric-card weekly-kpi-card weekly-channel-kpi-card">'
+                    '<div class="metric-card weekly-kpi-card weekly-core-kpi-card weekly-channel-kpi-card">'
                     f'<div class="metric-label">{label}</div>'
                     '<div class="weekly-channel-kpi-grid">'
                     + ''.join(_channel_cells) + '</div></div>',
@@ -17717,7 +17940,7 @@ elif menu == "주간실적":
                 )
             else:
                 st.markdown(
-                    f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
+                    f'<div class="metric-card weekly-kpi-card weekly-core-kpi-card"><div class="metric-label">{label}</div>'
                     '<div class="weekly-kpi-value-row">'
                     f'<div class="metric-value">{value}</div>'
                     f'<div class="metric-delta {weekly_delta_class(delta)}">{delta}</div>'
