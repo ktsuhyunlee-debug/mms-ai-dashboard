@@ -3772,10 +3772,119 @@ def _weekly_channel_ctr_cvr_metrics(df: pd.DataFrame) -> dict[str, dict[str, flo
         }
     return result
 
-def _weekly_core_channel_hover_rows(df: pd.DataFrame) -> dict[str, list[dict]]:
+def _weekly_core_hover_actual_product_count(
+    send_rows: pd.DataFrame,
+    product_rows: pd.DataFrame | None,
+    date_value,
+    time_value: str,
+    channel: str,
+    target: str,
+) -> int | None:
+    """가능한 경우 해당 발송의 상품 RAW에서 실제 편성 슬롯 수를 확인합니다.
+
+    일시가 같은 여러 채널/타겟이 섞여 있으면, 소재·유형·타겟 중
+    확인 가능한 구분 없이 다른 채널 상품을 가져오지 않습니다.
+    """
+    if product_rows is None or product_rows.empty:
+        return None
+    product = product_rows.copy()
+    source_date = first_col(product, ["_date", "발송일", "날짜", "일자"])
+    source_time = first_col(product, ["시간대", "발송시간", "시간"])
+    if not source_date or not source_time or pd.isna(date_value) or not time_value:
+        return None
+    candidate_dates = pd.to_datetime(product[source_date], errors="coerce").dt.normalize()
+    candidate_times = product[source_time].map(_v4482_time_key)
+    product = product.loc[
+        candidate_dates.eq(pd.Timestamp(date_value).normalize())
+        & candidate_times.eq(time_value)
+    ].copy()
+    if product.empty:
+        return None
+
+    # 같은 시각의 서로 다른 채널/타겟 자료가 섞일 수 있으므로 선행 발송을 확인합니다.
+    send_date = pd.to_datetime(send_rows.get("_date"), errors="coerce").dt.normalize()
+    send_time_col = first_col(send_rows, ["시간대", "발송시간", "시간"])
+    send_times = (send_rows[send_time_col].map(_v4482_time_key) if send_time_col
+                  else pd.Series("", index=send_rows.index))
+    same_time_sends = send_rows.loc[send_date.eq(pd.Timestamp(date_value).normalize())
+                                    & send_times.eq(time_value)].copy()
+    same_time_channels = _weekly_kpi_channel_series(same_time_sends)
+    channel_mixed = same_time_channels.nunique() > 1
+
+    # 소재가 양쪽에 존재하면 원본과 일치하는 소재만 우선 연결합니다.
+    product_material_col = first_col(product, ["소재", "소재명"])
+    send_material_col = first_col(same_time_sends, ["소재", "소재명"])
+    matched_material = False
+    if product_material_col and send_material_col:
+        channel_sends = same_time_sends.loc[same_time_channels.eq(channel)]
+        send_materials = set(channel_sends[send_material_col].fillna("").astype(str)
+                             .str.strip().str.casefold()) - {""}
+        if send_materials:
+            product_materials = product[product_material_col].fillna("").astype(str).str.strip().str.casefold()
+            keep = product_materials.isin(send_materials)
+            if keep.any():
+                product = product.loc[keep].copy()
+                matched_material = True
+
+    # 상품 RAW에 명시된 MMS/RCS 표시를 우선 사용합니다.
+    product_hints = _monthly_channel_hints(product)
+    has_channel_hint = product_hints.isin(["MMS", "RCS"]).any()
+    if has_channel_hint:
+        product = product.loc[product_hints.eq(channel)].copy()
+        if product.empty:
+            return None
+    elif channel_mixed and not matched_material:
+        # 동일 시각 MMS+RCS이고 상품 RAW에 구분 근거가 없을 때 임의 배정하지 않습니다.
+        return None
+
+    # 성별/연령 정보가 있는 RAW는 해당 타겟만 남깁니다.
+    product_gender_col = first_col(product, ["성별"])
+    product_age_col = first_col(product, ["연령"])
+    target_matched = False
+    if product_gender_col and product_age_col:
+        genders = (product[product_gender_col].fillna("").astype(str).str.strip()
+                   .replace({"남자": "남성", "남": "남성", "여자": "여성", "여": "여성"}))
+        ages = product[product_age_col].map(clean_identifier_value).astype(str).str.strip()
+        explicit = genders.ne("") & ages.ne("")
+        if explicit.any():
+            mask = (genders + " " + ages).str.strip().eq(target)
+            if not mask.any():
+                return None
+            product = product.loc[mask].copy()
+            target_matched = True
+    if not target_matched and not matched_material:
+        gender_col = first_col(same_time_sends, ["성별"])
+        age_col = first_col(same_time_sends, ["연령"])
+        if gender_col and age_col:
+            genders = same_time_sends[gender_col].fillna("").astype(str).str.strip()
+            ages = same_time_sends[age_col].map(clean_identifier_value).astype(str).str.strip()
+            targets = (genders + " " + ages).str.strip()
+            if targets[targets.ne("")].nunique() > 1:
+                return None
+
+    # 상품 RAW의 전시순서가 있으면 슬롯 수를, 없으면 상품 식별자로 고유 개수를 셉니다.
+    if "전시순서" in product.columns:
+        display_order = product["전시순서"].fillna("").astype(str).str.strip()
+        valid_order = ~display_order.str.lower().isin(["", "nan", "none", "합계", "0", "0.0"])
+        if valid_order.all():
+            return int(display_order.nunique())
+    for column in ["쇼라코드", "알파코드", "상품명"]:
+        if column in product.columns:
+            ids = product[column].fillna("").astype(str).str.strip()
+            ids = ids[~ids.str.lower().isin(["", "nan", "none"])]
+            if not ids.empty:
+                return int(ids.nunique())
+    return int(len(product)) if not product.empty else None
+
+
+def _weekly_core_channel_hover_rows(
+    df: pd.DataFrame, product_rows: pd.DataFrame | None = None
+) -> dict[str, list[dict]]:
     """주간 핵심실적의 전체/MMS/RCS hover: 날짜·시간·타겟 단위로 발송 통계를 집계합니다.
 
-    분할 발송 행은 같은 일시·타겟·채널에서 합산하고 상품수는 중복 합산하지 않습니다.
+    분할 발송 행은 같은 일시·타겟·채널에서 합산합니다.
+    상품수는 상품 RAW의 실제 편성 수를 우선하며, RCS의 4개 표기 오류는
+    3개 캐러셀 운영 기준으로 보정합니다(원본에서 다르게 확인되면 원본 우선).
     클릭수는 핵심 KPI와 동일한 유니크 클릭 수 컬럼을 우선 사용합니다.
     """
     result = {"전체": [], "MMS": [], "RCS": []}
@@ -3844,13 +3953,25 @@ def _weekly_core_channel_hover_rows(df: pd.DataFrame) -> dict[str, list[dict]]:
         target = str(row["_target"])
         send = float(row["_send"])
         clicked = float(row["_click"])
+        # CVR hover 상품수는 소재 시트의 "상품수"보다 실제 상품 편성 RAW를 우선합니다.
+        # RCS 3개 캐러셀 운영인데 소재 시트에 MMS 기본값 4가 복사된 경우에는
+        # RAW로 검증 불가능한 상황에서만 운영 기본 구성(3개)으로 보정합니다.
+        source_products = int(round(float(row["_products"])))
+        actual_products = _weekly_core_hover_actual_product_count(
+            df, product_rows, row["_date"], str(row["_time"]), channel, target
+        )
+        products_count = (
+            actual_products if actual_products is not None
+            else 3 if channel == "RCS" and source_products == 4
+            else source_products
+        )
         detail = {
             "date": date_label,
             "target": target,
             "sent": f"{int(round(send)):,}",
             "clicked": f"{int(round(clicked)):,}",
             "ctr": f"{clicked / send * 100:.1f}%" if send > 0 else "-",
-            "products": f"{int(round(float(row["_products"]))):,}",
+            "products": f"{products_count:,}",
             "orders": f"{int(round(float(row["_orders"]))):,}",
         }
         if channel in result:
@@ -17962,7 +18083,7 @@ elif menu == "주간실적":
     # CTR / CVR은 전체·MMS·RCS 각각 합산하고, 동일 채널의 이전 기간과 비교합니다.
     _weekly_channels_current = _weekly_channel_ctr_cvr_metrics(sw)
     _weekly_channels_previous = _weekly_channel_ctr_cvr_metrics(prev_sw)
-    _weekly_core_hover_rows = _weekly_core_channel_hover_rows(sw)
+    _weekly_core_hover_rows = _weekly_core_channel_hover_rows(sw, pw)
 
     cards = [
         ("발송횟수", f"{weekly_send_runs:,}회", weekly_delta(weekly_send_runs, prev_weekly_send_runs) if not prev_sw.empty else "-"),
