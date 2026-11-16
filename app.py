@@ -695,6 +695,75 @@ html, body, [class*="css"] {
     margin-top: 2px;
 }
 
+/* 주간실적 4번째 줄: MMS 비중/상품 편성 카드의 높이를 간결하게 통일 */
+.weekly-breakdown-equal {
+    height: 216px;
+    min-height: 216px;
+    box-sizing: border-box;
+    padding: 14px 16px;
+}
+.weekly-breakdown-equal .weekly-mms-share-layout {
+    grid-template-columns: 132px minmax(0, 1fr);
+    gap: 14px;
+}
+.weekly-breakdown-equal .weekly-mms-donut,
+.weekly-breakdown-equal .weekly-mms-donut svg {
+    width: 132px;
+    height: 132px;
+}
+.weekly-breakdown-equal .weekly-mms-info {
+    gap: 6px;
+}
+.weekly-mms-amounts-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 10px;
+    align-items: start;
+}
+.weekly-mms-amounts-row > div {
+    min-width: 0;
+}
+.weekly-breakdown-equal .weekly-mms-amount-value {
+    font-size: clamp(13px, 1.25vw, 18px);
+    overflow-wrap: anywhere;
+}
+.weekly-breakdown-equal .weekly-mms-weekday-wrap {
+    margin-top: 6px;
+    padding-top: 6px;
+}
+.weekly-breakdown-equal .weekly-mms-weekday-grid {
+    gap: 5px;
+}
+.weekly-breakdown-equal .weekly-mms-weekday-item {
+    padding: 5px 3px;
+}
+.weekly-breakdown-equal .weekly-mms-weekday-value {
+    font-size: 13px;
+}
+@media (max-width: 1050px) {
+    .weekly-breakdown-equal {
+        height: auto;
+        min-height: 216px;
+    }
+    .weekly-breakdown-equal .weekly-mms-share-layout {
+        grid-template-columns: 112px minmax(0, 1fr);
+        gap: 10px;
+    }
+    .weekly-breakdown-equal .weekly-mms-donut,
+    .weekly-breakdown-equal .weekly-mms-donut svg {
+        width: 112px;
+        height: 112px;
+    }
+}
+@media (max-width: 640px) {
+    .weekly-breakdown-equal .weekly-mms-share-layout {
+        grid-template-columns: 1fr;
+    }
+    .weekly-breakdown-equal .weekly-mms-donut-wrap {
+        justify-content: center;
+    }
+}
+
 /* 주간 MMS 실적 비중 카드: 월~금 요일별 MMS 비중 */
 .weekly-mms-weekday-wrap {
     margin-top: 12px;
@@ -18164,7 +18233,7 @@ elif menu == "주간실적":
     with breakdown_left:
         st.markdown(
             f'''
-            <div class="metric-card weekly-breakdown-card weekly-mms-share-card">
+            <div class="metric-card weekly-breakdown-card weekly-breakdown-equal weekly-mms-share-card">
                 <div class="metric-label">MMS 실적 비중</div>
                 <div class="weekly-mms-share-layout">
                     <div class="weekly-mms-donut-wrap">
@@ -18182,13 +18251,15 @@ elif menu == "주간실적":
                         </div>
                     </div>
                     <div class="weekly-mms-info">
-                        <div>
-                            <div class="weekly-mms-amount-label">MMS 주문금액</div>
-                            <div class="weekly-mms-amount-value">{_mms_amount_display}</div>
-                        </div>
-                        <div>
-                            <div class="weekly-mms-amount-label">전체 주문금액</div>
-                            <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
+                        <div class="weekly-mms-amounts-row">
+                            <div>
+                                <div class="weekly-mms-amount-label">MMS 주문금액</div>
+                                <div class="weekly-mms-amount-value">{_mms_amount_display}</div>
+                            </div>
+                            <div>
+                                <div class="weekly-mms-amount-label">전체 주문금액</div>
+                                <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
+                            </div>
                         </div>
                         <div class="metric-delta {weekly_delta_class(_mms_delta)}">{_mms_delta}</div>
                         <div class="weekly-mms-weekday-wrap">
@@ -18208,7 +18279,7 @@ elif menu == "주간실적":
         _new_delta = _mix_delta("신규")
         st.markdown(
             f'''
-            <div class="metric-card weekly-breakdown-card">
+            <div class="metric-card weekly-breakdown-card weekly-breakdown-equal">
                 <div class="metric-label">상품 편성 구성 <span style="font-weight:500; color:var(--muted);">(편성건수 기준)</span></div>
                 <div class="weekly-mix-grid">
                     <div class="weekly-mix-item">
