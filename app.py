@@ -278,6 +278,43 @@ html, body, [class*="css"] {
     white-space: nowrap;
 }
 
+/* 주간 핵심실적 CTR·CVR 카드: 한 카드에서 MMS / RCS를 좌우 비교 */
+.weekly-channel-kpi-card {
+    min-height: 106px;
+}
+.weekly-channel-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+}
+.weekly-channel-kpi-cell {
+    min-width: 0;
+    padding-right: 8px;
+}
+.weekly-channel-kpi-cell + .weekly-channel-kpi-cell {
+    border-left: 1px solid var(--border);
+    padding-left: 10px;
+    padding-right: 0;
+}
+.weekly-channel-kpi-name {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+.weekly-channel-kpi-value {
+    font-size: clamp(16px, 1.35vw, 21px);
+    font-weight: 800;
+    line-height: 1.25;
+    white-space: nowrap;
+}
+.weekly-channel-kpi-delta {
+    font-size: 11px;
+    font-weight: 650;
+    margin-top: 4px;
+    white-space: nowrap;
+}
+
 /* 주간실적 3번째 줄: 성별·연령 타겟별 CTR / SPM */
 .weekly-target-card {
     min-height: 92px;
@@ -3488,6 +3525,30 @@ def _weekly_send_type_series(df: pd.DataFrame) -> pd.Series:
         channel.loc[blank] = fallback.loc[blank]
     return channel.replace("", "MMS")
 
+
+
+def _weekly_channel_ctr_cvr_metrics(df: pd.DataFrame) -> dict[str, dict[str, float] | None]:
+    """주간 핵심실적의 MMS/RCS CTR·클릭 CVR (소재별 합산, 유니크 클릭 기준)."""
+    result = {"MMS": None, "RCS": None}
+    if df is None or df.empty:
+        return result
+    send_col = first_col(df, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(df, ["클릭 수(uniq)", "클릭 수"])
+    if not send_col or not click_col or "주문건수" not in df.columns:
+        return result
+    channels = _weekly_send_type_series(df)
+    for channel in ("MMS", "RCS"):
+        subset = df.loc[channels.eq(channel)]
+        if subset.empty:
+            continue
+        sent = float(pd.to_numeric(subset[send_col], errors="coerce").fillna(0).sum())
+        clicked = float(pd.to_numeric(subset[click_col], errors="coerce").fillna(0).sum())
+        orders = float(pd.to_numeric(subset["주문건수"], errors="coerce").fillna(0).sum())
+        result[channel] = {
+            "CTR": clicked / sent if sent > 0 else 0.0,
+            "CVR": orders / clicked if clicked > 0 else 0.0,
+        }
+    return result
 
 def _weekly_graph_aggregate(sw: pd.DataFrame) -> pd.DataFrame:
     """v1/v2 분할행을 같은 발송일·요일·시간대·발송유형 단위로 합산합니다."""
@@ -17559,6 +17620,10 @@ elif menu == "주간실적":
 
     st.markdown('<div class="subsection-title">핵심 실적</div>', unsafe_allow_html=True)
 
+    # CTR / CVR은 MMS·RCS를 각각 합산해 계산하고, 동일 채널의 이전 기간과 비교합니다.
+    _weekly_channels_current = _weekly_channel_ctr_cvr_metrics(sw)
+    _weekly_channels_previous = _weekly_channel_ctr_cvr_metrics(prev_sw)
+
     cards = [
         ("발송횟수", f"{weekly_send_runs:,}회", weekly_delta(weekly_send_runs, prev_weekly_send_runs) if not prev_sw.empty else "-"),
         ("상품수", f"{weekly_product_count:,}건", weekly_delta(weekly_product_count, prev_weekly_product_count) if not prev_sw.empty else "-"),
@@ -17573,14 +17638,41 @@ elif menu == "주간실적":
     card_cols = st.columns(5)
     for i, (label, value, delta) in enumerate(cards):
         with card_cols[i % 5]:
-            st.markdown(
-                f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
-                '<div class="weekly-kpi-value-row">'
-                f'<div class="metric-value">{value}</div>'
-                f'<div class="metric-delta {weekly_delta_class(delta)}">{_weekly_compare_label} {delta}</div>'
-                '</div></div>',
-                unsafe_allow_html=True,
-            )
+            if label in {"CTR", "CVR"}:
+                _channel_cells = []
+                for _channel in ("MMS", "RCS"):
+                    _current = _weekly_channels_current.get(_channel)
+                    _previous = _weekly_channels_previous.get(_channel)
+                    _channel_value = (
+                        f'{_current[label] * 100:.1f}%' if _current is not None else '-'
+                    )
+                    _channel_delta = (
+                        weekly_delta(_current[label], _previous[label], pp=True)
+                        if _current is not None and _previous is not None else '-'
+                    )
+                    _channel_cells.append(
+                        '<div class="weekly-channel-kpi-cell">'
+                        f'<div class="weekly-channel-kpi-name">{_channel}</div>'
+                        f'<div class="weekly-channel-kpi-value">{_channel_value}</div>'
+                        f'<div class="weekly-channel-kpi-delta {weekly_delta_class(_channel_delta)}">{_channel_delta}</div>'
+                        '</div>'
+                    )
+                st.markdown(
+                    '<div class="metric-card weekly-kpi-card weekly-channel-kpi-card">'
+                    f'<div class="metric-label">{label}</div>'
+                    '<div class="weekly-channel-kpi-grid">'
+                    + ''.join(_channel_cells) + '</div></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="metric-card weekly-kpi-card"><div class="metric-label">{label}</div>'
+                    '<div class="weekly-kpi-value-row">'
+                    f'<div class="metric-value">{value}</div>'
+                    f'<div class="metric-delta {weekly_delta_class(delta)}">{delta}</div>'
+                    '</div></div>',
+                    unsafe_allow_html=True,
+                )
         if i == 4:
             card_cols = st.columns(4)
 
@@ -17663,7 +17755,7 @@ elif menu == "주간실적":
                 '<div class="weekly-target-metric-name">CTR</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_ctr_display}</div>'
-                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">{_weekly_compare_label} {target_ctr_delta}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_ctr_delta)}">{target_ctr_delta}</div>'
                 '</div>'
                 f'<div class="weekly-target-tooltip">{_ctr_hover_html}</div>'
                 '</div>'
@@ -17671,7 +17763,7 @@ elif menu == "주간실적":
                 '<div class="weekly-target-metric-name">SPM</div>'
                 '<div class="weekly-target-metric-value-row">'
                 f'<div class="weekly-target-metric-value">{target_spm_display}</div>'
-                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">{_weekly_compare_label} {target_spm_delta}</div>'
+                f'<div class="weekly-target-metric-delta {weekly_delta_class(target_spm_delta)}">{target_spm_delta}</div>'
                 '</div>'
                 f'<div class="weekly-target-tooltip">{_spm_hover_html}</div>'
                 '</div></div></div>',
@@ -17824,7 +17916,7 @@ elif menu == "주간실적":
                             <div class="weekly-mms-amount-label">전체 주문금액</div>
                             <div class="weekly-mms-amount-value">{_overall_amount_display}</div>
                         </div>
-                        <div class="metric-delta {weekly_delta_class(_mms_delta)}">{_weekly_compare_label} {_mms_delta}</div>
+                        <div class="metric-delta {weekly_delta_class(_mms_delta)}">{_mms_delta}</div>
                         <div class="weekly-mms-weekday-wrap">
                             <div class="weekly-mms-weekday-label">월~금 MMS 실적 비중</div>
                             <div class="weekly-mms-weekday-grid">{_weekday_share_html}</div>
@@ -17849,19 +17941,19 @@ elif menu == "주간실적":
                         <div class="weekly-mix-name">재편성</div>
                         <div class="weekly-mix-value">{_mix["재편성"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["재편성"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_rerun_delta)}">{_weekly_compare_label} {_rerun_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_rerun_delta)}">{_rerun_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">유사신규</div>
                         <div class="weekly-mix-value">{_mix["유사신규"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["유사신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_similar_delta)}">{_weekly_compare_label} {_similar_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_similar_delta)}">{_similar_delta}</div>
                     </div>
                     <div class="weekly-mix-item">
                         <div class="weekly-mix-name">신규</div>
                         <div class="weekly-mix-value">{_mix["신규"]["share"]*100:.1f}%</div>
                         <div class="weekly-mix-meta">{_mix["신규"]["count"]:,}건</div>
-                        <div class="weekly-mix-meta {weekly_delta_class(_new_delta)}">{_weekly_compare_label} {_new_delta}</div>
+                        <div class="weekly-mix-meta {weekly_delta_class(_new_delta)}">{_new_delta}</div>
                     </div>
                 </div>
                 {_mix_note}
