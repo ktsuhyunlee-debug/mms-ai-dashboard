@@ -278,23 +278,24 @@ html, body, [class*="css"] {
     white-space: nowrap;
 }
 
-/* 주간 핵심실적 CTR·CVR 카드: 한 카드에서 MMS / RCS를 좌우 비교 */
+/* 주간 핵심실적 CTR·CVR: 전체 / MMS / RCS를 한 카드에서 가로 비교 */
 .weekly-channel-kpi-card {
-    min-height: 106px;
+    min-height: 116px;
 }
 .weekly-channel-kpi-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: start;
 }
 .weekly-channel-kpi-cell {
     min-width: 0;
-    padding-right: 8px;
+    padding: 0 5px;
+    text-align: center;
 }
+.weekly-channel-kpi-cell:first-child { padding-left: 0; }
+.weekly-channel-kpi-cell:last-child { padding-right: 0; }
 .weekly-channel-kpi-cell + .weekly-channel-kpi-cell {
     border-left: 1px solid var(--border);
-    padding-left: 10px;
-    padding-right: 0;
 }
 .weekly-channel-kpi-name {
     color: var(--muted);
@@ -303,7 +304,7 @@ html, body, [class*="css"] {
     margin-bottom: 4px;
 }
 .weekly-channel-kpi-value {
-    font-size: clamp(16px, 1.35vw, 21px);
+    font-size: clamp(15px, 1.25vw, 21px);
     font-weight: 800;
     line-height: 1.25;
     white-space: nowrap;
@@ -3527,18 +3528,67 @@ def _weekly_send_type_series(df: pd.DataFrame) -> pd.Series:
 
 
 
+
+def _weekly_kpi_channel_series(df: pd.DataFrame) -> pd.Series:
+    """주간 핵심 카드 전용 MMS/RCS 판별: RAW '유형' 표기를 포함해 확인합니다."""
+    if df is None or df.empty:
+        return pd.Series(dtype="object", index=df.index if isinstance(df, pd.DataFrame) else None)
+
+    def _classify(value: object) -> str:
+        if pd.isna(value):
+            return ""
+        raw = str(value).strip()
+        upper = raw.upper()
+        has_rcs = "RCS" in upper or "CAROUSEL" in upper or "캐러셀" in raw
+        has_mms = "MMS" in upper or "멀티미디어" in raw
+        # Both in the same value, e.g. "MMS/RCS", isn't decisive.
+        if has_rcs and has_mms:
+            return ""
+        return "RCS" if has_rcs else ("MMS" if has_mms else "")
+
+    inferred = pd.Series("", index=df.index, dtype="object")
+    explicit = [
+        "발송방식", "발송 방식", "발송채널", "발송 채널", "채널",
+        "발송유형", "발송 유형", "발송구분", "발송 구분", "발송형태", "발송 형태",
+        "메시지유형", "메시지 유형", "메시지타입", "메시지 타입",
+        "발송타입", "발송 타입", "유형",
+    ]
+    # Prefer specific RAW channel columns, then campaign/material text.
+    for col in explicit + ["캠페인명", "캠페인", "소재", "소재명", "메시지명", "발송명"]:
+        if col not in df.columns:
+            continue
+        values = df[col].map(_classify)
+        mask = inferred.eq("") & values.ne("")
+        inferred.loc[mask] = values.loc[mask]
+    # Missing channel metadata follows existing weekly app default (MMS).
+    fallback = _weekly_send_type_series(df)
+    return inferred.where(inferred.ne(""), fallback).fillna("MMS")
+
+
+def _weekly_kpi_delta_label(current: dict | None, previous: dict | None, key: str, *, has_previous_data: bool) -> str:
+    """채널별 비교값이 없으면 허위 0%p 대신 상태를 명확히 표시합니다."""
+    if current is None:
+        return "미발송"
+    if previous is None:
+        return "신규" if has_previous_data else "비교불가"
+    # Numeric difference in percentage points is defined only if both denominators exist.
+    denominator = "sent" if key == "CTR" else "clicked"
+    if current.get(denominator, 0) <= 0 or previous.get(denominator, 0) <= 0:
+        return "비교불가"
+    return weekly_delta(current[key], previous[key], pp=True)
+
 def _weekly_channel_ctr_cvr_metrics(df: pd.DataFrame) -> dict[str, dict[str, float] | None]:
-    """주간 핵심실적의 MMS/RCS CTR·클릭 CVR (소재별 합산, 유니크 클릭 기준)."""
-    result = {"MMS": None, "RCS": None}
+    """주간 핵심실적: 전체/MMS/RCS, 유니크 클릭 수 기준 가중 CTR·클릭 CVR."""
+    result = {"전체": None, "MMS": None, "RCS": None}
     if df is None or df.empty:
         return result
     send_col = first_col(df, ["발송 성공 건수", "총 발송 건수"])
     click_col = first_col(df, ["클릭 수(uniq)", "클릭 수"])
     if not send_col or not click_col or "주문건수" not in df.columns:
         return result
-    channels = _weekly_send_type_series(df)
-    for channel in ("MMS", "RCS"):
-        subset = df.loc[channels.eq(channel)]
+    channels = _weekly_kpi_channel_series(df)
+    for channel in ("전체", "MMS", "RCS"):
+        subset = df if channel == "전체" else df.loc[channels.eq(channel)]
         if subset.empty:
             continue
         sent = float(pd.to_numeric(subset[send_col], errors="coerce").fillna(0).sum())
@@ -3547,6 +3597,8 @@ def _weekly_channel_ctr_cvr_metrics(df: pd.DataFrame) -> dict[str, dict[str, flo
         result[channel] = {
             "CTR": clicked / sent if sent > 0 else 0.0,
             "CVR": orders / clicked if clicked > 0 else 0.0,
+            "sent": sent,
+            "clicked": clicked,
         }
     return result
 
@@ -17620,7 +17672,7 @@ elif menu == "주간실적":
 
     st.markdown('<div class="subsection-title">핵심 실적</div>', unsafe_allow_html=True)
 
-    # CTR / CVR은 MMS·RCS를 각각 합산해 계산하고, 동일 채널의 이전 기간과 비교합니다.
+    # CTR / CVR은 전체·MMS·RCS 각각 합산하고, 동일 채널의 이전 기간과 비교합니다.
     _weekly_channels_current = _weekly_channel_ctr_cvr_metrics(sw)
     _weekly_channels_previous = _weekly_channel_ctr_cvr_metrics(prev_sw)
 
@@ -17640,15 +17692,14 @@ elif menu == "주간실적":
         with card_cols[i % 5]:
             if label in {"CTR", "CVR"}:
                 _channel_cells = []
-                for _channel in ("MMS", "RCS"):
+                for _channel in ("전체", "MMS", "RCS"):
                     _current = _weekly_channels_current.get(_channel)
                     _previous = _weekly_channels_previous.get(_channel)
                     _channel_value = (
                         f'{_current[label] * 100:.1f}%' if _current is not None else '-'
                     )
-                    _channel_delta = (
-                        weekly_delta(_current[label], _previous[label], pp=True)
-                        if _current is not None and _previous is not None else '-'
+                    _channel_delta = _weekly_kpi_delta_label(
+                        _current, _previous, label, has_previous_data=not prev_sw.empty
                     )
                     _channel_cells.append(
                         '<div class="weekly-channel-kpi-cell">'
@@ -17674,7 +17725,7 @@ elif menu == "주간실적":
                     unsafe_allow_html=True,
                 )
         if i == 4:
-            card_cols = st.columns(4)
+            card_cols = st.columns([1.55, 1.55, 0.8, 0.8])
 
     # 3번째 줄: 성별·연령 타겟별 CTR / SPM 4개 카드
     target_card_cols = st.columns(4)
