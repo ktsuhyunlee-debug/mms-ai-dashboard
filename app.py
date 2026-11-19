@@ -12967,6 +12967,23 @@ def _product_mix_period_metrics(
     )
     order_amount = send_amount if not send_rows.empty and "주문금액" in send_rows.columns else product_amount
 
+    # 월별 비교의 발송횟수는 날짜·시간대·유형(MMS/RCS)을 함께 보아 중복을 방지합니다.
+    # MMS와 RCS가 같은 날짜·시간대에 존재해도 서로 다른 발송으로 집계합니다.
+    if not send_rows.empty:
+        send_keys = _send_run_key_series(send_rows).astype(str)
+        send_channels = _weekly_kpi_channel_series(send_rows).reindex(send_rows.index).fillna("MMS")
+        send_count = int((send_keys + "|" + send_channels.astype(str)).nunique())
+    else:
+        send_count = _unique_send_count(product_rows)
+
+    # CTR과 클릭수 모두 Uniq 기준, CVR은 유니크 클릭수 대비 주문건수입니다.
+    if not send_rows.empty and "주문건수" in send_rows.columns:
+        order_count = float(pd.to_numeric(send_rows["주문건수"], errors="coerce").fillna(0).sum())
+    elif not product_rows.empty and "주문건수" in product_rows.columns:
+        order_count = float(pd.to_numeric(product_rows["주문건수"], errors="coerce").fillna(0).sum())
+    else:
+        order_count = 0.0
+
     counts = {
         "재편성": 0,
         "유사신규": 0,
@@ -13020,10 +13037,15 @@ def _product_mix_period_metrics(
         counts["TOP30 상품 포함"] = int(product_keys.isin(top30_keys).sum())
 
     result = {
-        "CTR": (clicks / sent * 100) if sent > 0 else pd.NA,
-        "SPM": (order_amount / sent) if sent > 0 else pd.NA,
+        "발송횟수": send_count,
         "발송건수": sent,
+        "클릭수": clicks,
+        "주문건수": order_count,
         "주문금액": order_amount,
+        "CTR": (clicks / sent * 100) if sent > 0 else pd.NA,
+        "CVR": (order_count / clicks * 100) if clicks > 0 else pd.NA,
+        "SPM": (order_amount / sent) if sent > 0 else pd.NA,
+        "객단가": (order_amount / order_count) if order_count > 0 else pd.NA,
         "전체 상품수": total_products,
     }
     for label, count in counts.items():
@@ -13167,8 +13189,9 @@ def _product_mix_comparison_html(
     selected_key: str = "",
     clickable_months: bool = False,
     send_type: str = "전체",
+    monthly_view: bool = False,
 ) -> str:
-    """상품구성비교 월별·주차별 데이터를 동일한 가로형 표로 렌더링합니다."""
+    """상품구성비교 표: 월별은 요청한 14개 지표, 주차별은 기존 구성 유지."""
     if summary is None or summary.empty or not column_keys:
         return '<div class="product-mix-empty">비교 데이터가 없습니다.</div>'
     lookup = summary.set_index("구간").to_dict("index")
@@ -13186,23 +13209,44 @@ def _product_mix_comparison_html(
             return f"{numeric:.1f}"
         if kind == "send":
             return f"{numeric:,.0f}건"
+        if kind == "count":
+            return f"{numeric:,.0f}회"
         if kind == "money":
-            return f"{numeric / 10_000:,.0f}만원"
+            return f"{numeric:,.0f}원"
         return f"{numeric:,.0f}"
 
-    metric_rows = [
-        ("CTR", "CTR", "ctr"),
-        ("SPM", "SPM", "spm"),
-        ("발송건수", "발송건수", "send"),
-        ("주문금액", "주문금액", "money"),
-        ("재편성", "재편성", "count_share"),
-        ("유사신규", "유사신규", "count_share"),
-        ("신규", "신규", "count_share"),
-        ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
-        ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
-        ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
-        ("TOP30 상품 포함", "TOP30 상품 포함", "count_share"),
-    ]
+    if monthly_view:
+        metric_rows = [
+            ("발송횟수", "발송횟수", "count"),
+            ("주문금액", "주문금액", "money"),
+            ("발송건수", "발송건수", "send"),
+            ("클릭수", "클릭수", "send"),
+            ("CTR", "CTR", "ctr"),
+            ("CVR", "CVR", "ctr"),
+            ("SPM", "SPM", "spm"),
+            ("객단가", "객단가", "money"),
+            ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
+            ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
+            ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
+            ("재편성", "재편성", "count_share"),
+            ("유사신규", "유사신규", "count_share"),
+            ("신규", "신규", "count_share"),
+        ]
+    else:
+        # 주차별 비교는 기존 구성 및 지표 순서를 유지합니다.
+        metric_rows = [
+            ("CTR", "CTR", "ctr"),
+            ("SPM", "SPM", "spm"),
+            ("발송건수", "발송건수", "send"),
+            ("주문금액", "주문금액", "money"),
+            ("재편성", "재편성", "count_share"),
+            ("유사신규", "유사신규", "count_share"),
+            ("신규", "신규", "count_share"),
+            ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
+            ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
+            ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
+            ("TOP30 상품 포함", "TOP30 상품 포함", "count_share"),
+        ]
 
     header_cells = []
     for key in column_keys:
@@ -21198,7 +21242,7 @@ elif menu == "상품구성비교":
     if not product_mix_data_version:
         product_mix_data_version = f"session:{id(products)}:{len(products)}:{id(sends)}:{len(sends)}"
     product_mix_bundle = _menu_cache_get(
-        "product_mix_comparison",
+        "product_mix_comparison_monthly_metrics_v2",
         (str(product_mix_data_version), product_mix_selected_query, product_mix_send_type),
         lambda: _build_product_mix_comparison(
             products, sends, product_mix_selected_query, product_mix_send_type
@@ -21224,6 +21268,7 @@ elif menu == "상품구성비교":
                 selected_key=product_mix_selected,
                 clickable_months=True,
                 send_type=product_mix_send_type,
+                monthly_view=True,
             ),
             unsafe_allow_html=True,
         )
