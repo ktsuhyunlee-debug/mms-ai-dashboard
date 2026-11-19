@@ -13036,8 +13036,9 @@ def _build_product_mix_comparison(
     products: pd.DataFrame,
     sends: pd.DataFrame,
     selected_month: str | None = None,
+    send_type: str = "전체",
 ) -> dict:
-    """월별 전체 비교와 선택 월의 주차별 비교 데이터를 함께 생성합니다."""
+    """선택한 발송유형의 월별 비교 및 선택 월 주차별 비교를 생성합니다."""
     product_data = products.copy() if isinstance(products, pd.DataFrame) else pd.DataFrame()
     send_data = sends.copy() if isinstance(sends, pd.DataFrame) else pd.DataFrame()
     empty = {
@@ -13046,6 +13047,18 @@ def _build_product_mix_comparison(
     }
     if product_data.empty or "_date" not in product_data.columns:
         return empty
+
+    # 상품 RAW는 유형 열 우선, 미표기 시 발송 RAW의 날짜/시간/소재로 확인합니다.
+    # 발송 RAW는 '유형' 열까지 확인해 MMS/RCS를 구분합니다.
+    # 전체에서는 기존 결과가 정확히 유지되도록 필터를 적용하지 않습니다.
+    if send_type in {"MMS", "RCS"}:
+        product_channels = _monthly_product_channels(product_data, send_data)
+        product_data = product_data.loc[product_channels.eq(send_type)].copy()
+        if not send_data.empty:
+            send_channels = _weekly_kpi_channel_series(send_data)
+            send_data = send_data.loc[send_channels.eq(send_type)].copy()
+        if product_data.empty:
+            return empty
 
     product_data["_mix_date"] = pd.to_datetime(product_data["_date"], errors="coerce").dt.normalize()
     product_data = product_data[product_data["_mix_date"].notna()].copy()
@@ -13153,6 +13166,7 @@ def _product_mix_comparison_html(
     column_keys: list[str],
     selected_key: str = "",
     clickable_months: bool = False,
+    send_type: str = "전체",
 ) -> str:
     """상품구성비교 월별·주차별 데이터를 동일한 가로형 표로 렌더링합니다."""
     if summary is None or summary.empty or not column_keys:
@@ -13197,7 +13211,8 @@ def _product_mix_comparison_html(
         selected_class = " selected" if key == selected_key else ""
         if clickable_months:
             safe_key = _html.escape(str(key), quote=True)
-            content = f'<a href="?menu=product-mix&amp;mix_month={safe_key}" target="_self">{label}</a>'
+            safe_type = _html.escape(str(send_type), quote=True)
+            content = f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}" target="_self">{label}</a>'
         else:
             content = label
         header_cells.append(f'<th class="period-col{selected_class}">{content}</th>')
@@ -16903,6 +16918,8 @@ try:
         del st.query_params["date"]
     if menu != "상품구성비교" and "mix_month" in st.query_params:
         del st.query_params["mix_month"]
+    if menu != "상품구성비교" and "mix_type" in st.query_params:
+        del st.query_params["mix_type"]
 except Exception:
     pass
 
@@ -21154,8 +21171,27 @@ elif menu == "상품구성비교":
     st.caption(
         "개수·비중은 해당 기간 전체 편성 상품 행 기준 · "
         "최저가 미확보는 발송일 최저가보다 멤버십 혜택가가 높은 상품 · "
-        "TOP30은 전체 데이터 기간 누적 주문금액 상위 30개 상품 기준"
+        "TOP30은 선택한 유형의 전체 데이터 기간 누적 주문금액 상위 30개 상품 기준"
     )
+
+    # URL 공유 및 월 머리글 이동 시에도 선택한 유형을 유지합니다.
+    product_mix_type_query = _get_query_param("mix_type").strip().upper()
+    if product_mix_type_query not in {"MMS", "RCS"}:
+        product_mix_type_query = "전체"
+    if st.session_state.get("product_mix_send_type") != product_mix_type_query:
+        st.session_state["product_mix_send_type"] = product_mix_type_query
+
+    def _on_product_mix_type_change():
+        st.query_params["mix_type"] = st.session_state["product_mix_send_type"]
+
+    st.radio(
+        "발송 유형",
+        options=["전체", "MMS", "RCS"],
+        key="product_mix_send_type",
+        horizontal=True,
+        on_change=_on_product_mix_type_change,
+    )
+    product_mix_send_type = st.session_state["product_mix_send_type"]
 
     product_mix_selected_query = _get_query_param("mix_month").strip()
     product_mix_data_version = st.session_state.get("data_version")
@@ -21163,9 +21199,9 @@ elif menu == "상품구성비교":
         product_mix_data_version = f"session:{id(products)}:{len(products)}:{id(sends)}:{len(sends)}"
     product_mix_bundle = _menu_cache_get(
         "product_mix_comparison",
-        (str(product_mix_data_version), product_mix_selected_query),
+        (str(product_mix_data_version), product_mix_selected_query, product_mix_send_type),
         lambda: _build_product_mix_comparison(
-            products, sends, product_mix_selected_query
+            products, sends, product_mix_selected_query, product_mix_send_type
         ),
         max_entries=16,
     )
@@ -21174,7 +21210,7 @@ elif menu == "상품구성비교":
     product_mix_selected = product_mix_bundle.get("selected_month", "")
     product_mix_monthly = product_mix_bundle.get("monthly", pd.DataFrame())
     if not product_mix_months or product_mix_monthly.empty:
-        st.info("상품 구성 비교에 사용할 월별 상품 데이터가 없습니다.")
+        st.info(f"{product_mix_send_type} 유형에 해당하는 상품 구성 비교 데이터가 없습니다.")
     else:
         st.markdown(
             '<div class="subsection-title">월별 상품 구성 비교</div>',
@@ -21187,6 +21223,7 @@ elif menu == "상품구성비교":
                 product_mix_months,
                 selected_key=product_mix_selected,
                 clickable_months=True,
+                send_type=product_mix_send_type,
             ),
             unsafe_allow_html=True,
         )
@@ -21213,6 +21250,7 @@ elif menu == "상품구성비교":
                     product_mix_weeks,
                     selected_key="",
                     clickable_months=False,
+                    send_type=product_mix_send_type,
                 ),
                 unsafe_allow_html=True,
             )
