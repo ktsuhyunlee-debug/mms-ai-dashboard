@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 운영 인사이트 v6.2 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 운영 인사이트 v6.3 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
 기존 Streamlit Secrets 유지:
 [google_oauth] client_id, client_secret, redirect_uri, state_signing_secret
@@ -98,7 +98,7 @@ def login_url(cfg):
 
 
 def logout():
-    for k in ["ga4_access_token","ga4_token_expires_at","ga4_expiry","ga4_v6_cache","ga4_report_cache"]:
+    for k in ["ga4_access_token","ga4_token_expires_at","ga4_expiry","ga4_v6_cache","ga4_report_cache","ga4_v63_admin_cache"]:
         st.session_state.pop(k, None)
 
 
@@ -171,27 +171,45 @@ def canonical(x):
     return re.sub(r"[\s_\-]","",str(x).casefold())
 
 
-def custom_field(meta, names, preferred_scope=None):
-    """Use the API name advertised by this GA4 property, preferring user scope.
+def custom_dimensions(meta):
+    """Return every custom dimension advertised for this property.
 
-    The same uiName can be registered in both event and user scopes. The old
-    first-match lookup occasionally selected the event field for customer
-    attributes, which can make user breakdowns unexpectedly sparse.
+    Don't rely only on customDefinition: older/variant metadata responses may
+    carry an explicit custom apiName without that boolean.
     """
-    dimensions=[x for x in meta.get("dimensions",[]) if x.get("customDefinition")]
+    return [d for d in meta.get('dimensions', []) if
+            d.get('customDefinition') or str(d.get('apiName', '')).startswith(
+                ('customUser:', 'customEvent:', 'customItem:'))]
+
+
+def custom_field(meta, names, preferred_scope=None):
+    """Find the *advertised* API field, never guess a GA4 property key.
+
+    Search UI name and API name (including parameter suffix). The parameter
+    sometimes has a usable label while uiName has been renamed in the UI.
+    """
+    dimensions=custom_dimensions(meta)
+    lookup=[]
+    for d in dimensions:
+        api_name=str(d.get('apiName',''))
+        labels=[str(d.get('uiName','')),api_name,
+                api_name.partition(':')[2]]
+        lookup.append((d, [canonical(v) for v in labels]))
     for exact in (True, False):
         for candidate in names:
-            matches=[d for d in dimensions if (
-                canonical(d.get("uiName",""))==canonical(candidate)
-                if exact else canonical(candidate) in canonical(d.get("uiName",""))
-            )]
+            needle=canonical(candidate)
+            if not needle: continue
+            matches=[]
+            for d,labels in lookup:
+                if (any(needle == v for v in labels) if exact else
+                    any(needle in v for v in labels if len(needle)>=3)):
+                    matches.append(d)
             if matches:
                 if preferred_scope:
                     matches.sort(key=lambda d: (
-                        not d.get("apiName","").startswith(preferred_scope+":"),
-                        not d.get("apiName","").startswith("customUser:")
-                    ))
-                return matches[0]["apiName"]
+                        not str(d.get('apiName','')).startswith(preferred_scope+':'),
+                        str(d.get('apiName',''))))
+                return matches[0]['apiName']
     return None
 
 
@@ -223,6 +241,98 @@ def info_fields(meta):
               "customUser" if key in ("gender","age","grade","login") else
               "customEvent" if key in ("page1","evt_page","evt_area","evt_label","coupon") else None
               )) for key,names in d.items()}
+
+
+def admin_custom_dimensions(cfg, token):
+    """Read registered dimensions; optional Admin API may be disabled.
+
+    The Admin list is for *diagnosis*, not direct runReport names. Only a field
+    advertised in Data API metadata is allowed for the report query.
+    """
+    url=("https://analyticsadmin.googleapis.com/v1beta/properties/"
+         +str(cfg['property'])+"/customDimensions")
+    store=st.session_state.setdefault('ga4_v63_admin_cache',{})
+    now=dt.datetime.now(dt.timezone.utc)
+    key=str(cfg['property'])
+    cached=store.get(key)
+    if cached and (now-cached[0]).total_seconds()<300:
+        return cached[1],cached[2]
+    result=[]
+    next_page=None
+    try:
+        for _ in range(5):
+            params={'pageSize':200}
+            if next_page:params['pageToken']=next_page
+            resp=requests.get(url, headers={'Authorization':f'Bearer {token}'},
+                              params=params,timeout=18)
+            if not resp.ok:
+                try: msg=resp.json().get('error',{}).get('message','')
+                except ValueError:msg='요청 실패'
+                status=(f'Google Analytics Admin API HTTP {resp.status_code}: '
+                        +str(msg)[:170])
+                store[key]=(now,None,status)
+                return None,status
+            doc=resp.json()
+            result.extend(doc.get('customDimensions',[]))
+            next_page=doc.get('nextPageToken')
+            if not next_page:break
+        store[key]=(now,result,None)
+        return result,None
+    except requests.RequestException as exc:
+        reason='Admin API 연결 오류: '+type(exc).__name__
+        store[key]=(now,None,reason)
+        return None,reason
+
+
+def scope_api_name(d):
+    scope=str(d.get('scope',''))
+    prefix={'USER':'customUser','EVENT':'customEvent','ITEM':'customItem'}.get(scope)
+    param=str(d.get('parameterName',''))
+    return f'{prefix}:{param}' if prefix and param else ''
+
+
+def available_custom_labels(meta):
+    ds=custom_dimensions(meta)
+    labels={}
+    for d in ds:
+        api_name=d.get('apiName','')
+        if api_name:
+            ui=str(d.get('uiName') or '(표시 이름 없음)')
+            labels[api_name]=f"{ui}  |  {api_name}"
+    return labels
+
+
+def customer_field_mapping_ui(meta,fields):
+    """Never silently swap customer fields for unrelated standard dimensions."""
+    custom_labels=available_custom_labels(meta)
+    customer_keys=[('gender','성별'),('age','연령'),('grade','멤버십 등급'),
+                   ('login','로그인 유형')]
+    missing=[(key,title) for key,title in customer_keys if not fields.get(key)]
+    if not missing and not any(st.session_state.get('v63_map_'+key)
+                               for key,_ in customer_keys):
+        return
+    with st.expander('🔎 고객 특성 필드 연결 · 미발견 항목 확인',expanded=bool(missing)):
+        st.caption('해당 GA4 속성에서 실제로 제공하는 맞춤 필드만 선택할 수 있습니다. '
+                   '탐색 보고서의 이름과 API 이름이 다를 때 직접 연결할 수 있어요. '
+                   '일반 Google 인구통계 성별·연령으로 자동 대체하지 않습니다.')
+        options=['']+sorted(custom_labels, key=lambda v:custom_labels[v].casefold())
+        left,right=st.columns(2)
+        for index,(key,title) in enumerate(customer_keys):
+            with (left if index%2==0 else right):
+                current=st.session_state.get('v63_map_'+key,'')
+                if current not in options:current=''
+                selected=st.selectbox(
+                    title,options,index=options.index(current),
+                    format_func=lambda x: '자동 검색 사용' if not x else custom_labels[x],
+                    key='v63_map_'+key,help='이 GA4 속성의 메타데이터에 존재하는 항목만 선택')
+                if selected:
+                    fields[key]=selected
+                elif fields.get(key):
+                    st.caption('현재 자동 연결: '+str(fields[key]))
+                else:
+                    st.caption('현재 연결 없음 · 아래 진단에서 등록 목록을 확인해 주세요.')
+        st.caption('선택한 매핑은 현재 브라우저 세션에 유지됩니다. '
+                   '확인된 API 이름으로 자동 검색 규칙을 추후 고정할 수 있습니다.')
 
 
 def f_eq(field,value):
@@ -865,9 +975,10 @@ def screen_activity_breakdown(cfg, token, start, end, dim, fields):
     return df,raw,description
 
 
-def customers(cfg,token,start,end,fields):
+def customers(cfg,token,start,end,fields,meta=None):
     heading('어떤 고객이 많이 이용할까요?',
             'GA4 탐색에서 확인한 KT멤버십 맞춤 고객 정보와 쇼핑라운지 방문 조건을 기준으로 분석합니다.')
+    if meta is not None:customer_field_mapping_ui(meta,fields)
     selected=st.radio('고객 구분',['기기','성별','연령','멤버십 등급','로그인 유형','기기별 구매'],
                       horizontal=True,key='v6_customer_select',label_visibility='collapsed')
     dims={'기기':('operatingSystem','운영체제'),
@@ -1309,6 +1420,53 @@ def diagnostic(cfg,token,meta,fields,start,end):
                            for k,v in labels.items()])
         st.dataframe(stat,hide_index=True,use_container_width=True,height=320)
         st.caption("메타데이터에 필드가 있어도 데이터가 있는지는 별도 보고서 조회와 집계 조건 검증이 필요해요.")
+        st.markdown('**① Data API에서 실제 조회 가능한 맞춤 측정기준**')
+        all_custom=pd.DataFrame([
+            {'표시 이름':d.get('uiName',''), 'API 이름':d.get('apiName',''),
+             '설명':d.get('description','')} for d in custom_dimensions(meta)])
+        if all_custom.empty:
+            st.warning('이 GA4 속성에서 Data API가 반환한 맞춤 측정기준이 없습니다.')
+        else:
+            term=st.text_input('맞춤 필드 검색',placeholder='예: 성별, 연령, 고객, 쿠폰, 로그인, grade',
+                               key='v63_search_meta')
+            showing=all_custom
+            if term.strip():
+                mask=showing.astype(str).apply(
+                    lambda c:c.str.contains(re.escape(term.strip()),case=False,regex=True)
+                ).any(axis=1)
+                showing=showing[mask]
+            st.dataframe(showing,hide_index=True,use_container_width=True,height=250)
+            st.download_button('전체 맞춤 필드 CSV 받기',
+                               data=all_custom.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='ga4_data_api_custom_dimensions.csv',
+                               mime='text/csv',key='v63_export_metadata')
+        st.markdown('**② GA4 관리자에 등록된 맞춤 측정기준**')
+        st.caption('Google Analytics Admin API의 읽기 전용 목록과 비교합니다. '
+                   'Admin API가 비활성화돼 있다면 조회할 수 없지만 다른 메뉴는 정상 작동합니다.')
+        admin_defs,admin_error=admin_custom_dimensions(cfg,token)
+        if admin_error:
+            st.info('관리자 목록 조회 불가: '+str(admin_error))
+        else:
+            admin_rows=[]
+            for d in (admin_defs or []):
+                api_name=scope_api_name(d)
+                admin_rows.append({'표시 이름':d.get('displayName',''),
+                                   '등록 파라미터':d.get('parameterName',''),
+                                   '범위':d.get('scope',''),
+                                   '예상 API 이름':api_name,
+                                   'Data API 지원':('발견' if available_meta(meta,api_name)
+                                                     else '미발견')})
+            admin_df=pd.DataFrame(admin_rows)
+            if admin_df.empty:
+                st.info('Admin API에서 등록된 맞춤 측정기준 목록이 비어 있습니다.')
+            else:
+                st.dataframe(admin_df,hide_index=True,use_container_width=True,height=250)
+                st.download_button('관리자 등록 목록 CSV 받기',
+                    data=admin_df.to_csv(index=False).encode('utf-8-sig'),
+                    file_name='ga4_admin_custom_dimensions.csv',
+                    mime='text/csv',key='v63_export_admin')
+            st.caption('Admin API에 등록돼 있어도 Data API에서 제공하지 않는 항목은 '
+                       '조회 가능한 것으로 간주하지 않습니다.')
         support=field_health(meta)
         st.dataframe(pd.DataFrame([{"분석 영역":k,"필드 상태":"메타데이터 지원" if v else "일부 필드 미지원"}
                                    for k,v in support.items()]),hide_index=True,use_container_width=True,height=215)
@@ -1387,7 +1545,7 @@ def main():
     start,end=choose_dates()
     with st.sidebar:
         if st.button("↻ 데이터 다시 조회",use_container_width=True):
-            st.session_state.pop("ga4_v6_cache",None);st.rerun()
+            st.session_state.pop("ga4_v6_cache",None);st.session_state.pop("ga4_v63_admin_cache",None);st.rerun()
         if st.button("로그아웃",use_container_width=True):
             logout();st.rerun()
         st.caption(f"GA4 속성 {cfg['property']} · 읽기 전용")
@@ -1403,7 +1561,12 @@ def main():
     pages=[overview,customers,channels,pages_view, promotions, products,purchase_actions]
     handler=pages[MENUS.index(selected)]
     with st.spinner("GA4에서 필요한 데이터만 조회하는 중..."):
-        handler(cfg,token,start,end,fields) if handler not in [pages_view,promotions,products] else handler(cfg,token,start,end)
+        if handler==customers:
+            handler(cfg,token,start,end,fields,meta=meta)
+        elif handler in [pages_view,promotions,products]:
+            handler(cfg,token,start,end)
+        else:
+            handler(cfg,token,start,end,fields)
     diagnostic(cfg,token,meta,fields,start,end)
     st.caption("Google Analytics Data API · 읽기 전용 · 지표별 집계 조건은 각 화면의 안내를 확인하세요. 데이터 처리 시점에 따라 GA4 탐색 결과와 차이가 날 수 있습니다.")
 
