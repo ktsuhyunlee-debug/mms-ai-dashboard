@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 운영 인사이트 v6 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 운영 인사이트 v6.1 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
 기존 Streamlit Secrets 유지:
 [google_oauth] client_id, client_secret, redirect_uri, state_signing_secret
@@ -781,14 +781,60 @@ def purchase_drill(cfg,token,start,end,kind,metric):
     st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False})
 
 
+def customer_segment_query(cfg, token, start, end, dim, fields):
+    """Use only the property's custom customer dimension, not Google Signals demographics.
+
+    The GA4 exploration user segment for lounge visitors cannot be transferred
+    one-to-one into a simple Data API dimension filter. Try verified event/page
+    definitions separately and show the exact successful scope to the viewer.
+    """
+    filters=[('쇼핑라운지 화면 이름 기준',shop_filter())]
+    if fields.get('page1'):
+        page1=f_eq(fields['page1'],LOUNGE_TITLE)
+        filters.append(('쇼핑라운지 화면 조회(page_1Depth) 기준',f_and(f_eq('eventName','screen_view'),page1)))
+        filters.append(('쇼핑라운지 페이지 1Depth 기준',page1))
+    errors=[]
+    for label,selector in filters:
+        for metrics in (['activeUsers','screenPageViews'],['activeUsers']):
+            try:
+                df,raw=query(cfg,token,start,end,[dim],metrics,selector,limit=150,sort='activeUsers')
+            except GAError as exc:
+                errors.append(f'{label}: {str(exc)[:150]}')
+                continue
+            if df is None or df.empty or dim not in df or 'activeUsers' not in df:
+                continue
+            valid=(df[dim].fillna('').astype(str).str.strip().str.casefold()
+                   .isin(['','(not set)','(other)','unknown','미설정','알 수 없음']))
+            if bool((~valid & (df['activeUsers']>0)).any()):
+                return df,raw,label,errors
+    return None,None,None,errors
+
+
+def customer_field_diagnostics(cfg, token, start, end, dim, selected, fields, meta=None):
+    """Optional property-level probe, explicitly not represented as lounge visitors."""
+    st.warning('쇼핑라운지 화면 조건과 고객 맞춤 항목을 함께 조회한 결과가 없어요. '
+               'GA4 탐색에서 사용한 **방문 사용자 세그먼트**와 API 화면 필터는 서로 다를 수 있습니다.')
+    if st.checkbox('KT멤버십 전체 고객의 '+selected+' 분포를 참고로 보기 (쇼핑라운지 전용 아님)',
+                   key=f'v61_all_customers_{selected}'):
+        d,r=safe_query(cfg,token,start,end,[dim],['activeUsers'],limit=150,sort='activeUsers')
+        if d is not None and not d.empty:
+            st.caption('⚠️ 아래는 KT멤버십 전체 속성 기준이며, 쇼핑라운지 이용 고객으로 해석하면 안 됩니다.')
+            view=d.rename(columns={dim:selected,'activeUsers':'활성 사용자'})
+            left,right=st.columns([1,1.2],gap='large')
+            with left:bar(view,selected,'활성 사용자',h=300,n=15)
+            with right:table(view,f'ga4_ktall_{selected}_{start}_{end}',height=310)
+            quality(r)
+        else:st.info('전체 속성 기준에서도 해당 맞춤 항목의 조회 결과가 없습니다.')
+
+
 def customers(cfg,token,start,end,fields):
     heading('어떤 고객이 많이 이용할까요?',
-            '성별과 연령을 각각 확인합니다. 동일 고객이 여러 값에 집계되는 경우가 있어 전체를 단순 합산하지 않아요.')
+            '성별과 연령은 KT멤버십에서 정의한 맞춤 항목을 조회합니다. 일반 GA4 인구통계 항목으로 대체하지 않아요.')
     selected=st.radio('고객 구분',['기기','성별','연령','멤버십 등급','로그인 유형','기기별 구매'],
                       horizontal=True,key='v6_customer_select',label_visibility='collapsed')
     dims={'기기':('operatingSystem','운영체제'),
-          '성별':(fields.get('gender') or 'userGender','성별'),
-          '연령':(fields.get('age') or 'userAgeBracket','연령대'),
+          '성별':(fields.get('gender'),'성별'),
+          '연령':(fields.get('age'),'연령대'),
           '멤버십 등급':(fields.get('grade'),'등급'),
           '로그인 유형':(fields.get('login'),'로그인 방식')}
     if selected=='기기별 구매':
@@ -805,20 +851,37 @@ def customers(cfg,token,start,end,fields):
         return
     dim,title=dims[selected]
     if not dim:
-        st.info(f'{selected} 분석에 필요한 GA4 맞춤 항목을 찾지 못했어요. 아래 데이터 진단에서 확인할 수 있어요.')
+        st.warning(f'GA4 속성의 맞춤 측정기준에서 **{selected}** 항목을 찾지 못했어요. '
+                   '아래 **데이터 진단**에서 현재 API에 노출되는 필드명을 확인해 주세요.')
+        st.caption('일반 GA4 연령·성별(userAgeBracket/userGender)로 바꿔 조회하면 '
+                   'KT멤버십 고객 정보와 의미가 달라지므로 자동 대체하지 않습니다.')
         return
-    df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers','screenPageViews'],shop_filter(),
-                      limit=150,sort='activeUsers')
-    if df is None or df.empty:return
+    if selected in ('성별','연령'):
+        df,raw,scope,errors=customer_segment_query(cfg,token,start,end,dim,fields)
+        if df is None:
+            customer_field_diagnostics(cfg,token,start,end,dim,selected,fields)
+            with st.expander('기술 진단 정보 · API 필드와 조회 실패 이유',expanded=False):
+                st.code(f'맞춤 필드: {dim}\n현재 조회 기간: {start} ~ {end}',language='text')
+                if errors:
+                    for err in list(dict.fromkeys(errors))[:4]:st.caption(err)
+                else:st.caption('API 호출은 응답했지만 화면 조건에 해당하는 유효한 성별·연령 값이 없습니다.')
+            return
+        st.caption(f'분석 기준: **{scope}** · 실제 GA4 맞춤 측정기준 **{dim}**')
+    else:
+        df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers','screenPageViews'],
+                          shop_filter(),limit=150,sort='activeUsers')
+        if df is None or df.empty:return
     if selected=='기기':
         df[dim]=df[dim].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)'})
-    if selected=='연령':df[dim]=df[dim].replace({'(not set)':'미설정'})
-    df=df.rename(columns={dim:title,'activeUsers':'이용 고객 수','screenPageViews':'페이지 조회수'})
+    if selected in ('성별','연령'):
+        df[dim]=df[dim].replace({'(not set)':'미설정','(other)':'기타','unknown':'알 수 없음'})
+    rename={dim:title,'activeUsers':'이용 고객 수','screenPageViews':'페이지 조회수'}
+    df=df.rename(columns=rename)
     left,right=st.columns([1,1.2],gap='large')
     with left:bar(df,title,'이용 고객 수',h=340,n=15)
     with right:table(df,f'ga4_고객_{selected}_{start}_{end}',height=320)
     if selected=='성별':st.caption('성별 × 연령 교차표는 요청에 따라 제외했습니다.')
-    st.caption('이용 고객 수는 분류별 중복 집계가 가능하며, 앱 첫 이용 기준인 GA4 신규 사용자와는 다릅니다.')
+    st.caption('이용 고객 수는 분류별 중복 집계가 가능하며, GA4 탐색의 사용자 세그먼트와는 집계 범위가 다를 수 있습니다.')
     quality(raw)
 
 
