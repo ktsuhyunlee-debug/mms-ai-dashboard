@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 운영 인사이트 v6.1 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 운영 인사이트 v6.2 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
 기존 Streamlit Secrets 유지:
 [google_oauth] client_id, client_secret, redirect_uri, state_signing_secret
@@ -171,15 +171,27 @@ def canonical(x):
     return re.sub(r"[\s_\-]","",str(x).casefold())
 
 
-def custom_field(meta, names):
-    # Never guess customEvent:... names. Only use values advertised by property metadata.
-    dims=[x for x in meta.get("dimensions",[]) if x.get("customDefinition")]
-    for candidate in names:
-        for d in dims:
-            if canonical(d.get("uiName",""))==canonical(candidate): return d["apiName"]
-    for candidate in names:
-        for d in dims:
-            if canonical(candidate) in canonical(d.get("uiName","")): return d["apiName"]
+def custom_field(meta, names, preferred_scope=None):
+    """Use the API name advertised by this GA4 property, preferring user scope.
+
+    The same uiName can be registered in both event and user scopes. The old
+    first-match lookup occasionally selected the event field for customer
+    attributes, which can make user breakdowns unexpectedly sparse.
+    """
+    dimensions=[x for x in meta.get("dimensions",[]) if x.get("customDefinition")]
+    for exact in (True, False):
+        for candidate in names:
+            matches=[d for d in dimensions if (
+                canonical(d.get("uiName",""))==canonical(candidate)
+                if exact else canonical(candidate) in canonical(d.get("uiName",""))
+            )]
+            if matches:
+                if preferred_scope:
+                    matches.sort(key=lambda d: (
+                        not d.get("apiName","").startswith(preferred_scope+":"),
+                        not d.get("apiName","").startswith("customUser:")
+                    ))
+                return matches[0]["apiName"]
     return None
 
 
@@ -207,7 +219,10 @@ def info_fields(meta):
        "evt_page":["이벤트_페이지","이벤트 페이지"],
        "evt_area":["이벤트_영역","이벤트 영역"],
        "evt_label":["이벤트_라벨","이벤트 라벨"]}
-    return {key:custom_field(meta, names) for key,names in d.items()}
+    return {key:custom_field(meta, names, preferred_scope=(
+              "customUser" if key in ("gender","age","grade","login") else
+              "customEvent" if key in ("page1","evt_page","evt_area","evt_label","coupon") else None
+              )) for key,names in d.items()}
 
 
 def f_eq(field,value):
@@ -781,55 +796,78 @@ def purchase_drill(cfg,token,start,end,kind,metric):
     st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False})
 
 
-def customer_segment_query(cfg, token, start, end, dim, fields):
-    """Use only the property's custom customer dimension, not Google Signals demographics.
+def lounge_visitor_segment_request(start, end, breakdown, page1):
+    """GA4 v1alpha funnel query with a *user* inclusion segment.
 
-    The GA4 exploration user segment for lounge visitors cannot be transferred
-    one-to-one into a simple Data API dimension filter. Try verified event/page
-    definitions separately and show the exact successful scope to the viewer.
+    A membership criterion is satisfied by a screen_view carrying the exact
+    page_1Depth value. Unlike a normal runReport event filter, the segment is
+    user scoped. Funnel step 1 counts screen viewers inside that population.
+    This is closer to a GA4 Exploration user segment, but it is not guaranteed
+    to be identical in reporting identity, privacy thresholding, or sampling.
     """
-    filters=[('쇼핑라운지 화면 이름 기준',shop_filter())]
-    if fields.get('page1'):
-        page1=f_eq(fields['page1'],LOUNGE_TITLE)
-        filters.append(('쇼핑라운지 화면 조회(page_1Depth) 기준',f_and(f_eq('eventName','screen_view'),page1)))
-        filters.append(('쇼핑라운지 페이지 1Depth 기준',page1))
-    errors=[]
-    for label,selector in filters:
-        for metrics in (['activeUsers','screenPageViews'],['activeUsers']):
-            try:
-                df,raw=query(cfg,token,start,end,[dim],metrics,selector,limit=150,sort='activeUsers')
-            except GAError as exc:
-                errors.append(f'{label}: {str(exc)[:150]}')
-                continue
-            if df is None or df.empty or dim not in df or 'activeUsers' not in df:
-                continue
-            valid=(df[dim].fillna('').astype(str).str.strip().str.casefold()
-                   .isin(['','(not set)','(other)','unknown','미설정','알 수 없음']))
-            if bool((~valid & (df['activeUsers']>0)).any()):
-                return df,raw,label,errors
-    return None,None,None,errors
+    expr={"andGroup":{"expressions":[
+        {"segmentEventFilter":{"eventName":"screen_view"}},
+        {"segmentFilter":{"fieldName":page1,
+                          "stringFilter":{"matchType":"EXACT","value":LOUNGE_TITLE}}}
+    ]}}
+    return {
+        "dateRanges":[{"startDate":str(start),"endDate":str(end)}],
+        "funnel":{"steps":[{"name":"화면 이용",
+            "filterExpression":{"funnelEventFilter":{"eventName":"screen_view"}}}]},
+        "funnelBreakdown":{"breakdownDimension":{"name":breakdown},"limit":"15"},
+        "segments":[{"name":"쇼핑라운지 방문 고객",
+            "userSegment":{"userInclusionCriteria":{"andConditionGroups":[{
+                "conditionScoping":"USER_CRITERIA_WITHIN_SAME_EVENT",
+                "segmentFilterExpression":expr
+            }]}}}],
+        "limit":"250"
+    }
 
 
-def customer_field_diagnostics(cfg, token, start, end, dim, selected, fields, meta=None):
-    """Optional property-level probe, explicitly not represented as lounge visitors."""
-    st.warning('쇼핑라운지 화면 조건과 고객 맞춤 항목을 함께 조회한 결과가 없어요. '
-               'GA4 탐색에서 사용한 **방문 사용자 세그먼트**와 API 화면 필터는 서로 다를 수 있습니다.')
-    if st.checkbox('KT멤버십 전체 고객의 '+selected+' 분포를 참고로 보기 (쇼핑라운지 전용 아님)',
-                   key=f'v61_all_customers_{selected}'):
-        d,r=safe_query(cfg,token,start,end,[dim],['activeUsers'],limit=150,sort='activeUsers')
-        if d is not None and not d.empty:
-            st.caption('⚠️ 아래는 KT멤버십 전체 속성 기준이며, 쇼핑라운지 이용 고객으로 해석하면 안 됩니다.')
-            view=d.rename(columns={dim:selected,'activeUsers':'활성 사용자'})
-            left,right=st.columns([1,1.2],gap='large')
-            with left:bar(view,selected,'활성 사용자',h=300,n=15)
-            with right:table(view,f'ga4_ktall_{selected}_{start}_{end}',height=310)
-            quality(r)
-        else:st.info('전체 속성 기준에서도 해당 맞춤 항목의 조회 결과가 없습니다.')
+def visitor_breakdown(cfg, token, start, end, dim, fields):
+    """Try the GA4 user segment; never replace its result without a scope label."""
+    page1=fields.get('page1')
+    if not page1:
+        return None, None, ('쇼핑라운지 방문 조건인 페이지_1Depth의 API 필드를 '
+                            '메타데이터에서 찾지 못했습니다.')
+    try:
+        response=api(cfg,token,':runFunnelReport',
+                     lounge_visitor_segment_request(start,end,dim,page1), alpha=True)
+        raw=response.get('funnelTable',{})
+        df=frame(raw)
+        if dim not in df.columns or 'activeUsers' not in df.columns:
+            return None, raw, '퍼널 보고서 응답에 고객 분류 또는 활성 사용자 열이 없습니다.'
+        # This funnel has exactly one step. GA4 versions may number it
+        # differently; don't discard valid rows based on the step label.
+        # The report may include a reserved total row; it must not be charted.
+        df=df[~df[dim].fillna('').astype(str).str.startswith('RESERVED_')]
+        df=df[[dim,'activeUsers']].copy()
+        df=df.sort_values('activeUsers',ascending=False).reset_index(drop=True)
+        if df.empty or not bool((df['activeUsers']>0).any()):
+            return None, raw, '방문 고객 세그먼트의 분류별 활성 사용자 값이 없습니다.'
+        return df, raw, None
+    except GAError as exc:
+        return None, None, str(exc)
+
+
+def screen_activity_breakdown(cfg, token, start, end, dim, fields):
+    """Event-scoped activity on a lounge screen, not a user segment."""
+    page1=fields.get('page1')
+    if page1:
+        cond=f_and(f_eq('eventName','screen_view'),f_eq(page1,LOUNGE_TITLE))
+        description='쇼핑라운지 화면 조회 이벤트 기준 (방문자 세그먼트 아님)'
+    else:
+        cond=f_and(f_eq('eventName','screen_view'),shop_filter())
+        description='쇼핑라운지 화면 이름의 조회 이벤트 기준 (방문자 세그먼트 아님)'
+    # Avoid requesting screenPageViews alongside custom dimensions when a
+    # compatible dimension/metric pair has not been confirmed.
+    df,raw=query(cfg,token,start,end,[dim],['activeUsers'],cond,limit=200,sort='activeUsers')
+    return df,raw,description
 
 
 def customers(cfg,token,start,end,fields):
     heading('어떤 고객이 많이 이용할까요?',
-            '성별과 연령은 KT멤버십에서 정의한 맞춤 항목을 조회합니다. 일반 GA4 인구통계 항목으로 대체하지 않아요.')
+            'GA4 탐색에서 확인한 KT멤버십 맞춤 고객 정보와 쇼핑라운지 방문 조건을 기준으로 분석합니다.')
     selected=st.radio('고객 구분',['기기','성별','연령','멤버십 등급','로그인 유형','기기별 구매'],
                       horizontal=True,key='v6_customer_select',label_visibility='collapsed')
     dims={'기기':('operatingSystem','운영체제'),
@@ -837,51 +875,87 @@ def customers(cfg,token,start,end,fields):
           '연령':(fields.get('age'),'연령대'),
           '멤버십 등급':(fields.get('grade'),'등급'),
           '로그인 유형':(fields.get('login'),'로그인 방식')}
+
     if selected=='기기별 구매':
+        st.caption('**구매 분석 기준:** 쇼핑라운지 주문완료 화면에서 기록된 purchase 이벤트의 운영체제별 실적입니다. '
+                   '위 이용 고객 분포와 분석 단위가 다릅니다.')
         d,r=safe_query(cfg,token,start,end,['operatingSystem'],['transactions',GROSS_REVENUE],
-                       order_filter(),limit=30,sort=GROSS_REVENUE)
-        if d is None or d.empty:return
-        d['operatingSystem']=d['operatingSystem'].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)'})
+                       order_filter(),limit=100,sort=GROSS_REVENUE)
+        if d is None:
+            st.info('기기별 구매 자료를 읽지 못했어요. 하단 데이터 진단에서 API 응답을 확인해 주세요.')
+            return
+        if d.empty:
+            st.info('선택 기간에 주문완료 화면 기준 구매 이벤트가 없습니다.'); return
+        d['operatingSystem']=d['operatingSystem'].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)',
+                                                            '(not set)':'미설정'})
         a,b=st.columns([.85,1.35],gap='large')
         with a:bar(d,'operatingSystem','transactions',h=290,n=10)
         with b:table(d.rename(columns={'operatingSystem':'운영체제','transactions':'구매 거래 수',
                                         GROSS_REVENUE:'구매 수익'}),f'ga4_기기별구매_{start}_{end}',height=285)
-        st.caption('쇼핑라운지 주문완료 화면의 purchase 이벤트에 기록된 운영체제 기준입니다.')
+        st.caption('기기별 구매 수익은 주문완료 화면 조건의 구매 수익입니다. 특정 기기의 고객 수와 나누어 전환율을 만들지 않습니다.')
         quality(r)
         return
+
     dim,title=dims[selected]
     if not dim:
-        st.warning(f'GA4 속성의 맞춤 측정기준에서 **{selected}** 항목을 찾지 못했어요. '
-                   '아래 **데이터 진단**에서 현재 API에 노출되는 필드명을 확인해 주세요.')
-        st.caption('일반 GA4 연령·성별(userAgeBracket/userGender)로 바꿔 조회하면 '
-                   'KT멤버십 고객 정보와 의미가 달라지므로 자동 대체하지 않습니다.')
+        st.warning(f'**{selected}**의 GA4 맞춤 측정기준을 찾지 못했습니다. '
+                   '하단 데이터 진단에서 API 필드를 확인해 주세요.')
         return
-    if selected in ('성별','연령'):
-        df,raw,scope,errors=customer_segment_query(cfg,token,start,end,dim,fields)
-        if df is None:
-            customer_field_diagnostics(cfg,token,start,end,dim,selected,fields)
-            with st.expander('기술 진단 정보 · API 필드와 조회 실패 이유',expanded=False):
-                st.code(f'맞춤 필드: {dim}\n현재 조회 기간: {start} ~ {end}',language='text')
-                if errors:
-                    for err in list(dict.fromkeys(errors))[:4]:st.caption(err)
-                else:st.caption('API 호출은 응답했지만 화면 조건에 해당하는 유효한 성별·연령 값이 없습니다.')
+
+    scope=st.radio('집계 범위',
+        ['쇼핑라운지 방문 고객','쇼핑라운지 화면 이용','KT멤버십 전체 고객'],
+        horizontal=True,key='v62_customer_scope',
+        help=('방문 고객: GA4 사용자 세그먼트에 가까운 조회 방식(퍼널 API). '
+              '화면 이용: 쇼핑라운지 screen_view 이벤트만 필터. '
+              '전체 고객: KT멤버십 GA4 속성 전체.'))
+    raw=None
+    if scope=='쇼핑라운지 방문 고객':
+        df,raw,reason=visitor_breakdown(cfg,token,start,end,dim,fields)
+        if reason:
+            st.warning('쇼핑라운지 방문 고객 세그먼트 조회가 완료되지 않았어요. '
+                       '다른 범위의 값을 같은 데이터인 것처럼 자동 대체하지 않았습니다.')
+            with st.expander('조회 오류 및 확인 사항', expanded=False):
+                st.code(str(reason),language='text')
+                st.caption(f'측정기준: {dim} | 방문 조건: {fields.get("page1") or "필드 없음"} '
+                           f'| 기간: {start}~{end}')
+            st.info('아래 **집계 범위**에서 쇼핑라운지 화면 이용을 선택하면 '
+                    '이벤트 기준으로 조회한 고객 분포를 별도로 볼 수 있습니다.')
             return
-        st.caption(f'분석 기준: **{scope}** · 실제 GA4 맞춤 측정기준 **{dim}**')
+        st.caption('**GA4 사용자 세그먼트 기준:** 선택 기간에 `screen_view`와 '
+                   '`페이지_1Depth = KT멤버십>쇼핑라운지` 조건을 충족한 고객. '
+                   '조회에는 GA4 퍼널 API를 사용하며, 탐색과 수치가 정확히 일치하는지는 비교가 필요합니다.')
+    elif scope=='쇼핑라운지 화면 이용':
+        try:
+            df,raw,desc=screen_activity_breakdown(cfg,token,start,end,dim,fields)
+        except GAError as exc:
+            st.warning(f'쇼핑라운지 화면 이용 데이터 조회 실패: {exc}');return
+        st.caption('**'+desc+'** · 전체 기간 중 쇼핑라운지 화면에서 관측된 사용자만 집계합니다.')
     else:
-        df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers','screenPageViews'],
-                          shop_filter(),limit=150,sort='activeUsers')
-        if df is None or df.empty:return
-    if selected=='기기':
-        df[dim]=df[dim].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)'})
-    if selected in ('성별','연령'):
-        df[dim]=df[dim].replace({'(not set)':'미설정','(other)':'기타','unknown':'알 수 없음'})
-    rename={dim:title,'activeUsers':'이용 고객 수','screenPageViews':'페이지 조회수'}
-    df=df.rename(columns=rename)
-    left,right=st.columns([1,1.2],gap='large')
-    with left:bar(df,title,'이용 고객 수',h=340,n=15)
-    with right:table(df,f'ga4_고객_{selected}_{start}_{end}',height=320)
+        df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers'],limit=200,sort='activeUsers')
+        st.warning('이 데이터는 **KT멤버십 전체 GA4 속성** 기준입니다. '
+                   '쇼핑라운지 방문 고객 수가 아닙니다.')
+
+    if df is None or df.empty:
+        st.info('선택 기간에 집계 가능한 값이 없습니다. 기간과 아래의 데이터 진단을 확인해 주세요.')
+        return
+    df=df.copy()
+    df[dim]=df[dim].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)',
+                              '(not set)':'미설정','(other)':'기타','unknown':'알 수 없음'})
+    df=df.rename(columns={dim:title,'activeUsers':'이용 고객 수'})
+    if not bool((df['이용 고객 수']>0).any()):
+        st.info('이 범위의 활성 사용자 수가 모두 0입니다.');return
+    valid=df[title].astype(str).str.strip().isin(['','미설정','기타','알 수 없음'])
+    if bool(valid.all()):
+        st.warning('이 조건에서 고객 특성값이 대부분 미설정으로 수집되었습니다. '
+                   '다른 조회 범위의 수치를 자동으로 섞지 않습니다.')
+    a,b=st.columns([1,1.2],gap='large')
+    with a:bar(df,title,'이용 고객 수',h=340,n=15)
+    with b:table(df,f'ga4_고객_{selected}_{scope}_{start}_{end}',height=320)
     if selected=='성별':st.caption('성별 × 연령 교차표는 요청에 따라 제외했습니다.')
-    st.caption('이용 고객 수는 분류별 중복 집계가 가능하며, GA4 탐색의 사용자 세그먼트와는 집계 범위가 다를 수 있습니다.')
+    if selected in ('성별','연령','멤버십 등급','로그인 유형'):
+        st.caption(f'분류에 사용한 맞춤 측정기준: **{dim}**')
+    st.caption('이용 고객 수는 분류별 중복 집계가 가능하며, 기간·사용자 식별 방식·'
+               'GA4 보고서 유형에 따라 탐색 화면과 차이가 날 수 있습니다.')
     quality(raw)
 
 
