@@ -13082,6 +13082,13 @@ def _build_product_mix_comparison(
         if product_data.empty:
             return empty
 
+    # '전체' 보기에서는 월·주차를 MMS/RCS 두 열로 나누기 위해 미리 채널을 확인합니다.
+    # 상품 RAW의 유형을 우선하고, 유형이 없으면 발송 RAW와 매칭한 기존 판별식을 사용합니다.
+    if send_type == "전체":
+        product_data["_mix_channel"] = _monthly_product_channels(product_data, send_data)
+        if not send_data.empty:
+            send_data["_mix_channel"] = _weekly_kpi_channel_series(send_data)
+
     product_data["_mix_date"] = pd.to_datetime(product_data["_date"], errors="coerce").dt.normalize()
     product_data = product_data[product_data["_mix_date"].notna()].copy()
     if product_data.empty:
@@ -13113,6 +13120,15 @@ def _build_product_mix_comparison(
             if not send_data.empty else pd.DataFrame()
         )
         metrics = _product_mix_period_metrics(month_products, month_sends, top30_keys)
+        if send_type == "전체":
+            for channel in ("MMS", "RCS"):
+                channel_products = month_products.loc[month_products["_mix_channel"].eq(channel)]
+                channel_sends = (
+                    month_sends.loc[month_sends["_mix_channel"].eq(channel)]
+                    if "_mix_channel" in month_sends.columns else pd.DataFrame()
+                )
+                channel_metrics = _product_mix_period_metrics(channel_products, channel_sends, top30_keys)
+                metrics.update({f"{channel}_{name}": value for name, value in channel_metrics.items()})
         year_text, month_text = month.split("-")
         metrics["구간"] = month
         metrics["표시명"] = (
@@ -13149,6 +13165,15 @@ def _build_product_mix_comparison(
             else:
                 week_sends = pd.DataFrame()
             metrics = _product_mix_period_metrics(week_products, week_sends, top30_keys)
+            if send_type == "전체":
+                for channel in ("MMS", "RCS"):
+                    channel_products = week_products.loc[week_products["_mix_channel"].eq(channel)]
+                    channel_sends = (
+                        week_sends.loc[week_sends["_mix_channel"].eq(channel)]
+                        if "_mix_channel" in week_sends.columns else pd.DataFrame()
+                    )
+                    channel_metrics = _product_mix_period_metrics(channel_products, channel_sends, top30_keys)
+                    metrics.update({f"{channel}_{name}": value for name, value in channel_metrics.items()})
             metrics["구간"] = f"{year}-{week}"
             metrics["표시명"] = week
             weekly_rows.append(metrics)
@@ -13168,6 +13193,15 @@ def _build_product_mix_comparison(
                 if not send_data.empty else pd.DataFrame()
             )
             metrics = _product_mix_period_metrics(week_products, week_sends, top30_keys)
+            if send_type == "전체":
+                for channel in ("MMS", "RCS"):
+                    channel_products = week_products.loc[week_products["_mix_channel"].eq(channel)]
+                    channel_sends = (
+                        week_sends.loc[week_sends["_mix_channel"].eq(channel)]
+                        if "_mix_channel" in week_sends.columns else pd.DataFrame()
+                    )
+                    channel_metrics = _product_mix_period_metrics(channel_products, channel_sends, top30_keys)
+                    metrics.update({f"{channel}_{name}": value for name, value in channel_metrics.items()})
             metrics["구간"] = week_start.strftime("%Y-%m-%d")
             metrics["표시명"] = week_start.strftime("%m%d주차")
             weekly_rows.append(metrics)
@@ -13191,7 +13225,7 @@ def _product_mix_comparison_html(
     send_type: str = "전체",
     monthly_view: bool = False,
 ) -> str:
-    """상품구성비교 표: 월별·주차별에 동일한 14개 성과·구성 지표를 표시합니다."""
+    """월별·주차별 지표 표. 전체 선택 시 각 월/주차 아래 MMS·RCS를 나눕니다."""
     if summary is None or summary.empty or not column_keys:
         return '<div class="product-mix-empty">비교 데이터가 없습니다.</div>'
     lookup = summary.set_index("구간").to_dict("index")
@@ -13251,7 +13285,9 @@ def _product_mix_comparison_html(
             ("신규", "신규", "count_share"),
         ]
 
+    split_channels = send_type == "전체"
     header_cells = []
+    channel_header_cells = []
     for key in column_keys:
         item = lookup.get(key, {})
         label = _html.escape(str(item.get("표시명", key)))
@@ -13259,10 +13295,19 @@ def _product_mix_comparison_html(
         if clickable_months:
             safe_key = _html.escape(str(key), quote=True)
             safe_type = _html.escape(str(send_type), quote=True)
-            content = f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}" target="_self">{label}</a>'
+            content = (
+                f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}" '
+                f'target="_self">{label}</a>'
+            )
         else:
             content = label
-        header_cells.append(f'<th class="period-col{selected_class}">{content}</th>')
+        colspan = ' colspan="2"' if split_channels else ''
+        header_cells.append(f'<th class="period-col{selected_class}"{colspan}>{content}</th>')
+        if split_channels:
+            for channel in ("MMS", "RCS"):
+                channel_header_cells.append(
+                    f'<th class="period-col product-mix-channel-head{selected_class}">{channel}</th>'
+                )
 
     body_rows = []
     for label, column, kind in metric_rows:
@@ -13270,19 +13315,24 @@ def _product_mix_comparison_html(
         for key in column_keys:
             item = lookup.get(key, {})
             selected_class = " selected" if key == selected_key else ""
-            if kind == "count_share":
-                count = int(float(item.get(f"{column}_개수", 0) or 0))
-                share = item.get(f"{column}_비중", pd.NA)
-                share_text = "-" if pd.isna(share) else f"{float(share):.1f}%"
-                value = f'{count:,}개 <span class="share">({share_text})</span>'
-            else:
-                value = _number(item.get(column, pd.NA), kind)
-            cells.append(f'<td class="period-col{selected_class}">{value}</td>')
+            channels = ("MMS", "RCS") if split_channels else (None,)
+            for channel in channels:
+                # 전체 선택에서는 채널별 원시 수치로 별도 집계한 값만 사용합니다.
+                value_col = f"{channel}_{column}" if channel else column
+                if kind == "count_share":
+                    count = int(float(item.get(f"{value_col}_개수", 0) or 0))
+                    share = item.get(f"{value_col}_비중", pd.NA)
+                    share_text = "-" if pd.isna(share) else f"{float(share):.1f}%"
+                    value = f'{count:,}개 <span class="share">({share_text})</span>'
+                else:
+                    value = _number(item.get(value_col, pd.NA), kind)
+                cells.append(f'<td class="period-col{selected_class}">{value}</td>')
         body_rows.append(
             f'<tr><th class="metric-name">{_html.escape(label)}</th>{"".join(cells)}</tr>'
         )
 
-    min_width = max(760, 205 + len(column_keys) * 132)
+    min_width = max(760, 205 + len(column_keys) * (255 if split_channels else 132))
+    first_col_rowspan = ' rowspan="2"' if split_channels else ''
     return (
         '<style>'
         '.product-mix-wrap{width:100%;overflow-x:auto;border:1px solid #dfe4ec;border-radius:11px;'
@@ -13293,6 +13343,7 @@ def _product_mix_comparison_html(
         'border-right:1px solid #e7eaf0;border-bottom:1px solid #e7eaf0;white-space:nowrap}'
         '.product-mix-table thead th{background:#eef2f7;color:#334155;font-weight:900}'
         '.product-mix-table thead a{color:#334155;text-decoration:underline;text-underline-offset:3px;cursor:pointer}'
+        '.product-mix-table .product-mix-channel-head{font-size:12px;background:#f8fafc;color:#475569;padding:7px 10px}'
         '.product-mix-table .metric-name{position:sticky;left:0;z-index:2;background:#f8fafc;'
         'text-align:left;font-weight:850;width:205px}'
         '.product-mix-table thead .metric-name{z-index:3;background:#eef2f7}'
@@ -13304,7 +13355,8 @@ def _product_mix_comparison_html(
         '.product-mix-empty{padding:13px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;color:#64748b}'
         '</style>'
         '<div class="product-mix-wrap"><table class="product-mix-table">'
-        f'<thead><tr><th class="metric-name">{"구분" if monthly_view else "주차"}</th>{"".join(header_cells)}</tr></thead>'
+        f'<thead><tr><th class="metric-name"{first_col_rowspan}>{"구분" if monthly_view else "주차"}</th>{"".join(header_cells)}</tr>'
+        f'{"<tr>" + "".join(channel_header_cells) + "</tr>" if split_channels else ""}</thead>'
         f'<tbody>{"".join(body_rows)}</tbody></table></div>'
     )
 
@@ -21245,7 +21297,7 @@ elif menu == "상품구성비교":
     if not product_mix_data_version:
         product_mix_data_version = f"session:{id(products)}:{len(products)}:{id(sends)}:{len(sends)}"
     product_mix_bundle = _menu_cache_get(
-        "product_mix_comparison_monthly_metrics_v2",
+        "product_mix_comparison_monthly_metrics_v3",
         (str(product_mix_data_version), product_mix_selected_query, product_mix_send_type),
         lambda: _build_product_mix_comparison(
             products, sends, product_mix_selected_query, product_mix_send_type
