@@ -13246,8 +13246,9 @@ def _product_mix_comparison_html(
     monthly_view: bool = False,
     date_start: str = "",
     date_end: str = "",
+    display_mode: str = "구분",
 ) -> str:
-    """월별·주차별 지표 표. 전체 선택 시 각 월/주차 아래 MMS·RCS를 나눕니다."""
+    """월별·주차별 지표 표. 전체의 표시 방식에 따라 MMS/RCS 구분 또는 합산합니다."""
     if summary is None or summary.empty or not column_keys:
         return '<div class="product-mix-empty">비교 데이터가 없습니다.</div>'
     lookup = summary.set_index("구간").to_dict("index")
@@ -13313,7 +13314,7 @@ def _product_mix_comparison_html(
             ("신규", "신규", "count_share"),
         ]
 
-    split_channels = send_type == "전체"
+    split_channels = send_type == "전체" and display_mode != "합산"
     header_cells = []
     channel_header_cells = []
     for key in column_keys:
@@ -13323,14 +13324,15 @@ def _product_mix_comparison_html(
         if clickable_months:
             safe_key = _html.escape(str(key), quote=True)
             safe_type = _html.escape(str(send_type), quote=True)
-            # 월 제목을 클릭해도 발송 유형과 설정한 조회 기간이 함께 유지됩니다.
+            safe_view = "combined" if display_mode == "합산" else "split"
+            # 월 제목을 클릭해도 발송 유형·표시 방식·조회 기간이 함께 유지됩니다.
             date_params = (
                 f"&amp;mix_start={_html.escape(str(date_start), quote=True)}"
                 f"&amp;mix_end={_html.escape(str(date_end), quote=True)}"
                 if date_start and date_end else ""
             )
             content = (
-                f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}{date_params}" '
+                f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}&amp;mix_view={safe_view}{date_params}" '
                 f'target="_self">{label}</a>'
             )
         else:
@@ -17053,6 +17055,8 @@ try:
         del st.query_params["mix_month"]
     if menu != "상품구성비교" and "mix_type" in st.query_params:
         del st.query_params["mix_type"]
+    if menu != "상품구성비교" and "mix_view" in st.query_params:
+        del st.query_params["mix_view"]
     if menu != "상품구성비교" and "mix_start" in st.query_params:
         del st.query_params["mix_start"]
     if menu != "상품구성비교" and "mix_end" in st.query_params:
@@ -21321,14 +21325,39 @@ elif menu == "상품구성비교":
     def _on_product_mix_type_change():
         st.query_params["mix_type"] = st.session_state["product_mix_send_type"]
 
-    st.radio(
-        "발송 유형",
-        options=["전체", "MMS", "RCS"],
-        key="product_mix_send_type",
-        horizontal=True,
-        on_change=_on_product_mix_type_change,
-    )
+    # 전체 선택 시 한 기간당 MMS/RCS 두 열(구분) 또는 합산 한 열(합산)로 볼 수 있습니다.
+    # URL을 공유하거나 월 머리글을 클릭해도 표시 방식을 유지합니다.
+    _mix_view_query = _get_query_param("mix_view").strip().lower()
+    _mix_view_query = "합산" if _mix_view_query == "combined" else "구분"
+    if st.session_state.get("product_mix_display_mode") != _mix_view_query:
+        st.session_state["product_mix_display_mode"] = _mix_view_query
+
+    def _on_product_mix_display_change():
+        st.query_params["mix_view"] = (
+            "combined" if st.session_state["product_mix_display_mode"] == "합산" else "split"
+        )
+
+    _mix_type_col, _mix_display_col = st.columns([1.2, 1.0], gap="large")
+    with _mix_type_col:
+        st.radio(
+            "발송 유형",
+            options=["전체", "MMS", "RCS"],
+            key="product_mix_send_type",
+            horizontal=True,
+            on_change=_on_product_mix_type_change,
+        )
     product_mix_send_type = st.session_state["product_mix_send_type"]
+    with _mix_display_col:
+        st.radio(
+            "표시 방식",
+            options=["구분", "합산"],
+            key="product_mix_display_mode",
+            horizontal=True,
+            disabled=product_mix_send_type != "전체",
+            help="전체 선택 시 구분은 MMS/RCS를 별도 열로, 합산은 한 열로 표시합니다.",
+            on_change=_on_product_mix_display_change,
+        )
+    product_mix_display_mode = st.session_state["product_mix_display_mode"]
 
     # 기간 설정: 상품/발송 RAW 모두 동일하게 필터링해야 월별·주차별 합계가 일치합니다.
     product_mix_date_sources = []
@@ -21449,6 +21478,7 @@ elif menu == "상품구성비교":
     st.caption(
         f"조회 기간: {_mix_applied_start:%Y-%m-%d} ~ {_mix_applied_end:%Y-%m-%d}"
         f" · 발송 유형: {product_mix_send_type}"
+        + (f" · 표시 방식: {product_mix_display_mode}" if product_mix_send_type == "전체" else "")
     )
 
     product_mix_selected_query = _get_query_param("mix_month").strip()
@@ -21488,6 +21518,7 @@ elif menu == "상품구성비교":
                 monthly_view=True,
                 date_start=_mix_applied_start.isoformat(),
                 date_end=_mix_applied_end.isoformat(),
+                display_mode=product_mix_display_mode,
             ),
             unsafe_allow_html=True,
         )
@@ -21515,6 +21546,7 @@ elif menu == "상품구성비교":
                     selected_key="",
                     clickable_months=False,
                     send_type=product_mix_send_type,
+                    display_mode=product_mix_display_mode,
                 ),
                 unsafe_allow_html=True,
             )
