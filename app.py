@@ -12658,6 +12658,41 @@ def _build_target_overview_table(
     return output, has_ad_info
 
 
+def _build_target_monthly_overview_table(
+    target_sends: pd.DataFrame,
+    target_products: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """선택 기간 내 월별·타겟별 주요 성과를 기간 전체 표와 같은 기준으로 집계합니다.
+
+    월별 분자/분모를 별도로 합산하여 계산하며, 선택한 기간의 첫·마지막 달은
+    선택일 내 발송만 포함합니다. 데이터가 있는 달만 순서대로 표시합니다.
+    """
+    columns = ["월", "지표", "전체", "3040 남성", "5060 남성", "3040 여성", "5060 여성"]
+    if target_sends is None or target_sends.empty or "_date" not in target_sends.columns:
+        return pd.DataFrame(columns=columns)
+
+    send_month = pd.to_datetime(target_sends["_date"], errors="coerce").dt.to_period("M")
+    if target_products is not None and not target_products.empty and "_date" in target_products.columns:
+        product_month = pd.to_datetime(target_products["_date"], errors="coerce").dt.to_period("M")
+    else:
+        product_month = None
+
+    months = sorted(send_month.dropna().unique())
+    monthly_views = []
+    for month in months:
+        month_sends = target_sends.loc[send_month.eq(month)].copy()
+        month_products = (
+            target_products.loc[product_month.eq(month)].copy()
+            if product_month is not None else None
+        )
+        # 기존 전체 기간 성과표와 계산식을 일치시킵니다.
+        monthly, _ = _build_target_overview_table(month_sends, month_products)
+        monthly.insert(0, "월", f"{month.year}년 {month.month}월")
+        monthly_views.append(monthly)
+
+    return pd.concat(monthly_views, ignore_index=True)[columns] if monthly_views else pd.DataFrame(columns=columns)
+
+
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
     view = view.rename(columns={
@@ -22229,6 +22264,34 @@ elif menu == "타겟분석":
         )
         if not target_bundle["overview_has_ad_info"]:
             st.caption("※ 광고 여부를 구분할 수 있는 RAW 표기가 없어 광고 관련 세 지표는 '-'로 표시합니다.")
+
+        st.markdown('<div class="subsection-title">월별 타겟별 주요 성과</div>', unsafe_allow_html=True)
+        target_monthly_view = _menu_cache_get(
+            "target_monthly_overview_v1",
+            (str(target_start), str(target_end)),
+            lambda: _build_target_monthly_overview_table(target_sends, target_products),
+            max_entries=10,
+        )
+        if target_monthly_view.empty:
+            st.info("선택 기간에 해당하는 월별 발송 데이터가 없습니다.")
+        else:
+            st.dataframe(
+                target_monthly_view,
+                use_container_width=True,
+                hide_index=True,
+                height=min(720, max(265, 43 + len(target_monthly_view) * 34)),
+                column_config={
+                    "월": st.column_config.TextColumn("월", width="small"),
+                    "지표": st.column_config.TextColumn("지표", width="medium"),
+                    "전체": st.column_config.TextColumn("전체", width="medium"),
+                    "3040 남성": st.column_config.TextColumn("3040 남성", width="medium"),
+                    "5060 남성": st.column_config.TextColumn("5060 남성", width="medium"),
+                    "3040 여성": st.column_config.TextColumn("3040 여성", width="medium"),
+                    "5060 여성": st.column_config.TextColumn("5060 여성", width="medium"),
+                },
+                key=f"target_monthly_overview_{target_start}_{target_end}",
+            )
+            st.caption("월별 지표는 선택 기간 내 해당 월의 실적만 집계하며, 비율·평균은 월별 합계값으로 다시 계산합니다.")
 
         st.markdown('<div class="subsection-title">타겟별 판매금액 상위·하위 10개 상품</div>', unsafe_allow_html=True)
         st.caption("선택 기간의 발송 상품별 판매금액 기준 · 0원 판매 상품 제외 · 동일 상품도 발송일이 다르면 각각 집계")
