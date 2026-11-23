@@ -12521,6 +12521,143 @@ def render_home_material_response_analysis(
             st.caption("지역 순위는 성공건수 500건 이상을 기본 분석 대상으로 사용하며, 없으면 성공건수 1건 이상으로 자동 확장")
 
 
+def _target_overview_ad_flags(df: pd.DataFrame) -> tuple[pd.Series, bool]:
+    """광고 구분이 있는 원본 열/명시된 캠페인 표기만 인정합니다.
+
+    광고 여부 정보 자체가 없는 경우 광고 실적을 임의로 0으로 산정하지 않습니다.
+    """
+    is_ad = pd.Series(False, index=df.index, dtype=bool)
+    has_info = False
+    flag_columns = [
+        "광고여부", "광고 여부", "광고구분", "광고 구분", "광고유형", "광고 유형",
+        "광고캠페인", "광고 캠페인", "광고", "유무료", "유/무료",
+    ]
+    positive = {"Y", "YES", "TRUE", "1", "광고", "유료", "유료광고", "AD", "PAID", "SPONSORED"}
+    for col in flag_columns:
+        if col not in df.columns:
+            continue
+        raw = df[col].fillna("").astype(str).str.strip()
+        upper = raw.str.upper()
+        if raw.ne("").any():
+            has_info = True
+        identified = upper.isin(positive) | raw.str.contains(r"광고|유료", regex=True, na=False)
+        identified &= ~raw.str.contains(r"비광고|광고\s*아님|광고\s*제외", regex=True, na=False)
+        is_ad |= identified
+    # 별도 광고 열이 없는 RAW에서도 명시적인 [광고]/광고캠페인/AD 표기를 활용합니다.
+    for col in ["캠페인명", "캠페인", "소재", "소재명", "발송명", "메시지명"]:
+        if col not in df.columns:
+            continue
+        value = df[col].fillna("").astype(str)
+        marked = value.str.contains(r"광고|(?<![A-Za-z])\[?AD\]?(?![A-Za-z])", case=False, regex=True, na=False)
+        marked &= ~value.str.contains(r"비광고|광고\s*아님|광고\s*제외", regex=True, na=False)
+        if marked.any():
+            has_info = True
+            is_ad |= marked
+    return is_ad, has_info
+
+
+def _build_target_overview_table(
+    target_sends: pd.DataFrame, target_products: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, bool]:
+    """성별·연령별 10개 핵심지표: 합계 분자/합계 분모로 비율을 계산합니다."""
+    headings = ["전체", "3040 남성", "5060 남성", "3040 여성", "5060 여성"]
+    metric_rows = [
+        "SPM (발송대비주문금액)", "MMS CTR", "RCS CTR", "1회 주문금액",
+        "1회 주문수량", "1회 평균 객단가", "발송횟수", "광고 발송횟수",
+        "광고 1회 주문금액", "광고 1회 주문수량",
+    ]
+    output = pd.DataFrame({"지표": metric_rows})
+    if target_sends is None or target_sends.empty:
+        for heading in headings:
+            output[heading] = "-"
+        return output, False
+
+    d = target_sends.copy()
+    d["_target_run_key"] = _send_run_key_series(d)
+    d["_target_channel"] = _weekly_kpi_channel_series(d).reindex(d.index).fillna("MMS")
+    genders = d["성별"] if "성별" in d.columns else pd.Series("", index=d.index)
+    ages = d["연령"] if "연령" in d.columns else pd.Series("", index=d.index)
+    genders = genders.fillna("").astype(str).str.strip().replace({"남": "남성", "여": "여성"})
+    ages = ages.map(clean_identifier_value)
+    d["_target_label"] = (ages + " " + genders).str.strip()
+    ad_flags, has_ad_info = _target_overview_ad_flags(d)
+    # 소재 RAW에 광고 표시가 없고 상품 RAW에만 있는 경우를 보완합니다.
+    # 날짜·시간이 확인된 동일 발송만 연결하고, 가능하면 성별·연령도 일치시킵니다.
+    if target_products is not None and not target_products.empty:
+        product_flags, product_has_info = _target_overview_ad_flags(target_products)
+        has_ad_info = has_ad_info or product_has_info
+        if product_flags.any():
+            pw = target_products.loc[product_flags].copy()
+            pw["_target_run_key"] = _send_run_key_series(pw)
+            pw = pw[~pw["_target_run_key"].str.startswith("ROW|", na=True)]
+            if not pw.empty:
+                prod_genders = pw["성별"] if "성별" in pw.columns else pd.Series("", index=pw.index)
+                prod_ages = pw["연령"] if "연령" in pw.columns else pd.Series("", index=pw.index)
+                prod_genders = prod_genders.fillna("").astype(str).str.strip().replace({"남": "남성", "여": "여성"})
+                prod_ages = prod_ages.map(clean_identifier_value)
+                pw["_target_label"] = (prod_ages + " " + prod_genders).str.strip()
+                targeted = pw.loc[pw["_target_label"].ne("")]
+                untargeted = pw.loc[pw["_target_label"].eq("")]
+                ad_pairs = set(zip(targeted["_target_run_key"], targeted["_target_label"]))
+                ad_keys = set(untargeted["_target_run_key"])
+                product_match = pd.Series(
+                    [(run_key, label) in ad_pairs or run_key in ad_keys
+                     for run_key, label in zip(d["_target_run_key"], d["_target_label"])],
+                    index=d.index, dtype=bool,
+                )
+                ad_flags |= product_match
+    d["_target_is_ad"] = ad_flags
+
+    sent_col = first_col(d, ["발송 성공 건수", "총 발송 건수"])
+    click_col = first_col(d, ["클릭 수(uniq)", "클릭 수"])
+    def colsum(frame: pd.DataFrame, col: str | None) -> float:
+        return float(pd.to_numeric(frame[col], errors="coerce").fillna(0).sum()) if col and col in frame.columns else 0.0
+    def comma(value: float, unit: str = "") -> str:
+        return f"{value:,.0f}{unit}"
+    def mean_text(numerator: float, denominator: float, unit: str = "원") -> str:
+        return comma(numerator / denominator, unit) if denominator > 0 else "-"
+    def pct_of(count: int, whole: int) -> str:
+        return f"{count:,}회 ({count / whole * 100:.1f}%)" if whole > 0 else f"{count:,}회 (-)"
+    total_runs = int(d["_target_run_key"].nunique())
+    total_ad_runs = int(d.loc[d["_target_is_ad"], "_target_run_key"].nunique())
+
+    for heading in headings:
+        subset = d if heading == "전체" else d.loc[d["_target_label"].eq(heading)]
+        run_count = int(subset["_target_run_key"].nunique())
+        amount = colsum(subset, "주문금액")
+        units = colsum(subset, "주문수량")
+        orders = colsum(subset, "주문건수")
+        sent = colsum(subset, sent_col)
+        ctrs = []
+        for channel in ("MMS", "RCS"):
+            group = subset.loc[subset["_target_channel"].eq(channel)]
+            clicked = colsum(group, click_col)
+            successful = colsum(group, sent_col)
+            ctrs.append(f"{clicked / successful * 100:.1f}%" if successful > 0 else "-")
+        ad = subset.loc[subset["_target_is_ad"]]
+        ad_runs = int(ad["_target_run_key"].nunique())
+        ad_amount = colsum(ad, "주문금액")
+        ad_units = colsum(ad, "주문수량")
+        cells = [
+            f"{amount / sent:.1f}원" if sent > 0 else "-",
+            ctrs[0], ctrs[1],
+            mean_text(amount, run_count),
+            f"{units / run_count:,.1f}개" if run_count > 0 and "주문수량" in d.columns else "-",
+            mean_text(amount, orders),
+            pct_of(run_count, total_runs),
+            "-",  # 광고 비중은 아래에서 전체/타겟별 분모를 구분합니다.
+            mean_text(ad_amount, ad_runs) if has_ad_info else "-",
+            f"{ad_units / ad_runs:,.1f}개" if has_ad_info and ad_runs > 0 and "주문수량" in d.columns else "-",
+        ]
+        # 광고 발송횟수의 비중은 모든 타겟에서 '전체 광고 발송횟수'를 분모로 사용.
+        if has_ad_info:
+            # 전체=전체 발송 중 광고 비중, 타겟별=전체 광고 발송 중 해당 타겟 비중.
+            denominator = total_runs if heading == "전체" else total_ad_runs
+            cells[7] = pct_of(ad_runs, denominator) if denominator else "0회 (-)"
+        output[heading] = cells
+    return output, has_ad_info
+
+
 def _target_analysis_raw_fast(data: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
     view = grouped_send_table(data, group_keys).copy()
     view = view.rename(columns={
@@ -12578,31 +12715,13 @@ def _build_target_menu_bundle(
             "gender_age_seg_raw": pd.DataFrame(),
             "gender_age_view": pd.DataFrame(),
             "gender_age_seg_view": pd.DataFrame(),
-            "chart": go.Figure(),
+            "overview_view": pd.DataFrame(),
+            "overview_has_ad_info": False,
         }
 
     gender_age_raw = _target_analysis_raw_fast(target_sends, ["성별", "연령"])
     gender_age_seg_raw = _target_analysis_raw_fast(target_sends, ["성별", "연령", "SEG"])
-    chart_data = gender_age_raw.copy()
-    gender_text = chart_data.get("성별", pd.Series("", index=chart_data.index)).fillna("").astype(str).str.strip()
-    age_text = chart_data.get("연령", pd.Series("", index=chart_data.index)).map(clean_identifier_value)
-    chart_data["타겟"] = (gender_text + " " + age_text).str.strip()
-    fig = go.Figure(go.Bar(
-        x=chart_data["타겟"],
-        y=chart_data["SPM"],
-        text=chart_data["SPM"].map(lambda x: f"{float(x):.1f}"),
-        textposition="outside",
-        cliponaxis=False,
-    ))
-    fig.update_layout(
-        height=420,
-        margin=dict(l=45, r=25, t=35, b=60),
-        xaxis_title="",
-        yaxis_title="SPM",
-        showlegend=False,
-        plot_bgcolor="#ffffff",
-        yaxis=dict(gridcolor="#e5e7eb"),
-    )
+    overview_view, overview_has_ad_info = _build_target_overview_table(target_sends, target_products)
     return {
         "target_sends": target_sends,
         "target_products": target_products,
@@ -12610,7 +12729,8 @@ def _build_target_menu_bundle(
         "gender_age_seg_raw": gender_age_seg_raw,
         "gender_age_view": _format_target_view_fast(gender_age_raw, ["성별", "연령"]),
         "gender_age_seg_view": _format_target_view_fast(gender_age_seg_raw, ["성별", "연령", "SEG"]),
-        "chart": fig,
+        "overview_view": overview_view,
+        "overview_has_ad_info": overview_has_ad_info,
     }
 
 
@@ -12684,6 +12804,73 @@ def _build_target_history_view_fast(
         view["SPM"] = view["SPM"].map(lambda x: f"{float(x):.1f}")
     return view
 
+
+
+
+# 타겟별 성과: 실제 발송 상품 행 기준 판매금액 상위/하위 10개.
+# 판매금액이 0원인 편성 상품은 제외해, 실제 판매 성과가 있는 상품 간 하위 순위를 보여줍니다.
+def _build_target_product_sales_rankings(
+    target_products: pd.DataFrame,
+) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
+    targets = ["전체", "3040 남성", "5060 남성", "3040 여성", "5060 여성"]
+    columns = ["발송일", "상품명", "멤버십혜택가", "판매건수", "판매수량", "판매금액", "추가노출"]
+    empty = pd.DataFrame(columns=columns)
+    result = {name: (empty.copy(), empty.copy()) for name in targets}
+    if target_products is None or target_products.empty or "_date" not in target_products.columns:
+        return result
+
+    work = target_products.copy()
+    dates = pd.to_datetime(work["_date"], errors="coerce")
+    work = work.loc[dates.notna()].copy()
+    if work.empty:
+        return result
+    work["_rank_date"] = pd.to_datetime(work["_date"], errors="coerce")
+    work["발송일"] = work["_rank_date"].dt.strftime("%Y.%m.%d")
+    genders = work["성별"] if "성별" in work.columns else pd.Series("", index=work.index)
+    ages = work["연령"] if "연령" in work.columns else pd.Series("", index=work.index)
+    genders = genders.fillna("").astype(str).str.strip().replace({"남": "남성", "여": "여성"})
+    ages = ages.map(clean_identifier_value)
+    work["_rank_target"] = (ages + " " + genders).str.strip()
+
+    # 판매금액뿐 아니라 판매건수/수량도 실제 상품 RAW 수치를 사용합니다.
+    def source_numbers(column):
+        if column not in work.columns:
+            return pd.Series(0.0, index=work.index)
+        raw = work[column].astype(str).str.replace(",", "", regex=False).str.replace("원", "", regex=False)
+        return pd.to_numeric(raw, errors="coerce").fillna(0)
+
+    work["_rank_amount"] = source_numbers("주문금액")
+    work["_rank_orders"] = source_numbers("주문건수")
+    work["_rank_units"] = source_numbers("주문수량")
+    work["_rank_price"] = source_numbers("멤버십혜택가")
+    # 예시처럼 판매금액이 발생한 편성 행을 대상으로 하위 10개를 산정합니다.
+    work = work.loc[work["_rank_amount"].gt(0)].copy()
+
+    def display(subset):
+        if subset.empty:
+            return empty.copy()
+        exposure = subset["추가노출"] if "추가노출" in subset.columns else pd.Series("", index=subset.index)
+        names = subset["상품명"] if "상품명" in subset.columns else pd.Series("", index=subset.index)
+        out = pd.DataFrame({
+            "발송일": subset["발송일"].astype(str),
+            "상품명": names.fillna("").astype(str).str.strip(),
+            "멤버십혜택가": subset["_rank_price"].map(lambda v: f"{int(round(v)):,}"),
+            "판매건수": subset["_rank_orders"].map(lambda v: f"{int(round(v)):,}"),
+            "판매수량": subset["_rank_units"].map(lambda v: f"{int(round(v)):,}"),
+            "판매금액": subset["_rank_amount"].map(lambda v: f"{int(round(v)):,}"),
+            "추가노출": exposure.fillna("").astype(str).str.strip().replace({"": "-", "nan": "-", "None": "-"}),
+        }, index=subset.index)
+        return out[columns].reset_index(drop=True)
+
+    for target in targets:
+        group = work if target == "전체" else work.loc[work["_rank_target"].eq(target)]
+        if group.empty:
+            continue
+        # 동률이면 발송일 오름차순으로 정렬해 선택 순위를 재현 가능하게 합니다.
+        top = group.sort_values(["_rank_amount", "_rank_date"], ascending=[False, True], kind="stable").head(10)
+        bottom = group.sort_values(["_rank_amount", "_rank_date"], ascending=[True, True], kind="stable").head(10)
+        result[target] = (display(top), display(bottom))
+    return result
 
 
 def _build_target_best_product_views(
@@ -22005,7 +22192,7 @@ elif menu == "타겟분석":
         target_end = sends["_date"].max().date()
 
     target_bundle = _menu_cache_get(
-        "target_menu_bundle_v2",
+        "target_menu_bundle_v3",
         (str(target_start), str(target_end)),
         lambda: _build_target_menu_bundle(products, sends, target_start, target_end),
         max_entries=10,
@@ -22019,68 +22206,135 @@ elif menu == "타겟분석":
         gender_age_raw = target_bundle["gender_age_raw"]
         gender_age_seg_raw = target_bundle["gender_age_seg_raw"]
 
-        st.markdown('<div class="subsection-title">성별·연령별 SPM</div>', unsafe_allow_html=True)
-        st.plotly_chart(target_bundle["chart"], use_container_width=True, key="target_spm_chart")
-
-        st.markdown('<div class="subsection-title">성별·연령별 실적</div>', unsafe_allow_html=True)
-        gender_age_event = selectable_dataframe(
-            target_bundle["gender_age_view"],
-            key=f"target_gender_age_table_{target_start}_{target_end}",
-            allow_row_selection=True,
+        st.markdown('<div class="subsection-title">타겟별 주요 성과</div>', unsafe_allow_html=True)
+        st.dataframe(
+            target_bundle["overview_view"],
             use_container_width=True,
             hide_index=True,
-            height=min(520, 42 + len(gender_age_raw) * 35),
+            height=423,
+            column_config={
+                "지표": st.column_config.TextColumn("지표", width="medium"),
+                "전체": st.column_config.TextColumn("전체", width="medium"),
+                "3040 남성": st.column_config.TextColumn("3040 남성", width="medium"),
+                "5060 남성": st.column_config.TextColumn("5060 남성", width="medium"),
+                "3040 여성": st.column_config.TextColumn("3040 여성", width="medium"),
+                "5060 여성": st.column_config.TextColumn("5060 여성", width="medium"),
+            },
+            key=f"target_overview_{target_start}_{target_end}",
         )
-
-        st.markdown('<div class="subsection-title">성별·연령·SEG별 실적</div>', unsafe_allow_html=True)
-        gender_age_seg_event = selectable_dataframe(
-            target_bundle["gender_age_seg_view"],
-            key=f"target_gender_age_seg_table_{target_start}_{target_end}",
-            allow_row_selection=True,
-            use_container_width=True,
-            hide_index=True,
-            height=min(620, 42 + len(gender_age_seg_raw) * 35),
+        st.caption(
+            "CTR: 채널별 유니크 클릭수 ÷ 발송 성공 건수 · SPM: 주문금액 ÷ 발송 성공 건수 · "
+            "1회 주문금액·수량: 기간 합계 ÷ 발송횟수 · 객단가: 주문금액 ÷ 주문건수 · "
+            "광고 비중: 전체는 총 발송 대비, 타겟별은 광고 발송 대비"
         )
+        if not target_bundle["overview_has_ad_info"]:
+            st.caption("※ 광고 여부를 구분할 수 있는 RAW 표기가 없어 광고 관련 세 지표는 '-'로 표시합니다.")
 
-        selected_target = None
-        selected_seg = None
-        seg_rows = list(getattr(getattr(gender_age_seg_event, "selection", None), "rows", []) or [])
-        age_rows = list(getattr(getattr(gender_age_event, "selection", None), "rows", []) or [])
-        if seg_rows:
-            selected_idx = int(seg_rows[0])
-            if 0 <= selected_idx < len(gender_age_seg_raw):
-                selected_target = gender_age_seg_raw.iloc[selected_idx]
-                selected_seg = clean_identifier_value(selected_target.get("SEG", ""))
-        elif age_rows:
-            selected_idx = int(age_rows[0])
-            if 0 <= selected_idx < len(gender_age_raw):
-                selected_target = gender_age_raw.iloc[selected_idx]
-
-        if selected_target is not None:
-            selected_gender = str(selected_target.get("성별", "")).strip()
-            selected_age = clean_identifier_value(selected_target.get("연령", ""))
-            target_name = f"{selected_gender} {selected_age}" + (f" SEG{selected_seg}" if selected_seg else "")
-            history_view = _menu_cache_get(
-                "target_selected_history",
-                (str(target_start), str(target_end), selected_gender, selected_age, selected_seg),
-                lambda: _build_target_history_view_fast(
-                    target_products, target_sends,
-                    selected_gender, selected_age, selected_seg,
-                ),
-                max_entries=24,
-            ).copy()
-
-            if history_view.empty:
-                st.info("선택한 타겟의 상품 발송 이력이 없습니다.")
-            else:
-                st.markdown(f'<div class="subsection-title">{target_name} 발송 이력</div>', unsafe_allow_html=True)
-                selectable_dataframe(
-                    history_view,
-                    key=f"target_history_{target_start}_{target_end}_{selected_gender}_{selected_age}_{selected_seg or 'ALL'}",
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(620, 42 + len(history_view) * 35),
+        st.markdown('<div class="subsection-title">타겟별 판매금액 상위·하위 10개 상품</div>', unsafe_allow_html=True)
+        st.caption("선택 기간의 발송 상품별 판매금액 기준 · 0원 판매 상품 제외 · 동일 상품도 발송일이 다르면 각각 집계")
+        target_rank_views = _menu_cache_get(
+            "target_sales_rankings_v1",
+            (str(target_start), str(target_end)),
+            lambda: _build_target_product_sales_rankings(target_products),
+            max_entries=10,
+        )
+        target_rank_names = ["전체", "3040 남성", "5060 남성", "3040 여성", "5060 여성"]
+        target_rank_tabs = st.tabs(target_rank_names)
+        target_rank_col_config = {
+            "발송일": st.column_config.TextColumn("발송일", width="small"),
+            "상품명": st.column_config.TextColumn("상품명", width="large"),
+            "멤버십혜택가": st.column_config.TextColumn("멤버십혜택가", width="small"),
+            "판매건수": st.column_config.TextColumn("판매건수", width="small"),
+            "판매수량": st.column_config.TextColumn("판매수량", width="small"),
+            "판매금액": st.column_config.TextColumn("판매금액", width="small"),
+            "추가노출": st.column_config.TextColumn("추가노출", width="small"),
+        }
+        for target_tab, target_name in zip(target_rank_tabs, target_rank_names):
+            with target_tab:
+                top_view, low_view = target_rank_views.get(
+                    target_name, (pd.DataFrame(), pd.DataFrame())
                 )
+                left_col, right_col = st.columns(2, gap="medium")
+                for rank_col, rank_view, rank_title, rank_key in (
+                    (left_col, top_view, "판매금액 상위 10개 상품", "top"),
+                    (right_col, low_view, "판매금액 하위 10개 상품", "bottom"),
+                ):
+                    with rank_col:
+                        st.markdown(f"**{target_name} {rank_title}**")
+                        if rank_view.empty:
+                            st.info("해당 기간에 판매금액이 있는 상품이 없습니다.")
+                        else:
+                            st.dataframe(
+                                rank_view,
+                                use_container_width=True,
+                                hide_index=True,
+                                height=425,
+                                column_config=target_rank_col_config,
+                                key=f"target_rank_{rank_key}_{target_name}_{target_start}_{target_end}",
+                            )
+
+        # 기존 성별·연령 및 SEG 상세 분석은 필요할 때 펼쳐서 사용할 수 있도록 보존합니다.
+        with st.expander("성별·연령 / SEG별 상세 실적 및 발송 이력", expanded=False):
+
+            st.markdown('<div class="subsection-title">성별·연령별 실적</div>', unsafe_allow_html=True)
+            gender_age_event = selectable_dataframe(
+                target_bundle["gender_age_view"],
+                key=f"target_gender_age_table_{target_start}_{target_end}",
+                allow_row_selection=True,
+                use_container_width=True,
+                hide_index=True,
+                height=min(520, 42 + len(gender_age_raw) * 35),
+            )
+
+            st.markdown('<div class="subsection-title">성별·연령·SEG별 실적</div>', unsafe_allow_html=True)
+            gender_age_seg_event = selectable_dataframe(
+                target_bundle["gender_age_seg_view"],
+                key=f"target_gender_age_seg_table_{target_start}_{target_end}",
+                allow_row_selection=True,
+                use_container_width=True,
+                hide_index=True,
+                height=min(620, 42 + len(gender_age_seg_raw) * 35),
+            )
+
+            selected_target = None
+            selected_seg = None
+            seg_rows = list(getattr(getattr(gender_age_seg_event, "selection", None), "rows", []) or [])
+            age_rows = list(getattr(getattr(gender_age_event, "selection", None), "rows", []) or [])
+            if seg_rows:
+                selected_idx = int(seg_rows[0])
+                if 0 <= selected_idx < len(gender_age_seg_raw):
+                    selected_target = gender_age_seg_raw.iloc[selected_idx]
+                    selected_seg = clean_identifier_value(selected_target.get("SEG", ""))
+            elif age_rows:
+                selected_idx = int(age_rows[0])
+                if 0 <= selected_idx < len(gender_age_raw):
+                    selected_target = gender_age_raw.iloc[selected_idx]
+
+            if selected_target is not None:
+                selected_gender = str(selected_target.get("성별", "")).strip()
+                selected_age = clean_identifier_value(selected_target.get("연령", ""))
+                target_name = f"{selected_gender} {selected_age}" + (f" SEG{selected_seg}" if selected_seg else "")
+                history_view = _menu_cache_get(
+                    "target_selected_history",
+                    (str(target_start), str(target_end), selected_gender, selected_age, selected_seg),
+                    lambda: _build_target_history_view_fast(
+                        target_products, target_sends,
+                        selected_gender, selected_age, selected_seg,
+                    ),
+                    max_entries=24,
+                ).copy()
+
+                if history_view.empty:
+                    st.info("선택한 타겟의 상품 발송 이력이 없습니다.")
+                else:
+                    st.markdown(f'<div class="subsection-title">{target_name} 발송 이력</div>', unsafe_allow_html=True)
+                    selectable_dataframe(
+                        history_view,
+                        key=f"target_history_{target_start}_{target_end}_{selected_gender}_{selected_age}_{selected_seg or 'ALL'}",
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(620, 42 + len(history_view) * 35),
+                    )
 
 elif menu == "편성 프로그램":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 편성 프로그램 화면으로 바로 연결됩니다.")
