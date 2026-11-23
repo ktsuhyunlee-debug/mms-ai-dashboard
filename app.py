@@ -13224,6 +13224,8 @@ def _product_mix_comparison_html(
     clickable_months: bool = False,
     send_type: str = "전체",
     monthly_view: bool = False,
+    date_start: str = "",
+    date_end: str = "",
 ) -> str:
     """월별·주차별 지표 표. 전체 선택 시 각 월/주차 아래 MMS·RCS를 나눕니다."""
     if summary is None or summary.empty or not column_keys:
@@ -13295,8 +13297,14 @@ def _product_mix_comparison_html(
         if clickable_months:
             safe_key = _html.escape(str(key), quote=True)
             safe_type = _html.escape(str(send_type), quote=True)
+            # 월 제목을 클릭해도 발송 유형과 설정한 조회 기간이 함께 유지됩니다.
+            date_params = (
+                f"&amp;mix_start={_html.escape(str(date_start), quote=True)}"
+                f"&amp;mix_end={_html.escape(str(date_end), quote=True)}"
+                if date_start and date_end else ""
+            )
             content = (
-                f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}" '
+                f'<a href="?menu=product-mix&amp;mix_month={safe_key}&amp;mix_type={safe_type}{date_params}" '
                 f'target="_self">{label}</a>'
             )
         else:
@@ -17019,6 +17027,10 @@ try:
         del st.query_params["mix_month"]
     if menu != "상품구성비교" and "mix_type" in st.query_params:
         del st.query_params["mix_type"]
+    if menu != "상품구성비교" and "mix_start" in st.query_params:
+        del st.query_params["mix_start"]
+    if menu != "상품구성비교" and "mix_end" in st.query_params:
+        del st.query_params["mix_end"]
 except Exception:
     pass
 
@@ -21268,9 +21280,9 @@ elif menu == "상품구성비교":
     st.caption("🔗 현재 브라우저 주소를 그대로 공유하면 상품 구성 비교 화면으로 바로 연결됩니다.")
     st.markdown('<div class="section-title">상품 구성 비교</div>', unsafe_allow_html=True)
     st.caption(
-        "개수·비중은 해당 기간 전체 편성 상품 행 기준 · "
+        "개수·비중은 선택한 조회 기간의 편성 상품 행 기준 · "
         "최저가 미확보는 발송일 최저가보다 멤버십 혜택가가 높은 상품 · "
-        "TOP30은 선택한 유형의 전체 데이터 기간 누적 주문금액 상위 30개 상품 기준"
+        "시작일·종료일 모두 집계에 포함"
     )
 
     # URL 공유 및 월 머리글 이동 시에도 선택한 유형을 유지합니다.
@@ -21292,15 +21304,139 @@ elif menu == "상품구성비교":
     )
     product_mix_send_type = st.session_state["product_mix_send_type"]
 
+    # 기간 설정: 상품/발송 RAW 모두 동일하게 필터링해야 월별·주차별 합계가 일치합니다.
+    product_mix_date_sources = []
+    for _mix_source in (products, sends):
+        if isinstance(_mix_source, pd.DataFrame) and "_date" in _mix_source.columns:
+            _mix_valid = pd.to_datetime(_mix_source["_date"], errors="coerce").dropna()
+            if not _mix_valid.empty:
+                product_mix_date_sources.extend([_mix_valid.min(), _mix_valid.max()])
+    if product_mix_date_sources:
+        product_mix_data_min = pd.Timestamp(min(product_mix_date_sources)).date()
+        product_mix_data_max = pd.Timestamp(max(product_mix_date_sources)).date()
+    else:
+        product_mix_data_min = product_mix_data_max = datetime.now().date()
+
+    product_mix_calendar_min = datetime(
+        min(2026, product_mix_data_min.year, datetime.now().year), 1, 1
+    ).date()
+    product_mix_calendar_max = datetime(
+        max(2026, product_mix_data_max.year, datetime.now().year), 12, 31
+    ).date()
+
+    def _product_mix_query_date(raw):
+        try:
+            parsed = pd.Timestamp(str(raw).strip())
+            result = parsed.date()
+            return result if product_mix_calendar_min <= result <= product_mix_calendar_max else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    _mix_raw_start = _get_query_param("mix_start").strip()
+    _mix_raw_end = _get_query_param("mix_end").strip()
+    _mix_url_token = (_mix_raw_start, _mix_raw_end)
+    _mix_query_start = _product_mix_query_date(_mix_raw_start) if _mix_raw_start else None
+    _mix_query_end = _product_mix_query_date(_mix_raw_end) if _mix_raw_end else None
+    _mix_url_period = (
+        (_mix_query_start, _mix_query_end)
+        if _mix_query_start and _mix_query_end and _mix_query_start <= _mix_query_end
+        else None
+    )
+    # URL이 바뀐 경우(월 제목 이동/공유 URL 진입)만 적용 기간과 입력칸을 동기화합니다.
+    # 날짜를 입력하는 도중에는 현재 적용된 기간을 변경하지 않습니다.
+    if st.session_state.get("product_mix_last_url_period") != _mix_url_token or \
+            "product_mix_applied_period" not in st.session_state:
+        _mix_new_period = _mix_url_period or (product_mix_data_min, product_mix_data_max)
+        st.session_state["product_mix_applied_period"] = _mix_new_period
+        st.session_state["product_mix_start_widget"] = _mix_new_period[0]
+        st.session_state["product_mix_end_widget"] = _mix_new_period[1]
+        st.session_state["product_mix_last_url_period"] = _mix_url_token
+
+    _mix_applied_start, _mix_applied_end = st.session_state["product_mix_applied_period"]
+    if "product_mix_start_widget" not in st.session_state:
+        st.session_state["product_mix_start_widget"] = _mix_applied_start
+    if "product_mix_end_widget" not in st.session_state:
+        st.session_state["product_mix_end_widget"] = _mix_applied_end
+
+    st.markdown("**📅 조회 기간**")
+    _mix_start_col, _mix_sep_col, _mix_end_col, _mix_apply_col, _mix_reset_col = st.columns(
+        [1.25, 0.08, 1.25, 0.62, 0.62], gap="small", vertical_alignment="bottom"
+    )
+    with _mix_start_col:
+        _mix_draft_start = st.date_input(
+            "시작일", min_value=product_mix_calendar_min,
+            max_value=product_mix_calendar_max, format="YYYY-MM-DD",
+            key="product_mix_start_widget", label_visibility="collapsed",
+        )
+    with _mix_sep_col:
+        st.markdown("<div style='text-align:center;padding-bottom:9px;'>~</div>", unsafe_allow_html=True)
+    with _mix_end_col:
+        _mix_draft_end = st.date_input(
+            "종료일", min_value=product_mix_calendar_min,
+            max_value=product_mix_calendar_max, format="YYYY-MM-DD",
+            key="product_mix_end_widget", label_visibility="collapsed",
+        )
+    _mix_invalid = _mix_draft_start > _mix_draft_end
+    with _mix_apply_col:
+        _mix_apply_clicked = st.button(
+            "✔ 적용", key="product_mix_period_apply",
+            use_container_width=True, disabled=_mix_invalid,
+        )
+    with _mix_reset_col:
+        _mix_reset_clicked = st.button(
+            "↺ 초기화", key="product_mix_period_reset", use_container_width=True,
+        )
+    if _mix_invalid:
+        st.warning("조회 시작일은 종료일보다 늦을 수 없습니다.")
+
+    if _mix_reset_clicked:
+        _mix_applied_start, _mix_applied_end = product_mix_data_min, product_mix_data_max
+        st.session_state["product_mix_applied_period"] = (_mix_applied_start, _mix_applied_end)
+        _mix_new_token = (_mix_applied_start.isoformat(), _mix_applied_end.isoformat())
+        st.query_params["mix_start"] = _mix_new_token[0]
+        st.query_params["mix_end"] = _mix_new_token[1]
+        st.session_state["product_mix_last_url_period"] = _mix_new_token
+        # 이미 생성된 Streamlit 위젯은 직접 수정하지 않고 다음 실행에서 새로 생성합니다.
+        st.session_state.pop("product_mix_start_widget", None)
+        st.session_state.pop("product_mix_end_widget", None)
+        st.rerun()
+    if _mix_apply_clicked and not _mix_invalid:
+        _mix_applied_start, _mix_applied_end = _mix_draft_start, _mix_draft_end
+        st.session_state["product_mix_applied_period"] = (_mix_applied_start, _mix_applied_end)
+        _mix_new_token = (_mix_applied_start.isoformat(), _mix_applied_end.isoformat())
+        st.query_params["mix_start"] = _mix_new_token[0]
+        st.query_params["mix_end"] = _mix_new_token[1]
+        st.session_state["product_mix_last_url_period"] = _mix_new_token
+
+    # 양쪽 RAW를 필터링한 뒤 기존 분리집계 함수를 그대로 이용합니다.
+    _mix_start_ts = pd.Timestamp(_mix_applied_start)
+    _mix_end_ts = pd.Timestamp(_mix_applied_end)
+    _mix_products = products.loc[
+        pd.to_datetime(products["_date"], errors="coerce").dt.normalize()
+        .between(_mix_start_ts, _mix_end_ts, inclusive="both")
+    ].copy() if "_date" in products.columns else products.iloc[0:0].copy()
+    _mix_sends = sends.loc[
+        pd.to_datetime(sends["_date"], errors="coerce").dt.normalize()
+        .between(_mix_start_ts, _mix_end_ts, inclusive="both")
+    ].copy() if "_date" in sends.columns else sends.iloc[0:0].copy()
+
+    st.caption(
+        f"조회 기간: {_mix_applied_start:%Y-%m-%d} ~ {_mix_applied_end:%Y-%m-%d}"
+        f" · 발송 유형: {product_mix_send_type}"
+    )
+
     product_mix_selected_query = _get_query_param("mix_month").strip()
     product_mix_data_version = st.session_state.get("data_version")
     if not product_mix_data_version:
         product_mix_data_version = f"session:{id(products)}:{len(products)}:{id(sends)}:{len(sends)}"
     product_mix_bundle = _menu_cache_get(
         "product_mix_comparison_monthly_metrics_v3",
-        (str(product_mix_data_version), product_mix_selected_query, product_mix_send_type),
+        (
+            str(product_mix_data_version), product_mix_selected_query, product_mix_send_type,
+            _mix_applied_start.isoformat(), _mix_applied_end.isoformat(),
+        ),
         lambda: _build_product_mix_comparison(
-            products, sends, product_mix_selected_query, product_mix_send_type
+            _mix_products, _mix_sends, product_mix_selected_query, product_mix_send_type
         ),
         max_entries=16,
     )
@@ -21324,6 +21460,8 @@ elif menu == "상품구성비교":
                 clickable_months=True,
                 send_type=product_mix_send_type,
                 monthly_view=True,
+                date_start=_mix_applied_start.isoformat(),
+                date_end=_mix_applied_end.isoformat(),
             ),
             unsafe_allow_html=True,
         )
