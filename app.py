@@ -12966,6 +12966,14 @@ def _product_mix_period_metrics(
         if not product_rows.empty and "주문금액" in product_rows.columns else 0.0
     )
     order_amount = send_amount if not send_rows.empty and "주문금액" in send_rows.columns else product_amount
+    # 주문수량도 주문금액과 동일하게 발송 RAW 우선, 없으면 상품 RAW로 집계합니다.
+    # '1회'는 고객당 수량이 아니라 해당 기간의 발송 1회당 평균입니다.
+    if not send_rows.empty and "주문수량" in send_rows.columns:
+        order_quantity = float(pd.to_numeric(send_rows["주문수량"], errors="coerce").fillna(0).sum())
+    elif not product_rows.empty and "주문수량" in product_rows.columns:
+        order_quantity = float(pd.to_numeric(product_rows["주문수량"], errors="coerce").fillna(0).sum())
+    else:
+        order_quantity = None
 
     # 월별 비교의 발송횟수는 날짜·시간대·유형(MMS/RCS)을 함께 보아 중복을 방지합니다.
     # MMS와 RCS가 같은 날짜·시간대에 존재해도 서로 다른 발송으로 집계합니다.
@@ -13042,6 +13050,8 @@ def _product_mix_period_metrics(
         "클릭수": clicks,
         "주문건수": order_count,
         "주문금액": order_amount,
+        "1회 주문금액": (order_amount / send_count) if send_count > 0 else pd.NA,
+        "1회 주문수량": (order_quantity / send_count) if send_count > 0 and order_quantity is not None else pd.NA,
         "CTR": (clicks / sent * 100) if sent > 0 else pd.NA,
         "CVR": (order_count / clicks * 100) if clicks > 0 else pd.NA,
         "SPM": (order_amount / sent) if sent > 0 else pd.NA,
@@ -13249,12 +13259,16 @@ def _product_mix_comparison_html(
             return f"{numeric:,.0f}회"
         if kind == "money":
             return f"{numeric:,.0f}원"
+        if kind == "quantity":
+            return f"{numeric:,.1f}개"
         return f"{numeric:,.0f}"
 
     if monthly_view:
         metric_rows = [
             ("발송횟수", "발송횟수", "count"),
             ("주문금액", "주문금액", "money"),
+            ("1회 주문금액", "1회 주문금액", "money"),
+            ("1회 주문수량", "1회 주문수량", "quantity"),
             ("발송건수", "발송건수", "send"),
             ("클릭수", "클릭수", "send"),
             ("CTR", "CTR", "ctr"),
@@ -13273,6 +13287,8 @@ def _product_mix_comparison_html(
         metric_rows = [
             ("발송횟수", "발송횟수", "count"),
             ("주문금액", "주문금액", "money"),
+            ("1회 주문금액", "1회 주문금액", "money"),
+            ("1회 주문수량", "1회 주문수량", "quantity"),
             ("발송건수", "발송건수", "send"),
             ("클릭수", "클릭수", "send"),
             ("CTR", "CTR", "ctr"),
