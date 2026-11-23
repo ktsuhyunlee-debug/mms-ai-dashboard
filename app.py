@@ -13191,7 +13191,7 @@ def _product_mix_comparison_html(
     send_type: str = "전체",
     monthly_view: bool = False,
 ) -> str:
-    """상품구성비교 표: 월별은 요청한 14개 지표, 주차별은 기존 구성 유지."""
+    """상품구성비교 표: 월별·주차별에 동일한 14개 성과·구성 지표를 표시합니다."""
     if summary is None or summary.empty or not column_keys:
         return '<div class="product-mix-empty">비교 데이터가 없습니다.</div>'
     lookup = summary.set_index("구간").to_dict("index")
@@ -13233,19 +13233,22 @@ def _product_mix_comparison_html(
             ("신규", "신규", "count_share"),
         ]
     else:
-        # 주차별 비교는 기존 구성 및 지표 순서를 유지합니다.
+        # 주차별 비교도 월별과 동일한 지표·순서·원 단위를 사용합니다.
         metric_rows = [
-            ("CTR", "CTR", "ctr"),
-            ("SPM", "SPM", "spm"),
-            ("발송건수", "발송건수", "send"),
+            ("발송횟수", "발송횟수", "count"),
             ("주문금액", "주문금액", "money"),
+            ("발송건수", "발송건수", "send"),
+            ("클릭수", "클릭수", "send"),
+            ("CTR", "CTR", "ctr"),
+            ("CVR", "CVR", "ctr"),
+            ("SPM", "SPM", "spm"),
+            ("객단가", "객단가", "money"),
+            ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
+            ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
+            ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
             ("재편성", "재편성", "count_share"),
             ("유사신규", "유사신규", "count_share"),
             ("신규", "신규", "count_share"),
-            ("300만원 이상 상품", "300만원 이상 상품", "count_share"),
-            ("100만원 미만 상품", "100만원 미만 상품", "count_share"),
-            ("최저가 미확보 상품", "최저가 미확보 상품", "count_share"),
-            ("TOP30 상품 포함", "TOP30 상품 포함", "count_share"),
         ]
 
     header_cells = []
@@ -13301,7 +13304,7 @@ def _product_mix_comparison_html(
         '.product-mix-empty{padding:13px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;color:#64748b}'
         '</style>'
         '<div class="product-mix-wrap"><table class="product-mix-table">'
-        f'<thead><tr><th class="metric-name">구분</th>{"".join(header_cells)}</tr></thead>'
+        f'<thead><tr><th class="metric-name">{"구분" if monthly_view else "주차"}</th>{"".join(header_cells)}</tr></thead>'
         f'<tbody>{"".join(body_rows)}</tbody></table></div>'
     )
 
