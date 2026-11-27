@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 운영 인사이트 v6.3 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 운영 인사이트 v7.0 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
-기존 Streamlit Secrets 유지:
-[google_oauth] client_id, client_secret, redirect_uri, state_signing_secret
+Streamlit Secrets:
+[service_account] json = '''서비스 계정 JSON 전체 내용'''
 [ga4] property_id = '544313553'
 
 중요: KT멤버십 속성의 쇼핑라운지 이벤트/화면 실적과 사용자 세그먼트
@@ -17,23 +17,21 @@ import hashlib
 import html
 import json
 import re
-import secrets
 from collections import OrderedDict
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from requests_oauthlib import OAuth2Session
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.auth.exceptions import GoogleAuthError
 
 st.set_page_config(page_title="쇼핑라운지 | GA4 인사이트", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 API = "https://analyticsdata.googleapis.com/v1beta"
 ALPHA = "https://analyticsdata.googleapis.com/v1alpha"
 SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
-AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN = "https://oauth2.googleapis.com/token"
 DEFAULT_PROPERTY = "544313553"
 LOUNGE_TITLE = "KT멤버십>쇼핑라운지"
 # GA4 탐색의 「총 구매 수익」과 같은 grossPurchaseRevenue를 우선 사용합니다.
@@ -73,65 +71,50 @@ section[data-testid="stSidebar"] .block-container{padding-top:1.8rem!important}
 @media(max-width:470px){.kpi-overview-row.row-five,.kpi-overview-row.row-four,.insight-row{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.kpi{min-height:142px;padding:11px}.kpi-value{font-size:1.05rem}.kpi-foot{font-size:.64rem}}
 </style>""", unsafe_allow_html=True)
 
-# ------------------------ OAuth: compatible with existing Secrets ------------------------
+# ------------------ Server-side service-account authentication ------------------
 def config():
+    """Read a server-side credential from Streamlit Secrets (never expose to clients)."""
     try:
-        o = st.secrets["google_oauth"]
-        g = st.secrets.get("ga4", {})
-        return {"client_id":str(o["client_id"]), "client_secret":str(o["client_secret"]),
-                "redirect_uri":str(o["redirect_uri"]), "state_signing_secret":str(o["state_signing_secret"]),
-                "property":str(g.get("property_id",DEFAULT_PROPERTY)),
-                "title":str(g.get("page_keyword",LOUNGE_TITLE))}
-    except (KeyError, FileNotFoundError):
+        block = st.secrets.get("service_account", {})
+        ga4 = st.secrets.get("ga4", {})
+        raw = block.get("json")
+        if isinstance(raw, str):
+            info = json.loads(raw.strip())
+        else:
+            # Also supports a TOML service-account table, without a JSON string.
+            info = dict(block)
+        if not isinstance(info, dict):
+            return None
+        if (info.get("type") != "service_account" or
+                not info.get("client_email") or
+                not info.get("private_key") or
+                not info.get("token_uri")):
+            return None
+        return {"property": str(ga4.get("property_id", DEFAULT_PROPERTY)),
+                "title": str(ga4.get("page_keyword", LOUNGE_TITLE)),
+                "service_account_info": info}
+    except (KeyError, FileNotFoundError, TypeError, ValueError):
         return None
 
 
-def state_signer(cfg):
-    return URLSafeTimedSerializer(cfg["state_signing_secret"], salt="ga4-oauth-state-v1")
+def active_token(cfg):
+    """Generate/refresh a Google API access token server-side, per Streamlit session.
 
-
-def login_url(cfg):
-    state = state_signer(cfg).dumps({"nonce":secrets.token_urlsafe(24)})
-    oauth = OAuth2Session(cfg["client_id"], scope=[SCOPE], redirect_uri=cfg["redirect_uri"], state=state)
-    url, _ = oauth.authorization_url(AUTH, access_type="online", prompt="select_account")
-    return url
-
-
-def logout():
-    for k in ["ga4_access_token","ga4_token_expires_at","ga4_expiry","ga4_v6_cache","ga4_report_cache","ga4_v63_admin_cache"]:
-        st.session_state.pop(k, None)
-
-
-def oauth_callback(cfg):
-    params=st.query_params
-    if "error" in params:
-        st.query_params.clear(); st.error("Google 인증이 취소됐어요."); return
-    code,state=params.get("code"),params.get("state")
-    if not code:
-        return
-    try:
-        if not state: raise BadSignature("state missing")
-        state_signer(cfg).loads(state,max_age=600)
-        oauth=OAuth2Session(cfg["client_id"],scope=[SCOPE],redirect_uri=cfg["redirect_uri"],state=state)
-        result=oauth.fetch_token(TOKEN,code=code,client_secret=cfg["client_secret"],include_client_id=True,timeout=25)
-        if not result.get("access_token"): raise ValueError("no token")
-        st.session_state["ga4_access_token"]=result["access_token"]
-        st.session_state["ga4_token_expires_at"]=dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=max(30,int(result.get("expires_in",3600))-60))
-        st.session_state.pop("ga4_v6_cache",None)
-        st.query_params.clear(); st.rerun()
-    except (BadSignature,SignatureExpired):
-        st.query_params.clear();st.error("인증 요청이 만료됐어요. 다시 로그인해 주세요.")
-    except Exception as exc:
-        st.query_params.clear();st.error(f"Google 인증 오류: {type(exc).__name__}")
-
-
-def active_token():
-    val=st.session_state.get("ga4_access_token")
-    until=st.session_state.get("ga4_token_expires_at") or st.session_state.get("ga4_expiry")
-    if not val or not until: return None
-    if dt.datetime.now(dt.timezone.utc)>=until:
-        logout();return None
-    return val
+    No OAuth redirect, user sign-in, or token exposed to the browser.
+    """
+    info = cfg["service_account_info"]
+    creds = st.session_state.get("ga4_service_credentials")
+    if (creds is None or
+            getattr(creds, "service_account_email", None) != info["client_email"]):
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=[SCOPE])
+        st.session_state["ga4_service_credentials"] = creds
+        # Old OAuth token/cache is not used by this release.
+        st.session_state.pop("ga4_access_token", None)
+        st.session_state.pop("ga4_token_expires_at", None)
+    if not creds.valid:
+        creds.refresh(GoogleAuthRequest())
+    return creds.token
 
 # ----------------------------- REST & metadata -----------------------------
 class GAError(Exception):
@@ -229,18 +212,80 @@ def field_health(meta):
     return {name:all(available_meta(meta,f) for f in fields) for name,fields in groups.items()}
 
 
+# Actual names must be advertised by this property's metadata. The aliases
+# only help identify supported fields; none is submitted to the API blindly.
+CUSTOMER_FIELD_ALIASES={
+    'gender': ['고객_성별','고객 성별','up_gender','up_sex','user_gender','user_sex',
+               'customer_gender','customer_sex','gender','sex','성별'],
+    'age': ['고객_연령대','고객 연령대','up_age','user_age','user_age_group',
+            'customer_age','age_group','age','연령대','연령'],
+    'grade': ['고객_등급','고객 등급','up_grade','up_membership_grade',
+              'user_grade','membership_grade','membership_tier','member_grade',
+              'membership_level','grade','tier','등급'],
+    'login': ['고객_고객 로그인 유형','고객_로그인 유형','로그인 유형',
+              'up_login_type','user_login_type','up_login','user_login',
+              'login_type','login_method','auth_type','login','로그인'],
+}
+
+
+def customer_role_tags(meta, api_name):
+    """Classify obvious names, to prevent age values being shown as gender."""
+    item=next((d for d in custom_dimensions(meta)
+               if d.get('apiName')==api_name), {})
+    suffix=str(api_name).partition(':')[2]
+    names=(suffix, str(item.get('uiName','')))
+    joined=' '.join(names).casefold()
+    parts=set(re.split(r'[^a-z0-9가-힣]+',joined))
+    compact=canonical(suffix)
+    tags=set()
+    if ('연령' in joined or '나이' in joined or
+        parts.intersection({'age','ages','agegroup','agebracket'}) or
+        compact in {'upage','userage','customerage','custage','memberage'}):
+        tags.add('age')
+    if ('성별' in joined or parts.intersection({'gender','sex','gendergroup'}) or
+        compact in {'upgender','upsex','usergender','usersex',
+                    'customergender','customersex','custgender','custsex'}):
+        tags.add('gender')
+    if ('등급' in joined or parts.intersection({'grade','tier','membershiptier',
+                                            'membershipgrade','membershiplevel'}) or
+        compact in {'upgrade','upmembershipgrade','usergrade','membergrade'}):
+        tags.add('grade')
+    if ('로그인' in joined or parts.intersection({'login','logintype','loginmethod',
+                                              'authtype','authmethod','signin'}) or
+        compact in {'uplogin','uplogintype','userlogintype','userlogin'}):
+        tags.add('login')
+    return tags
+
+
+def customer_field(meta, role):
+    """Select a user-scoped custom field only if its identity matches the role."""
+    choices=[d for d in custom_dimensions(meta)
+             if str(d.get('apiName','')).startswith('customUser:')]
+    for alias in CUSTOMER_FIELD_ALIASES[role]:
+        normalized=canonical(alias)
+        for item in choices:
+            api_name=str(item.get('apiName',''))
+            aliases=(item.get('uiName',''),api_name.partition(':')[2],api_name)
+            if (any(canonical(label)==normalized for label in aliases) and
+                customer_role_tags(meta,api_name).issubset({role})):
+                return api_name
+    # A custom label can have an unfamiliar prefix; still do not confuse roles.
+    recognized=[d['apiName'] for d in choices
+                if customer_role_tags(meta,d['apiName'])=={role}]
+    return recognized[0] if len(recognized)==1 else None
+
+
 def info_fields(meta):
-    d={"page1": ["페이지_1Depth","페이지 1Depth","페이지 1뎁스"],
-       "gender":["고객_성별","고객 성별"],"age":["고객_연령대","고객 연령대"],
-       "grade":["고객_등급","고객 등급"],"login":["고객_고객 로그인 유형","고객_로그인 유형","로그인 유형"],
-       "coupon":["주문 쿠폰","주문_쿠폰","order_coupon"],
-       "evt_page":["이벤트_페이지","이벤트 페이지"],
-       "evt_area":["이벤트_영역","이벤트 영역"],
-       "evt_label":["이벤트_라벨","이벤트 라벨"]}
-    return {key:custom_field(meta, names, preferred_scope=(
-              "customUser" if key in ("gender","age","grade","login") else
-              "customEvent" if key in ("page1","evt_page","evt_area","evt_label","coupon") else None
-              )) for key,names in d.items()}
+    d={'page1': ['페이지_1Depth','페이지 1Depth','페이지 1뎁스'],
+       'coupon': ['주문 쿠폰','주문_쿠폰','order_coupon'],
+       'evt_page': ['이벤트_페이지','이벤트 페이지'],
+       'evt_area': ['이벤트_영역','이벤트 영역'],
+       'evt_label': ['이벤트_라벨','이벤트 라벨']}
+    fields={key:custom_field(meta,names,preferred_scope='customEvent')
+            for key,names in d.items()}
+    for role in ('gender','age','grade','login'):
+        fields[role]=customer_field(meta,role)
+    return fields
 
 
 def admin_custom_dimensions(cfg, token):
@@ -303,36 +348,84 @@ def available_custom_labels(meta):
 
 
 def customer_field_mapping_ui(meta,fields):
-    """Never silently swap customer fields for unrelated standard dimensions."""
-    custom_labels=available_custom_labels(meta)
+    """Do not allow a gender/age/grade/login cross-map, including stale picks."""
+    labels=available_custom_labels(meta)
     customer_keys=[('gender','성별'),('age','연령'),('grade','멤버십 등급'),
                    ('login','로그인 유형')]
+    detected=[]
+    for key,title in customer_keys:
+        session_key='v63_map_'+key
+        current=st.session_state.get(session_key,'')
+        roles=customer_role_tags(meta,current) if current in labels else set()
+        if current and (current not in labels or (roles and key not in roles)):
+            # This is run *before* the widget is instantiated, so Streamlit
+            # allows the stale selection to be cleared safely.
+            st.session_state[session_key]=''
+            detected.append(f'{title} → {current}')
+            current=''
+        if fields.get(key):
+            tags=customer_role_tags(meta,fields[key])
+            if tags and key not in tags:
+                detected.append(f'{title} → {fields[key]}')
+                fields[key]=None
+
     missing=[(key,title) for key,title in customer_keys if not fields.get(key)]
-    if not missing and not any(st.session_state.get('v63_map_'+key)
-                               for key,_ in customer_keys):
+    has_picks=any(st.session_state.get('v63_map_'+key) for key,_ in customer_keys)
+    if not missing and not has_picks and not detected:
         return
-    with st.expander('🔎 고객 특성 필드 연결 · 미발견 항목 확인',expanded=bool(missing)):
-        st.caption('해당 GA4 속성에서 실제로 제공하는 맞춤 필드만 선택할 수 있습니다. '
-                   '탐색 보고서의 이름과 API 이름이 다를 때 직접 연결할 수 있어요. '
-                   '일반 Google 인구통계 성별·연령으로 자동 대체하지 않습니다.')
-        options=['']+sorted(custom_labels, key=lambda v:custom_labels[v].casefold())
+    with st.expander('🔎 고객 특성 필드 연결 · 측정기준 확인',expanded=bool(missing or detected)):
+        if detected:
+            st.warning('잘못된 고객 정보 연결을 자동 해제했습니다: '+', '.join(detected)
+                       +'. 성별에는 연령 필드를 사용할 수 없습니다.')
+        st.caption('각 항목에 맞는 사용자 범위 맞춤 측정기준만 연결합니다. '
+                   '일반 Google 인구통계 값으로 자동 대체하지 않습니다.')
+        show_other=st.checkbox('이름이 불분명한 맞춤 필드도 표시',value=False,
+                               key='v64_show_ambiguous_user_fields',
+                               help='연령·성별처럼 다른 항목임이 분명한 필드는 계속 제외합니다.')
         left,right=st.columns(2)
         for index,(key,title) in enumerate(customer_keys):
             with (left if index%2==0 else right):
+                allowed=[]
+                for api_name in labels:
+                    if not api_name.startswith('customUser:'):
+                        continue
+                    tags=customer_role_tags(meta,api_name)
+                    if tags=={key} or (show_other and not tags):
+                        allowed.append(api_name)
+                allowed=sorted(allowed,key=lambda v:labels[v].casefold())
+                options=['']+allowed
                 current=st.session_state.get('v63_map_'+key,'')
-                if current not in options:current=''
+                if current not in options:
+                    st.session_state['v63_map_'+key]=''
+                    current=''
                 selected=st.selectbox(
-                    title,options,index=options.index(current),
-                    format_func=lambda x: '자동 검색 사용' if not x else custom_labels[x],
-                    key='v63_map_'+key,help='이 GA4 속성의 메타데이터에 존재하는 항목만 선택')
+                    title, options,index=options.index(current),
+                    format_func=lambda x:'자동 검색 사용' if not x else labels[x],
+                    key='v63_map_'+key,
+                    help='성별에는 성별 필드, 연령에는 연령 필드만 선택할 수 있습니다.')
                 if selected:
-                    fields[key]=selected
+                    tags=customer_role_tags(meta,selected)
+                    if tags and key not in tags:
+                        st.error('다른 항목의 측정기준입니다. 연결하지 않았어요.')
+                        fields[key]=None
+                    else:
+                        fields[key]=selected
                 elif fields.get(key):
-                    st.caption('현재 자동 연결: '+str(fields[key]))
+                    st.caption('자동 연결: '+str(fields[key]))
+                elif not allowed:
+                    st.caption('맞는 사용자 필드 후보 없음 · 아래 데이터 진단의 전체 목록을 확인해 주세요.')
                 else:
-                    st.caption('현재 연결 없음 · 아래 진단에서 등록 목록을 확인해 주세요.')
-        st.caption('선택한 매핑은 현재 브라우저 세션에 유지됩니다. '
-                   '확인된 API 이름으로 자동 검색 규칙을 추후 고정할 수 있습니다.')
+                    st.caption('자동 연결 없음 · 위 후보에서 맞는 필드를 선택해 주세요.')
+        assigned=[(k,fields.get(k)) for k,_ in customer_keys if fields.get(k)]
+        duplicates={v for _,v in assigned if sum(a==v for _,a in assigned)>1}
+        if duplicates:
+            for key,title in customer_keys:
+                if fields.get(key) in duplicates:
+                    fields[key]=None
+            st.error('하나의 GA4 측정기준을 여러 고객 항목에 중복 연결할 수 없습니다. '
+                     '각 항목의 실제 필드를 다시 선택해 주세요.')
+        st.caption('필드 매핑은 현재 브라우저 세션에만 유지됩니다. '
+                   '해당 항목을 발견하지 못한 경우 다른 값으로 대체하지 않습니다.')
 
 
 def f_eq(field,value):
@@ -1053,6 +1146,24 @@ def customers(cfg,token,start,end,fields,meta=None):
     df[dim]=df[dim].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)',
                               '(not set)':'미설정','(other)':'기타','unknown':'알 수 없음'})
     df=df.rename(columns={dim:title,'activeUsers':'이용 고객 수'})
+    # Guard against semantically incorrect manual mappings; for example
+    # gender=customUser:up_age returns age bands of 10, 20, 30 ...
+    populated=df[title].astype(str).str.strip()
+    populated=populated[~populated.isin(['','미설정','기타','알 수 없음'])]
+    if selected=='성별' and not populated.empty:
+        age_values=populated.str.fullmatch(r'(?:[0-9]{1,3})(?:대|세)?')
+        if age_values.fillna(False).mean()>=0.5:
+            st.error('성별 분류에 연령 숫자가 포함되어 조회 결과를 숨겼습니다. '
+                     '성별 측정기준을 다시 선택해 주세요.')
+            st.caption(f'현재 연결된 필드: {dim}')
+            return
+    if selected=='연령' and not populated.empty:
+        gender_values=populated.str.casefold().isin(['남','여','남성','여성','male','female','m','f'])
+        if gender_values.mean()>=0.5:
+            st.error('연령 분류에 성별 값이 포함되어 조회 결과를 숨겼습니다. '
+                     '연령 측정기준을 다시 선택해 주세요.')
+            st.caption(f'현재 연결된 필드: {dim}')
+            return
     if not bool((df['이용 고객 수']>0).any()):
         st.info('이 범위의 활성 사용자 수가 모두 0입니다.');return
     valid=df[title].astype(str).str.strip().isin(['','미설정','기타','알 수 없음'])
@@ -1420,6 +1531,18 @@ def diagnostic(cfg,token,meta,fields,start,end):
                            for k,v in labels.items()])
         st.dataframe(stat,hide_index=True,use_container_width=True,height=320)
         st.caption("메타데이터에 필드가 있어도 데이터가 있는지는 별도 보고서 조회와 집계 조건 검증이 필요해요.")
+        st.markdown('**고객 항목별 API 필드 후보**')
+        rows=[]
+        for key,name in [('gender','성별'),('age','연령'),('grade','멤버십 등급'),
+                         ('login','로그인 유형')]:
+            candidates=[d for d in custom_dimensions(meta)
+                        if str(d.get('apiName','')).startswith('customUser:')
+                        and customer_role_tags(meta,d.get('apiName',''))=={key}]
+            rows.append({'항목':name,
+                         '자동 연결된 필드':fields.get(key) or '없음',
+                         '후보 목록':', '.join(d.get('apiName','') for d in candidates)
+                                        or '이름으로 특정할 수 없음'})
+        st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
         st.markdown('**① Data API에서 실제 조회 가능한 맞춤 측정기준**')
         all_custom=pd.DataFrame([
             {'표시 이름':d.get('uiName',''), 'API 이름':d.get('apiName',''),
@@ -1523,19 +1646,16 @@ def choose_dates():
 
 
 def main():
-    cfg=config()
+    cfg = config()
     if cfg is None:
-        st.error("Streamlit Secrets의 [google_oauth] 와 [ga4] 설정을 확인해 주세요.")
-        st.code('[google_oauth]\nclient_id="..."\nclient_secret="..."\nredirect_uri="https://shoppinglounge-ga4.streamlit.app/"\nstate_signing_secret="..."\n\n[ga4]\nproperty_id="544313553"',language="toml")
+        st.error("서비스 계정 설정을 확인해 주세요. Streamlit Secrets의 [service_account] json에 완전한 JSON 키가 필요합니다.")
+        st.caption("서비스 계정 JSON은 Streamlit Secrets에만 저장하고 GitHub나 채팅에 올리지 마세요. ")
         st.stop()
-    if not cfg["redirect_uri"].startswith(("https://","http://localhost","http://127.0.0.1")):
-        st.error("Google OAuth redirect_uri는 HTTPS 또는 localhost여야 합니다.");st.stop()
-    oauth_callback(cfg)
-    token=active_token()
-    if not token:
-        st.markdown('<div class="header-title">📊 쇼핑라운지 GA4 인사이트</div>',unsafe_allow_html=True)
-        st.caption("Google Analytics Data API · 읽기 전용")
-        st.link_button("Google 계정 연결",login_url(cfg),type="primary")
+    try:
+        token = active_token(cfg)
+    except (GoogleAuthError, ValueError, TypeError, KeyError, requests.RequestException) as exc:
+        st.error("GA4 서비스 계정 인증 실패: 서비스 계정 키 유효성 및 Google Cloud API 설정을 확인해 주세요.")
+        st.caption(f"오류 유형: {type(exc).__name__} (비공개 키는 표시하지 않음)")
         st.stop()
     with st.sidebar:
         st.markdown("### 📊 쇼핑라운지 운영 분석")
@@ -1546,9 +1666,7 @@ def main():
     with st.sidebar:
         if st.button("↻ 데이터 다시 조회",use_container_width=True):
             st.session_state.pop("ga4_v6_cache",None);st.session_state.pop("ga4_v63_admin_cache",None);st.rerun()
-        if st.button("로그아웃",use_container_width=True):
-            logout();st.rerun()
-        st.caption(f"GA4 속성 {cfg['property']} · 읽기 전용")
+        st.caption(f"GA4 속성 {cfg['property']} · 서비스 계정 자동 조회 · 로그인 불필요")
     st.markdown('<div class="header-title">쇼핑라운지 운영 인사이트</div>',unsafe_allow_html=True)
     scope = ("상품 수익은 KT멤버십 전체 속성 기준" if selected == MENUS[5]
              else "쇼핑라운지 관련 이벤트 · 메뉴별 집계 기준 적용")
