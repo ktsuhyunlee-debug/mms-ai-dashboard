@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""쇼핑라운지 GA4 운영 인사이트 v7.0 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
+"""쇼핑라운지 GA4 운영 인사이트 v8.0 · 상품/기획전/시간대 집중 분석 — 실제 수집값 검증 기반, 7메뉴 compact dashboard.
 
 Streamlit Secrets:
 [service_account] json = '''서비스 계정 JSON 전체 내용'''
@@ -37,8 +37,8 @@ LOUNGE_TITLE = "KT멤버십>쇼핑라운지"
 # GA4 탐색의 「총 구매 수익」과 같은 grossPurchaseRevenue를 우선 사용합니다.
 GROSS_REVENUE = "grossPurchaseRevenue"
 PURCHASE_TITLE = "KT멤버십>쇼핑라운지>주문>주문완료"
-MENUS = ["01 · 종합 현황", "02 · 이용 고객", "03 · 유입·앱 클릭", "04 · 페이지", "05 · 기획전", "06 · 상품·브랜드", "07 · 쿠폰·구매 행동"]
-NAV_HELP = ["9개 KPI · 주요 변화 · 인기 TOP", "성별·연령·기기·등급·로그인", "유입 채널 · KT앱 영역별·배너별 클릭 순위", "자주 보는 화면 · 유형 · 상세", "인기 기획전 · 조회/이용자 순위", "상품명·브랜드 · 구매 효율 참고", "쿠폰 사용 거래 · 수익 · 퍼널"]
+MENUS = ["01 · 종합 현황", "02 · 이용 고객", "03 · 유입·시간대", "04 · 페이지", "05 · 기획전", "06 · 상품·브랜드", "07 · 쿠폰·구매 행동"]
+NAV_HELP = ["9개 KPI · 주요 변화 · 인기 TOP", "성별·연령·기기·등급·로그인", "시간대별 방문·구매 · KT멤버십 쇼핑 관련 클릭", "자주 보는 화면 · 유형 · 상세", "기획전별 방문·고객 특성·구매 태깅 확인", "상품별 방문·구매 고객 성별/연령 비교", "쿠폰 사용 거래 · 수익 · 퍼널"]
 BLUE, TEAL, ORANGE, LIGHT = "#4765D2", "#169C99", "#F6A34F", "#ECF1FB"
 
 st.markdown("""<style>
@@ -258,21 +258,28 @@ def customer_role_tags(meta, api_name):
 
 
 def customer_field(meta, role):
-    """Select a user-scoped custom field only if its identity matches the role."""
-    choices=[d for d in custom_dimensions(meta)
-             if str(d.get('apiName','')).startswith('customUser:')]
-    for alias in CUSTOMER_FIELD_ALIASES[role]:
-        normalized=canonical(alias)
-        for item in choices:
-            api_name=str(item.get('apiName',''))
-            aliases=(item.get('uiName',''),api_name.partition(':')[2],api_name)
-            if (any(canonical(label)==normalized for label in aliases) and
-                customer_role_tags(meta,api_name).issubset({role})):
-                return api_name
-    # A custom label can have an unfamiliar prefix; still do not confuse roles.
-    recognized=[d['apiName'] for d in choices
-                if customer_role_tags(meta,d['apiName'])=={role}]
-    return recognized[0] if len(recognized)==1 else None
+    """Resolve advertised membership labels; never map age to gender.
+
+    Custom event dimensions are permitted when correctly labeled, but unlike
+    customUser dimensions they may only be present on certain events.
+    """
+    all_choices=[d for d in custom_dimensions(meta)
+                 if str(d.get('apiName','')).startswith(('customUser:','customEvent:'))]
+    matches=[]
+    for item in all_choices:
+        name=str(item.get('apiName',''))
+        tags=customer_role_tags(meta,name)
+        if tags != {role}:
+            continue
+        names=[item.get('uiName',''),name.partition(':')[2],name]
+        if any(canonical(alias)==canonical(label)
+               for alias in CUSTOMER_FIELD_ALIASES[role] for label in names):
+            matches.append(name)
+    if not matches:
+        # Do not guess from an unrelated field with a similar substring.
+        return None
+    matches.sort(key=lambda x:(0 if x.startswith('customUser:') else 1,x))
+    return matches[0]
 
 
 def info_fields(meta):
@@ -377,7 +384,7 @@ def customer_field_mapping_ui(meta,fields):
         if detected:
             st.warning('잘못된 고객 정보 연결을 자동 해제했습니다: '+', '.join(detected)
                        +'. 성별에는 연령 필드를 사용할 수 없습니다.')
-        st.caption('각 항목에 맞는 사용자 범위 맞춤 측정기준만 연결합니다. '
+        st.caption('각 항목에 맞는 사용자/이벤트 범위 맞춤 측정기준만 연결합니다. '
                    '일반 Google 인구통계 값으로 자동 대체하지 않습니다.')
         show_other=st.checkbox('이름이 불분명한 맞춤 필드도 표시',value=False,
                                key='v64_show_ambiguous_user_fields',
@@ -387,7 +394,7 @@ def customer_field_mapping_ui(meta,fields):
             with (left if index%2==0 else right):
                 allowed=[]
                 for api_name in labels:
-                    if not api_name.startswith('customUser:'):
+                    if not api_name.startswith(('customUser:','customEvent:')):
                         continue
                     tags=customer_role_tags(meta,api_name)
                     if tags=={key} or (show_other and not tags):
@@ -424,7 +431,7 @@ def customer_field_mapping_ui(meta,fields):
                     fields[key]=None
             st.error('하나의 GA4 측정기준을 여러 고객 항목에 중복 연결할 수 없습니다. '
                      '각 항목의 실제 필드를 다시 선택해 주세요.')
-        st.caption('필드 매핑은 현재 브라우저 세션에만 유지됩니다. '
+        st.caption('이벤트 범위(customEvent) 필드는 해당 이벤트에 값이 기록되어야 집계됩니다. '
                    '해당 항목을 발견하지 못한 경우 다른 값으로 대체하지 않습니다.')
 
 
@@ -445,10 +452,10 @@ def f_and(*args):
 def f_not(x):return {"notExpression":x}
 
 
-def report(cfg,token,start,end,dimensions,metrics,filters=None,limit=250,sort=None):
+def report(cfg,token,start,end,dimensions,metrics,filters=None,limit=250,sort=None,offset=0):
     req={"dateRanges":[{"startDate":str(start),"endDate":str(end)}],
          "dimensions":[{"name":d} for d in dimensions], "metrics":[{"name":m} for m in metrics],
-         "limit":str(limit),"keepEmptyRows":False}
+         "limit":str(limit),"offset":str(offset),"keepEmptyRows":False}
     if filters:req["dimensionFilter"]=filters
     if sort: req["orderBys"]=[{"metric":{"metricName":sort},"desc":True}]
     return api(cfg,token,":runReport",req)
@@ -889,7 +896,7 @@ def top_cards(cfg,token,start,end,fields):
     return [(h,x[0] if x else '표시할 데이터 없음',x[1] if x else scope) for h,x,scope in cards]
 
 
-def overview(cfg,token,start,end,fields):
+def overview(cfg,token,start,end,fields,meta=None):
     heading('핵심 운영 지표','활성 고객 · 구매 · 페이지 이용을 한눈에 확인합니다. 전체 KPI 9개는 그대로 유지해요.')
     current=lounge_summary(cfg,token,start,end)
     sales=purchase_summary(cfg,token,start,end)
@@ -955,6 +962,31 @@ def overview(cfg,token,start,end,fields):
     heading('가장 많이 본 기획전 · 사용한 쿠폰 · 구매한 상품')
     insights(top_cards(cfg,token,start,end,fields))
     st.caption('상품은 쇼핑라운지 상품 상세 화면 ID와 일치하는 상품의 **KT멤버십 전체 속성** 구매 수량입니다. 쇼핑라운지 단독 매출로 해석하지 마세요.')
+    with st.expander('고객 특성 요약 · 성별/연령 출처별 비교',expanded=False):
+        st.caption('쇼핑라운지 화면의 screen_view 기준. 회원정보와 Google 추정 인구통계의 수치가 다를 수 있습니다.')
+        if meta is not None:
+            entries=list(demographic_source_fields(meta,fields))
+            cols=st.columns(2)
+            for i,kind in enumerate(['성별','연령']):
+                with cols[i]:
+                    st.markdown('**'+kind+'**')
+                    for source,part,dim in entries:
+                        if part!=kind:continue
+                        d,r=safe_query(cfg,token,start,end,[dim],['activeUsers'],
+                                       f_and(shop_filter(),f_eq('eventName','screen_view')),
+                                       limit=100,show_error=False)
+                        if d is None or d.empty:
+                            st.caption(source+': 집계 불가');continue
+                        d=d.rename(columns={dim:kind,'activeUsers':'활성 사용자 수'})
+                        d=privacy_aggregate(d,'활성 사용자 수')
+                        eligible=d.dropna(subset=['활성 사용자 수'])
+                        st.caption(source)
+                        if not eligible.empty:
+                            st.dataframe(eligible.sort_values('활성 사용자 수',ascending=False).head(8),
+                                         hide_index=True,use_container_width=True)
+                        else:st.caption('표시 가능한 고객 집단 없음')
+        else:st.caption('고객 특성 메타데이터를 확인할 수 없습니다.')
+
     heading('일별 추이와 시간대 패턴')
     mode=st.radio('추이 종류',['날짜별 추이','요일 × 시간대'],horizontal=True,label_visibility='collapsed',key='overview_graph_mode')
     if mode=='요일 × 시간대':
@@ -1068,116 +1100,146 @@ def screen_activity_breakdown(cfg, token, start, end, dim, fields):
     return df,raw,description
 
 
-def customers(cfg,token,start,end,fields,meta=None):
-    heading('어떤 고객이 많이 이용할까요?',
-            'GA4 탐색에서 확인한 KT멤버십 맞춤 고객 정보와 쇼핑라운지 방문 조건을 기준으로 분석합니다.')
-    if meta is not None:customer_field_mapping_ui(meta,fields)
-    selected=st.radio('고객 구분',['기기','성별','연령','멤버십 등급','로그인 유형','기기별 구매'],
-                      horizontal=True,key='v6_customer_select',label_visibility='collapsed')
-    dims={'기기':('operatingSystem','운영체제'),
-          '성별':(fields.get('gender'),'성별'),
-          '연령':(fields.get('age'),'연령대'),
-          '멤버십 등급':(fields.get('grade'),'등급'),
-          '로그인 유형':(fields.get('login'),'로그인 방식')}
+def privacy_aggregate(df, metric, minimum=10):
+    """Suppress small demographic cohorts in public dashboard and exports.
 
-    if selected=='기기별 구매':
-        st.caption('**구매 분석 기준:** 쇼핑라운지 주문완료 화면에서 기록된 purchase 이벤트의 운영체제별 실적입니다. '
-                   '위 이용 고객 분포와 분석 단위가 다릅니다.')
-        d,r=safe_query(cfg,token,start,end,['operatingSystem'],['transactions',GROSS_REVENUE],
-                       order_filter(),limit=100,sort=GROSS_REVENUE)
-        if d is None:
-            st.info('기기별 구매 자료를 읽지 못했어요. 하단 데이터 진단에서 API 응답을 확인해 주세요.')
-            return
-        if d.empty:
-            st.info('선택 기간에 주문완료 화면 기준 구매 이벤트가 없습니다.'); return
-        d['operatingSystem']=d['operatingSystem'].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)',
-                                                            '(not set)':'미설정'})
-        a,b=st.columns([.85,1.35],gap='large')
-        with a:bar(d,'operatingSystem','transactions',h=290,n=10)
-        with b:table(d.rename(columns={'operatingSystem':'운영체제','transactions':'구매 거래 수',
-                                        GROSS_REVENUE:'구매 수익'}),f'ga4_기기별구매_{start}_{end}',height=285)
-        st.caption('기기별 구매 수익은 주문완료 화면 조건의 구매 수익입니다. 특정 기기의 고객 수와 나누어 전환율을 만들지 않습니다.')
-        quality(r)
-        return
-
-    dim,title=dims[selected]
-    if not dim:
-        st.warning(f'**{selected}**의 GA4 맞춤 측정기준을 찾지 못했습니다. '
-                   '하단 데이터 진단에서 API 필드를 확인해 주세요.')
-        return
-
-    scope=st.radio('집계 범위',
-        ['쇼핑라운지 방문 고객','쇼핑라운지 화면 이용','KT멤버십 전체 고객'],
-        horizontal=True,key='v62_customer_scope',
-        help=('방문 고객: GA4 사용자 세그먼트에 가까운 조회 방식(퍼널 API). '
-              '화면 이용: 쇼핑라운지 screen_view 이벤트만 필터. '
-              '전체 고객: KT멤버십 GA4 속성 전체.'))
-    raw=None
-    if scope=='쇼핑라운지 방문 고객':
-        df,raw,reason=visitor_breakdown(cfg,token,start,end,dim,fields)
-        if reason:
-            st.warning('쇼핑라운지 방문 고객 세그먼트 조회가 완료되지 않았어요. '
-                       '다른 범위의 값을 같은 데이터인 것처럼 자동 대체하지 않았습니다.')
-            with st.expander('조회 오류 및 확인 사항', expanded=False):
-                st.code(str(reason),language='text')
-                st.caption(f'측정기준: {dim} | 방문 조건: {fields.get("page1") or "필드 없음"} '
-                           f'| 기간: {start}~{end}')
-            st.info('아래 **집계 범위**에서 쇼핑라운지 화면 이용을 선택하면 '
-                    '이벤트 기준으로 조회한 고객 분포를 별도로 볼 수 있습니다.')
-            return
-        st.caption('**GA4 사용자 세그먼트 기준:** 선택 기간에 `screen_view`와 '
-                   '`페이지_1Depth = KT멤버십>쇼핑라운지` 조건을 충족한 고객. '
-                   '조회에는 GA4 퍼널 API를 사용하며, 탐색과 수치가 정확히 일치하는지는 비교가 필요합니다.')
-    elif scope=='쇼핑라운지 화면 이용':
-        try:
-            df,raw,desc=screen_activity_breakdown(cfg,token,start,end,dim,fields)
-        except GAError as exc:
-            st.warning(f'쇼핑라운지 화면 이용 데이터 조회 실패: {exc}');return
-        st.caption('**'+desc+'** · 전체 기간 중 쇼핑라운지 화면에서 관측된 사용자만 집계합니다.')
-    else:
-        df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers'],limit=200,sort='activeUsers')
-        st.warning('이 데이터는 **KT멤버십 전체 GA4 속성** 기준입니다. '
-                   '쇼핑라운지 방문 고객 수가 아닙니다.')
-
-    if df is None or df.empty:
-        st.info('선택 기간에 집계 가능한 값이 없습니다. 기간과 아래의 데이터 진단을 확인해 주세요.')
-        return
+    Do not leak raw cohort counts through the chart, dataframe or XLSX.
+    """
     df=df.copy()
-    df[dim]=df[dim].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)',
-                              '(not set)':'미설정','(other)':'기타','unknown':'알 수 없음'})
-    df=df.rename(columns={dim:title,'activeUsers':'이용 고객 수'})
-    # Guard against semantically incorrect manual mappings; for example
-    # gender=customUser:up_age returns age bands of 10, 20, 30 ...
-    populated=df[title].astype(str).str.strip()
-    populated=populated[~populated.isin(['','미설정','기타','알 수 없음'])]
-    if selected=='성별' and not populated.empty:
-        age_values=populated.str.fullmatch(r'(?:[0-9]{1,3})(?:대|세)?')
-        if age_values.fillna(False).mean()>=0.5:
-            st.error('성별 분류에 연령 숫자가 포함되어 조회 결과를 숨겼습니다. '
-                     '성별 측정기준을 다시 선택해 주세요.')
-            st.caption(f'현재 연결된 필드: {dim}')
-            return
-    if selected=='연령' and not populated.empty:
-        gender_values=populated.str.casefold().isin(['남','여','남성','여성','male','female','m','f'])
-        if gender_values.mean()>=0.5:
-            st.error('연령 분류에 성별 값이 포함되어 조회 결과를 숨겼습니다. '
-                     '연령 측정기준을 다시 선택해 주세요.')
-            st.caption(f'현재 연결된 필드: {dim}')
-            return
-    if not bool((df['이용 고객 수']>0).any()):
-        st.info('이 범위의 활성 사용자 수가 모두 0입니다.');return
-    valid=df[title].astype(str).str.strip().isin(['','미설정','기타','알 수 없음'])
-    if bool(valid.all()):
-        st.warning('이 조건에서 고객 특성값이 대부분 미설정으로 수집되었습니다. '
-                   '다른 조회 범위의 수치를 자동으로 섞지 않습니다.')
-    a,b=st.columns([1,1.2],gap='large')
-    with a:bar(df,title,'이용 고객 수',h=340,n=15)
-    with b:table(df,f'ga4_고객_{selected}_{scope}_{start}_{end}',height=320)
-    if selected=='성별':st.caption('성별 × 연령 교차표는 요청에 따라 제외했습니다.')
-    if selected in ('성별','연령','멤버십 등급','로그인 유형'):
-        st.caption(f'분류에 사용한 맞춤 측정기준: **{dim}**')
-    st.caption('이용 고객 수는 분류별 중복 집계가 가능하며, 기간·사용자 식별 방식·'
-               'GA4 보고서 유형에 따라 탐색 화면과 차이가 날 수 있습니다.')
+    if metric in df.columns:
+        df[metric]=pd.to_numeric(df[metric],errors='coerce')
+        df.loc[df[metric]<minimum,metric]=float('nan')
+    return df
+
+
+def demographic_source_fields(meta,fields):
+    choices=[('KT멤버십 회원 정보','성별','gender'),
+             ('KT멤버십 회원 정보','연령','age')]
+    for scope,kind,key in choices:
+        api=fields.get(key)
+        if api and available_meta(meta,api):
+            yield (scope,kind,api)
+    for kind,field in [('성별','userGender'),('연령','userAgeBracket')]:
+        if available_meta(meta,field):yield ('GA4 추정 인구통계',kind,field)
+
+
+def demographic_breakdown(cfg,token,start,end,meta,fields,filter_,label):
+    """Query visit/purchase cohorts directly; never swap to entire property silently."""
+    options=list(demographic_source_fields(meta,fields))
+    if not options:
+        st.warning('성별/연령 필드를 GA4에서 확인하지 못했어요.');return
+    options_by_source=list(dict.fromkeys(x[0] for x in options))
+    cols=st.columns([1,1])
+    with cols[0]:
+        source=st.selectbox('고객 정보 출처',options_by_source,key=f'v8_demo_src_{label}')
+    with cols[1]:
+        kind=st.selectbox('고객 특성',['성별','연령'],key=f'v8_demo_kind_{label}')
+    dim=next((x[2] for x in options if x[0]==source and x[1]==kind),None)
+    if not dim:
+        st.info('이 출처의 측정기준이 GA4에 등록되어 있지 않아요.');return
+    df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers'],filter_,limit=200,sort='activeUsers')
+    if df is None or df.empty:
+        st.info('이 조합에서는 고객 특성값을 조회할 수 없어요. 상품/이벤트와 측정기준의 호환 여부를 확인해 주세요.');return
+    df=df.rename(columns={dim:kind,'activeUsers':'활성 사용자 수'})
+    vals=df[kind].astype(str).str.strip().str.casefold()
+    known=vals[~vals.isin(['','(not set)','unknown','(other)'])]
+    if kind=='성별' and not known.empty and known.str.fullmatch(r'\d{1,3}(?:대|세)?').mean()>.5:
+        st.error('연령 값이 성별로 매핑되는 오류를 감지하여 표시하지 않습니다.');return
+    if kind=='연령' and not known.empty and known.isin(['male','female','남성','여성','남','여']).mean()>.5:
+        st.error('성별 값이 연령으로 매핑되는 오류를 감지하여 표시하지 않습니다.');return
+    df=privacy_aggregate(df,'활성 사용자 수')
+    shown=df.dropna(subset=['활성 사용자 수']).copy()
+    a,b=st.columns([.85,1.3],gap='large')
+    with a:
+        if not shown.empty:bar(shown,kind,'활성 사용자 수',h=270,n=15)
+        else:st.info('개인정보 보호 기준으로 표시 가능한 집단이 없어요.')
+    with b:table(df,f'ga4_{label}_{source}_{kind}_{start}_{end}',height=275)
+    st.caption(f'{source} · 측정기준 {dim} · 10명 미만 비공개. GA4에서 인구통계가 제한될 수 있습니다.')
+    quality(raw)
+
+
+def scoped_time_chart(cfg,token,start,end,filter_,metrics,key,description):
+    df,raw=safe_query(cfg,token,start,end,['hour'],metrics,filter_,limit=24,show_error=False)
+    if df is None:
+        st.warning('시간대 조회가 지원되지 않거나 GA4 측정항목 조합이 호환되지 않습니다.');return
+    time=pd.DataFrame({'hour':[f'{i:02d}' for i in range(24)]})
+    if df.empty:
+        for m in metrics:time[m]=0
+    else:
+        df['hour']=df['hour'].astype(str).str.zfill(2)
+        time=time.merge(df[['hour']+metrics],on='hour',how='left').fillna(0)
+    fig=go.Figure()
+    for i,field in enumerate(metrics):
+        fig.add_trace(go.Scatter(x=time['hour']+'시',y=time[field],name=field,mode='lines+markers',
+                    marker=dict(color=BLUE if i%2==0 else TEAL)))
+    fig.update_layout(height=300,margin=dict(l=6,r=10,t=12,b=8),
+                      paper_bgcolor='white',plot_bgcolor='white',hovermode='x unified',
+                      legend=dict(orientation='h',y=1.1))
+    st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False},key=key)
+    if description:st.caption(description)
+    quality(raw)
+
+
+def customers(cfg,token,start,end,fields,meta=None):
+    heading('어떤 고객이 쇼핑라운지를 이용할까요?',
+            'KT멤버십 등록 정보와 GA4 추정 인구통계를 서로 다른 데이터로 표시합니다. 분류되지 않은 고객도 확인할 수 있어요.')
+    if meta is not None:
+        customer_field_mapping_ui(meta,fields)
+    selected=st.radio('고객 구분',['기기','성별','연령','멤버십 등급','로그인 유형','기기별 구매'],
+                      horizontal=True,label_visibility='collapsed',key='v8_customer_select')
+    if selected=='기기별 구매':
+        st.caption('쇼핑라운지 주문완료 화면에 기록된 구매 이벤트 기준 · 운영체제별 구매 거래/수익')
+        df,raw=safe_query(cfg,token,start,end,['operatingSystem'],['transactions',GROSS_REVENUE],
+                          order_filter(),limit=100,sort=GROSS_REVENUE)
+        if df is None or df.empty:return
+        df['operatingSystem']=df['operatingSystem'].replace({'iOS':'아이폰(iOS)','Android':'안드로이드(Android)'})
+        a,b=st.columns([1,1.3],gap='large')
+        with a:bar(df,'operatingSystem','transactions')
+        with b:table(df.rename(columns={'operatingSystem':'기기','transactions':'구매 거래 수',
+                                        GROSS_REVENUE:'구매 수익'}),f'ga4_기기별구매_{start}_{end}')
+        quality(raw);return
+    if selected=='기기':
+        source='기기(운영체제)'
+        dim='operatingSystem'
+    else:
+        options=['KT멤버십 회원 정보','GA4 추정 인구통계'] if selected in ('성별','연령') else ['KT멤버십 회원 정보']
+        source=st.radio('고객 정보 출처',options,horizontal=True,key=f'v8_source_{selected}')
+        if source=='GA4 추정 인구통계':
+            dim='userGender' if selected=='성별' else 'userAgeBracket'
+        else:
+            dim=fields.get({'성별':'gender','연령':'age','멤버십 등급':'grade','로그인 유형':'login'}[selected])
+    if not dim:
+        st.warning(f'{selected}에 해당하는 KT멤버십 고객 정보 필드를 GA4 메타데이터에서 찾지 못했어요. '
+                   '페이지 하단의 데이터 진단에서 실제 측정기준을 확인해 주세요.')
+        return
+    if selected in ('성별','연령') and source=='GA4 추정 인구통계':
+        st.info('Google에서 추정한 인구통계입니다. 미확인 고객과 개인정보 보호 제한으로 회원정보와 분포가 다를 수 있어요.')
+    scope=st.radio('집계 기준',['쇼핑라운지 화면 이용','KT멤버십 전체 속성'],horizontal=True,
+                   key='v8_customer_scope',help='화면 이용은 쇼핑라운지 screen_view 이벤트에 값이 기록된 경우를 집계합니다.')
+    cond=(f_and(f_eq('eventName','screen_view'),shop_filter())
+          if scope=='쇼핑라운지 화면 이용' else None)
+    df,raw=safe_query(cfg,token,start,end,[dim],['activeUsers'],cond,limit=200,sort='activeUsers')
+    if df is None or df.empty:return
+    df=df.rename(columns={dim:selected,'activeUsers':'활성 사용자 수'})
+    if selected=='성별':
+        vals=df[selected].astype(str).str.strip()
+        known=vals[~vals.isin(['','(not set)','unknown','(other)'])]
+        if not known.empty and known.str.fullmatch(r'\d{1,3}(?:대|세)?').mean()>.5:
+            st.error('성별 필드에서 연령 숫자가 반환되어 결과를 표시하지 않습니다. 필드 연결을 확인해 주세요.');return
+    if selected=='연령':
+        vals=df[selected].astype(str).str.casefold().str.strip()
+        known=vals[~vals.isin(['','(not set)','unknown','(other)'])]
+        if not known.empty and known.isin(['남','여','male','female','남성','여성']).mean()>.5:
+            st.error('연령 필드에서 성별이 반환되어 결과를 표시하지 않습니다.');return
+    df=privacy_aggregate(df,'활성 사용자 수')
+    left,right=st.columns([1,1.3],gap='large')
+    numeric=df[df['활성 사용자 수'].notna()].copy()
+    with left:
+        if numeric.empty: st.info('개인정보 보호 기준에 따라 표시 가능한 분류가 없어요.')
+        else:bar(numeric,selected,'활성 사용자 수',h=330)
+    with right:table(df,f'ga4_{selected}_{source}_{start}_{end}',height=315)
+    st.caption(f'측정기준: {dim} · 범위: {scope}. 10명 미만의 세분화 수치는 공개 대시보드에서 숨깁니다. '
+               '분류별 고유 사용자 수 합계는 기간 전체 고유 사용자 수와 다를 수 있습니다.')
     quality(raw)
 
 
@@ -1214,11 +1276,111 @@ def click_reports(cfg,token,start,end,fields):
     return df,raw,filt
 
 
+def hourly_dashboard(cfg,token,start,end,fields):
+    heading('시간대별 쇼핑라운지 방문 고객·세션·구매',
+            '같은 시간에 방문한 고객 수와 세션 수를 나란히 보고, 구매 건수·금액을 함께 비교해요.')
+    visit_filter=f_and(shop_filter(),f_eq('eventName','screen_view'))
+    left,right=st.columns(2)
+    with left:
+        metric=st.radio('방문 지표',['활성 사용자','세션 수'],horizontal=True,key='v8_hour_traffic')
+        visit_metric='activeUsers' if metric=='활성 사용자' else 'sessions'
+        df,raw=safe_query(cfg,token,start,end,['hour'],[visit_metric],visit_filter,limit=24)
+        if df is not None:
+            chart_24hours(df,visit_metric,metric,'v8_visit_hour')
+            quality(raw)
+    with right:
+        metric=st.radio('구매 지표',['구매 건수','구매 금액'],horizontal=True,key='v8_hour_purchase')
+        purchase_metric='transactions' if metric=='구매 건수' else GROSS_REVENUE
+        df,raw=safe_query(cfg,token,start,end,['hour'],[purchase_metric],order_filter(),limit=24)
+        if df is not None:
+            chart_24hours(df,purchase_metric,metric,'v8_purchase_hour')
+            quality(raw)
+    st.caption('방문은 쇼핑라운지 screen_view 이벤트, 구매는 주문완료 화면의 purchase 이벤트 기준입니다. '
+               '서로 다른 시간대의 고객 수는 중복될 수 있으므로 24시간 합계를 전체 고유 고객 수로 해석하면 안 됩니다.')
+    with st.expander('고객 수와 세션 수를 한 그래프에서 비교',expanded=False):
+        visit,_=safe_query(cfg,token,start,end,['hour'],['activeUsers','sessions'],visit_filter,
+                           limit=24,show_error=False)
+        if visit is not None:
+            fig=go.Figure()
+            if not visit.empty:
+                visit['hour']=visit['hour'].astype(str).str.zfill(2)
+                visit=visit.sort_values('hour')
+                for m,label,color in [('activeUsers','고객 수',BLUE),('sessions','세션 수',TEAL)]:
+                    fig.add_trace(go.Scatter(x=visit['hour']+'시',y=visit[m],name=label,
+                                             mode='lines+markers',line=dict(color=color)))
+                fig.update_layout(height=290,hovermode='x unified',margin=dict(l=8,r=8,t=18,b=8))
+                st.plotly_chart(fig,use_container_width=True,key='v8_hour_double')
+            else:st.info('선택 기간 데이터가 없습니다.')
+    with st.expander('요일 × 시간대별 방문 패턴',expanded=False):
+        kind=st.radio('요일별 지표',['방문 고객 수','방문 세션 수'],horizontal=True,key='v8_weekhour_metric')
+        chosen='activeUsers' if kind=='방문 고객 수' else 'sessions'
+        w,wr=safe_query(cfg,token,start,end,['dayOfWeek','hour'],[chosen],visit_filter,
+                        limit=300,show_error=False)
+        if w is None:
+            st.warning('요일×시간대 조합을 현재 GA4 API에서 조회하지 못했습니다.')
+        elif w.empty:
+            st.info('요일×시간대 기록이 없습니다.')
+        else:
+            w['d']=pd.to_numeric(w['dayOfWeek'],errors='coerce')
+            w['h']=pd.to_numeric(w['hour'],errors='coerce')
+            matrix=[[w.loc[(w['d']==day)&(w['h']==hh),chosen].sum() for hh in range(24)]
+                    for day in [1,2,3,4,5,6,0]]
+            fig=go.Figure(go.Heatmap(z=matrix,x=[f'{h:02d}시' for h in range(24)],
+                y=['월','화','수','목','금','토','일'],colorscale='Blues'))
+            fig.update_layout(height=315,margin=dict(l=5,r=5,t=8,b=7),
+                              yaxis=dict(autorange='reversed'))
+            st.plotly_chart(fig,use_container_width=True,key='v8_weekday_heatmap')
+            st.caption('요일·시간 단위 집계값입니다. 여러 요일/시간의 고유 고객 수를 합쳐 '
+                       '전체 방문 고객 수로 해석하면 안 됩니다.')
+            quality(wr)
+    with st.expander('특정 날짜의 시간대별 실적 보기',expanded=False):
+        day=st.date_input('분석할 날짜',value=end,min_value=start,max_value=end,key='v8_hour_day')
+        a,b=st.columns(2)
+        with a:
+            d,_=safe_query(cfg,token,day,day,['hour'],['activeUsers','sessions'],visit_filter,limit=24)
+            if d is not None and not d.empty:
+                chart_24hours(d,'activeUsers','방문 고객 수','v8_hour_day_visit')
+        with b:
+            d,_=safe_query(cfg,token,day,day,['hour'],['transactions',GROSS_REVENUE],order_filter(),limit=24)
+            if d is not None and not d.empty:
+                chart_24hours(d,'transactions','구매 건수','v8_hour_day_purchase')
+    with st.expander('KT멤버십 앱 쇼핑 관련 클릭의 시간대',expanded=False):
+        label=fields.get('evt_label')
+        if not label:st.warning('이벤트_라벨 필드가 없어 클릭 시간대를 조회할 수 없습니다.')
+        else:
+            filt=f_and(f_eq('eventName','click_event'),
+                       f_eq('sessionDefaultChannelGroup','Direct'),
+                       f_regex(label,r'.*(쇼핑|shopping).*'))
+            d,raw=safe_query(cfg,token,start,end,['hour'],['eventCount'],filt,limit=24)
+            if d is not None:chart_24hours(d,'eventCount','쇼핑 관련 클릭 수','v8_hour_click')
+            st.info('이 그래프는 KT멤버십 앱의 쇼핑 관련 클릭 시각이지 쇼핑라운지 진입 완료 시각이 아닙니다. '
+                    '온사이트 메인배너·팝업·GNB 클릭 분석은 요청대로 제외했습니다.')
+
+
+def chart_24hours(df,metric,title,key):
+    full=pd.DataFrame({'hour':[f'{x:02d}' for x in range(24)]})
+    if df is not None and not df.empty:
+        sample=df.copy()
+        sample['hour']=sample['hour'].astype(str).str.zfill(2)
+        full=full.merge(sample[['hour',metric]],on='hour',how='left')
+        full[metric]=full[metric].fillna(0)
+    else:full[metric]=0
+    fig=go.Figure(go.Bar(x=full['hour']+'시',y=full[metric],marker_color=TEAL,
+                          hovertemplate='%{x}: %{y:,.0f}<extra></extra>'))
+    fig.update_layout(height=260,margin=dict(l=6,r=8,t=10,b=10),
+                      title=dict(text=title,font=dict(size=13)),
+                      plot_bgcolor='white',paper_bgcolor='white')
+    st.plotly_chart(fig,use_container_width=True,key=key)
+
+
 def channels(cfg,token,start,end,fields):
     heading('고객은 어디에서 들어오고 무엇을 클릭할까요?',
             'KT멤버십 앱 내 쇼핑 관련 클릭 경로와 GA4 세션 유입 채널을 구분해 보여드려요.')
-    mode=st.radio('유입 보고서',['KT멤버십 앱 내 쇼핑 클릭 순위','세션 유입 채널'],
-                  horizontal=True,label_visibility='collapsed',key='v6_acquisition')
+    mode=st.radio('유입 보고서',['시간대별 방문·구매','KT멤버십 앱 쇼핑 관련 클릭','세션 유입 채널'],
+                  horizontal=True,label_visibility='collapsed',key='v8_acquisition')
+    if mode=='시간대별 방문·구매':
+        hourly_dashboard(cfg,token,start,end,fields)
+        return
     if mode=='세션 유입 채널':
         df,raw=safe_query(cfg,token,start,end,['sessionDefaultChannelGroup','sessionSourceMedium'],
                           ['screenPageViews','activeUsers'],shop_filter(),limit=1000,sort='screenPageViews')
@@ -1324,7 +1486,26 @@ def promotion_id(title):
     return found.group(1) if found else ""
 
 
-def promotions(cfg,token,start,end):
+def promo_purchase_if_tagged(cfg,token,start,end,promo_id_value,meta):
+    """Only count purchases explicitly tagged with this promotion ID."""
+    if not promo_id_value or meta is None:return None
+    candidates=['promotionId']
+    candidates += [d['apiName'] for d in custom_dimensions(meta)
+                   if any(v in canonical(d.get('uiName','')+' '+d.get('apiName',''))
+                          for v in ('기획전코드','기획전id','promotionid','exhibitionid'))]
+    for field in dict.fromkeys(candidates):
+        if not available_meta(meta,field):continue
+        df,raw=safe_query(cfg,token,start,end,[],['transactions',GROSS_REVENUE],
+                          f_and(order_filter(),f_eq(field,promo_id_value)),show_error=False)
+        if df is None or df.empty:continue
+        transaction=one(df,'transactions')
+        revenue=one(df,GROSS_REVENUE)
+        if transaction is not None and transaction>0:
+            return transaction,revenue,field
+    return None
+
+
+def promotions(cfg,token,start,end,fields=None,meta=None):
     heading('어떤 기획전이 가장 많은 관심을 받았을까요?',
             '기획전별 조회수와 이용 고객 수를 각각 비교할 수 있어요. 실제 구매 귀속 매출은 별도 태깅이 필요합니다.')
     df,raw=page_data(cfg,token,start,end)
@@ -1383,6 +1564,46 @@ def promotions(cfg,token,start,end):
             date_hour_detail(cfg,token,start,end,'screenPageViews',
                              f_eq('unifiedScreenName',choice),
                              'promo_'+hashlib.md5(choice.encode()).hexdigest()[:9])
+    st.markdown('#### 선택 기획전 종합 분석')
+    choices=p['unifiedScreenName'].astype(str).head(200).tolist()
+    if choices:
+        selected=st.selectbox('기획전 선택',choices,format_func=lambda name:
+            '기획전 '+(promotion_id(name) or '코드 미확인')+' · '+name[-38:],key='v8_promo_choice')
+        promo_cond=f_and(f_eq('eventName','screen_view'),f_eq('unifiedScreenName',selected))
+        promo_id_value=promotion_id(selected)
+        st.caption('방문은 선택한 기획전 화면의 screen_view 이벤트 기준입니다.')
+        a,b=st.columns(2)
+        with a:
+            d,_=safe_query(cfg,token,start,end,[],['activeUsers','screenPageViews'],
+                            promo_cond,show_error=False)
+            count=one(d,'activeUsers')
+            st.metric('기획전 방문 활성 사용자',f'{count:,.0f}명' if count is not None and count>=10 else ('비공개(10명 미만)' if count is not None else '조회 불가'))
+        with b:
+            d,_=safe_query(cfg,token,start,end,[],['screenPageViews'],promo_cond,show_error=False)
+            count=one(d,'screenPageViews')
+            st.metric('기획전 화면 조회수',f'{count:,.0f}회' if count is not None else '조회 불가')
+        with st.expander('기획전 방문 고객의 성별·연령',expanded=False):
+            if meta is not None and fields is not None:
+                demographic_breakdown(cfg,token,start,end,meta,fields,promo_cond,
+                                       f'promotion_{promo_id_value}')
+            else:st.info('고객 필드 정보를 불러오지 못했어요.')
+        with st.expander('기획전 시간대별 유입',expanded=False):
+            d,_=safe_query(cfg,token,start,end,['hour'],['activeUsers'],promo_cond,limit=24)
+            if d is not None:chart_24hours(d,'activeUsers','시간대별 기획전 방문 고객',
+                                          f'v8_promo_hour_{promo_id_value}')
+        with st.expander('기획전 연결 구매 건수·수익 (수집 여부 확인)',expanded=False):
+            st.caption('기획전 방문 이후 모든 주문을 자동으로 해당 기획전 매출로 간주하지 않습니다. '
+                       '구매 이벤트 자체에 기획전 식별값이 있는 경우에만 표시합니다.')
+            result=promo_purchase_if_tagged(cfg,token,start,end,promo_id_value,meta)
+            if result is None:
+                st.info('선택 기획전 ID와 구매를 연결하는 기록을 찾지 못했어요. '
+                        '기획전별 구매 금액은 현재 확인 불가이며 전체 구매 금액으로 대체하지 않습니다.')
+            else:
+                tx,rev,field=result
+                c1,c2=st.columns(2)
+                with c1:st.metric('해당 ID가 기록된 구매 거래',f'{tx:,.0f}건')
+                with c2:st.metric('해당 ID가 기록된 구매 수익',krw(rev))
+                st.caption('연결 기준: '+field+' · 기록된 주문만 포함하며 기획전의 최종 기여 매출과 다를 수 있습니다.')
     quality(raw)
 
 
@@ -1395,52 +1616,183 @@ def shop_item_ids(cfg,token,start,end):
     return set(codes.astype(str)),raw
 
 
-def products(cfg,token,start,end):
-    heading('어떤 상품과 브랜드의 반응이 좋을까요?',
-            '쇼핑라운지 상품 상세 화면에서 발견된 상품 ID로 전체 속성 상품 이벤트를 찾아 비교합니다.')
-    category=st.radio('상품 분석',['쇼핑라운지 상품 ID 매칭','브랜드 전체 참고'],horizontal=True,
-                      label_visibility='collapsed',key='v6_product_category')
-    is_item=category=='쇼핑라운지 상품 ID 매칭'
-    codes,_=shop_item_ids(cfg,token,start,end)
-    if is_item and not codes:
-        st.warning('해당 기간 쇼핑라운지 상품 상세 화면에 기록된 상품 ID가 없어 연결할 수 없어요.')
+def fetch_items_all(cfg,token,start,end,max_rows=30000):
+    dims=['itemId','itemName']
+    measures=['itemsViewed','itemsPurchased','itemRevenue']
+    chunks=[]
+    offset=0
+    count=None
+    try:
+        while offset<max_rows:
+            batch=report(cfg,token,start,end,dims,measures,limit=5000,
+                         sort='itemsViewed',offset=offset)
+            df=frame(batch)
+            if df.empty:break
+            chunks.append(df)
+            count=int(batch.get('rowCount',offset+len(df)))
+            offset+=len(df)
+            if count<=offset:break
+        if not chunks:return pd.DataFrame(columns=dims+measures),False
+        result=pd.concat(chunks,ignore_index=True)
+        return result,(count is not None and count>offset)
+    except GAError as exc:
+        st.warning('상품 원본 목록 조회 실패: '+str(exc))
+        return None,False
+
+
+def merged_product_catalog(cfg,token,start,end):
+    screens,raw=page_data(cfg,token,start,end)
+    if screens is None:return None,False
+    detail=screens[screens['페이지 유형']=='상품 상세'].copy()
+    detail['상품 ID']=detail['unifiedScreenName'].astype(str).str.extract(r'>상품상세>(\d{6,})',expand=False)
+    detail=detail.dropna(subset=['상품 ID'])
+    summary=detail.groupby('상품 ID',as_index=False).agg({'screenPageViews':'sum',
+                                                        'activeUsers':'sum'})
+    # Same item may be split into multiple screen names; total activeUsers
+    # by screen is not deduplicated across multiple screen-title variants.
+    summary=summary.rename(columns={'screenPageViews':'상세 화면 조회수',
+                                    'activeUsers':'상세 화면별 고객 수 합계(중복 가능)'})
+    items,truncated=fetch_items_all(cfg,token,start,end)
+    if items is None:return None,truncated
+    items=items[~items['itemId'].astype(str).map(empty_label)].copy()
+    # An item name can change. Choose the top-viewed name per ID and aggregate metrics.
+    items=items.sort_values('itemsViewed',ascending=False)
+    name=items.drop_duplicates('itemId')[['itemId','itemName']]
+    amounts=items.groupby('itemId',as_index=False)[['itemsViewed','itemsPurchased','itemRevenue']].sum()
+    items=name.merge(amounts,on='itemId',how='left').rename(columns={'itemId':'상품 ID','itemName':'상품명',
+               'itemsViewed':'전체 속성 상품 조회 수량',
+               'itemsPurchased':'전체 속성 구매 수량',
+               'itemRevenue':'전체 속성 상품 수익'})
+    result=summary.merge(items,on='상품 ID',how='outer',indicator=True)
+    result['상품명']=result['상품명'].fillna('(상품명 미수집)')
+    result['식별 출처']=result['_merge'].map({'both':'상세 화면+상품 이벤트',
+                                          'left_only':'쇼핑라운지 상세 화면',
+                                          'right_only':'전체 속성 상품 이벤트'})
+    result=result.drop(columns='_merge').sort_values(
+        ['상세 화면 조회수','전체 속성 상품 조회 수량'],ascending=False,na_position='last')
+    return result.reset_index(drop=True),truncated
+
+
+def products(cfg,token,start,end,fields=None,meta=None):
+    heading('상품 상세 방문자와 구매자는 어떻게 다를까요?',
+            '전체 상품 요약과 상품별 고객 성별·연령을 제공합니다. 미수집 상품은 목록에 나타나지 않을 수 있습니다.')
+    st.info('상품 등록 DB가 연결되지 않았으므로 **GA4에서 식별 가능한 상품**만 표시합니다. '
+            '조회·구매가 모두 0건인 미관측 등록 상품은 확인할 수 없습니다.')
+    df,truncated=merged_product_catalog(cfg,token,start,end)
+    if df is None or df.empty:
+        st.info('선택 기간에 확인할 수 있는 상품이 없습니다.');return
+    a,b,c=st.columns(3)
+    with a:st.metric('GA4 식별 상품',f'{len(df):,}개')
+    with b:st.metric('쇼핑라운지 상세 화면 식별 상품',f'{df["상세 화면 조회수"].notna().sum():,}개')
+    with c:st.metric('전체 속성 구매 수량 기록 상품',f'{(df["전체 속성 구매 수량"].fillna(0)>0).sum():,}개')
+    if truncated:st.warning('상품 이벤트 결과가 많아 상위 30,000행까지만 조회했습니다. 일부 상품이 빠질 수 있어요.')
+    view=st.radio('상품 목록',['쇼핑라운지 상세 화면 식별','GA4 식별 상품 전체'],
+                  horizontal=True,key='v8_item_scope')
+    filtered=df.copy()
+    if view=='쇼핑라운지 상세 화면 식별':
+        filtered=filtered[filtered['상세 화면 조회수'].notna()].copy()
+    text_query=st.text_input('상품명 또는 상품 ID로 검색',placeholder='상품명 / 상품코드',key='v8_item_search')
+    if text_query:
+        filtered=filtered[(filtered['상품명'].astype(str).str.contains(re.escape(text_query),case=False,na=False)) |
+                          (filtered['상품 ID'].astype(str).str.contains(re.escape(text_query),case=False,na=False))]
+    col1,col2=st.columns([.95,1.5],gap='large')
+    with col1:
+        rank_col=st.selectbox('순위 기준',['상세 화면 조회수','전체 속성 상품 조회 수량',
+                                    '전체 속성 구매 수량','전체 속성 상품 수익'],key='v8_item_rank')
+        ranked=filtered.dropna(subset=[rank_col]).sort_values(rank_col,ascending=False)
+        if not ranked.empty:
+            top=ranked.head(10).copy()
+            top['상품 표시']=top.apply(lambda x:(str(x['상품명'])[:18] if str(x['상품명'])!='(상품명 미수집)'
+                                           else str(x['상품 ID'])),axis=1)
+            bar(top,'상품 표시',rank_col,h=365,n=10)
+    with col2:
+        cols=['상품 ID','상품명','식별 출처','상세 화면 조회수',
+              '전체 속성 상품 조회 수량','전체 속성 구매 수량','전체 속성 상품 수익']
+        table(filtered[cols].head(400),f'ga4_상품_요약_{start}_{end}',height=350)
+    st.caption('상세 화면 조회수는 쇼핑라운지 화면 기준입니다. 나머지 상품 수량·수익은 KT멤버십 '
+               '전체 속성 상품 이벤트 기준으로, 쇼핑라운지 단독 판매 실적이 아닙니다. '
+               '화면별 고객 수 합계는 동일 고객 중복 가능성이 있어 통합 고객 수로 쓰지 않았습니다.')
+    with st.expander('전체 상품 · 상세 방문 고객과 구매 고객 성별/연령 비교',expanded=False):
+        if meta is None or fields is None:
+            st.warning('현재 GA4 고객 필드 정보가 없어 분석할 수 없습니다.')
+        else:
+            visitor_scope=st.radio('전체 상품 상세 조회 기준',
+                ['쇼핑라운지 화면 기록','KT멤버십 전체 속성'],
+                horizontal=True,key='v8_allproduct_visitor_scope')
+            all_view=f_eq('eventName','view_item')
+            if visitor_scope=='쇼핑라운지 화면 기록':
+                all_view=f_and(all_view,shop_filter())
+            st.caption('상세 방문 고객: '+visitor_scope+'의 view_item 이벤트. '
+                       '구매 고객: 쇼핑라운지 주문완료 화면 purchase 이벤트.')
+            t1,t2=st.tabs(['전체 상품 상세 방문 고객','전체 상품 구매 고객'])
+            with t1:
+                demographic_breakdown(cfg,token,start,end,meta,fields,all_view,'all_product_view')
+            with t2:
+                demographic_breakdown(cfg,token,start,end,meta,fields,order_filter(),'all_product_buy')
+            st.caption('두 집계는 이벤트 범위가 다르고 구매 이벤트에 itemId가 없을 수도 있습니다. '
+                       '동일한 분모의 상품 전환율로 바로 나누지 않습니다.')
+    if filtered.empty:return
+    options=filtered['상품 ID'].astype(str).tolist()
+    selection=st.selectbox('개별 상품 선택',options,
+        format_func=lambda ident: f"{str(filtered.loc[filtered['상품 ID'].astype(str)==ident,'상품명'].iloc[0])[:65]} · {ident}",
+        key='v8_product_choice')
+    if not selection:return
+    st.markdown('#### 선택 상품 상세 분석')
+    id_cond=f_eq('itemId',selection)
+    view_cond=f_and(id_cond,f_eq('eventName','view_item'))
+    purchase_cond=f_and(id_cond,order_filter())
+    st.caption('**상품 ID별 이벤트 조회** · 상세 방문(view_item)과 주문완료 화면 구매(purchase)를 '
+               '서로 다른 조건으로 조회합니다.')
+    t1,t2=st.columns(2)
+    with t1:
+        view_df,view_raw=safe_query(cfg,token,start,end,[],['activeUsers','eventCount'],
+                                    view_cond,show_error=False)
+        count=one(view_df,'activeUsers')
+        st.metric('상품 상세 방문 활성 사용자 (전체 속성 view_item)',
+                  f'{count:,.0f}명' if count is not None and count>=10 else ('비공개(10명 미만)' if count is not None else '조회 불가'))
+    with t2:
+        purchase_df,purchase_raw=safe_query(cfg,token,start,end,[],['activeUsers','transactions'],
+                                            purchase_cond,show_error=False)
+        purchase_count=one(purchase_df,'activeUsers')
+        st.metric('해당 상품의 주문완료 화면 구매 활성 사용자',
+                  f'{purchase_count:,.0f}명' if purchase_count is not None and purchase_count>=10 else ('비공개(10명 미만)' if purchase_count is not None else '조회 불가'))
+    st.caption('상품 view_item 이벤트 자체에는 쇼핑라운지 진입 경로가 반드시 기록되는 것은 아닙니다. '
+               '구매 고객 수는 itemId + 쇼핑라운지 주문완료 화면 필터가 호환될 때만 표시됩니다.')
+    if meta is None or fields is None:
+        st.warning('고객 성별·연령 분석에 필요한 필드 정보가 없습니다.');return
+    source=st.radio('고객 비교 기준',['KT멤버십 회원 정보','GA4 추정 인구통계'],
+                    horizontal=True,key='v8_product_customer_source')
+    kind=st.radio('고객 특성',['성별','연령'],horizontal=True,key='v8_product_customer_kind')
+    dim=(fields.get('gender' if kind=='성별' else 'age') if source=='KT멤버십 회원 정보'
+         else 'userGender' if kind=='성별' else 'userAgeBracket')
+    if not dim or not available_meta(meta,dim):
+        st.warning(f'{source} {kind} 필드가 GA4 메타데이터에 없습니다. 값은 다른 항목으로 대체하지 않아요.')
         return
-    dimensions=['itemId','itemName','itemBrand'] if is_item else ['itemBrand']
-    measures=['itemsViewed','itemsCheckedOut','itemsPurchased','itemRevenue']
-    df,raw=safe_query(cfg,token,start,end,dimensions,measures,
-                      limit=15000,sort='itemRevenue')
-    if df is None or df.empty:return
-    if is_item:
-        df=df[df['itemId'].astype(str).isin(codes)].copy()
-        st.caption(f'쇼핑라운지 화면에서 관찰된 상품 ID {len(codes):,}개와 매칭한 결과입니다.')
-        if df.empty:
-            st.warning('조회된 상품 항목에서 ID가 일치하는 상품이 없어요. 실제 매출 0원을 뜻하지 않습니다.')
-            return
-        find=st.text_input('상품명·상품 ID 검색',placeholder='예: 비타500 / 132237997',key='v6_product_search')
-        if find:
-            mask=df['itemName'].astype(str).str.contains(re.escape(find),case=False,na=False)|\
-                 df['itemId'].astype(str).str.contains(re.escape(find),case=False,na=False)
-            df=df[mask].copy()
-    label=st.selectbox('순위를 비교할 항목',['많이 조회한 상품','많이 구매한 상품','상품 수익 높은 순'],key='v6_product_sort')
-    ranking={'많이 조회한 상품':'itemsViewed','많이 구매한 상품':'itemsPurchased',
-             '상품 수익 높은 순':'itemRevenue'}[label]
-    df=df.sort_values(ranking,ascending=False).reset_index(drop=True)
-    if df.empty:st.info('조건에 맞는 상품이 없어요.');return
-    show=df.rename(columns={'itemId':'상품 ID','itemName':'상품명','itemBrand':'브랜드',
-        'itemsViewed':'조회 수량','itemsCheckedOut':'결제 진행 수량',
-        'itemsPurchased':'구매 수량','itemRevenue':'상품 수익'})
-    if is_item and 'itemsViewed' in df:
-        # Important: quantity ratio is NOT GA4 purchase conversion rate.
-        show['참고: 조회 수량 대비 구매 수량 (%)']=df.apply(lambda r:
-            round(r['itemsPurchased']/r['itemsViewed']*100,1) if r['itemsViewed']>0 else None,axis=1)
-    a,b=st.columns([1,1.35],gap='large')
-    with a:bar(df,'itemName' if is_item else 'itemBrand',ranking,h=350,n=10)
-    with b:table(show.head(300),f'ga4_상품_{label}_{start}_{end}',height=340)
-    st.info('**주의:** 상품 수익·구매 수량은 동일 상품 ID의 KT멤버십 **전체 속성**에서 기록된 값이에요. 쇼핑라운지 단독 기여 매출로 볼 수 없어요. 조회 수량 대비 구매 수량은 단순 비율이지 고객 구매 전환율이 아닙니다.')
-    if raw and raw.get('rowCount',0)>len(raw.get('rows',[])):
-        st.caption('상품 결과 일부만 불러왔습니다. 상위 목록에 포함되지 않은 상품이 있을 수 있어요.')
-    quality(raw)
-    if is_item:product_detail(cfg,token,start,end,df)
+    p1,p2=st.columns(2,gap='large')
+    for pane,title,cond in [(p1,'상품 상세 방문 고객',view_cond),(p2,'주문완료 구매 고객',purchase_cond)]:
+        with pane:
+            st.markdown(f'**{title} · {source} {kind}**')
+            result,raw=safe_query(cfg,token,start,end,[dim],['activeUsers'],cond,
+                                  limit=100,show_error=False)
+            if result is None:
+                st.warning('이벤트와 고객 측정기준을 함께 조회할 수 없어요. (GA4 API 호환성 확인 필요)')
+                continue
+            if result.empty:
+                st.info('해당 상품/고객 정보가 집계되지 않았어요. 0명으로 단정하지 않습니다.')
+                continue
+            result=result.rename(columns={dim:kind,'activeUsers':'이용 고객 수'})
+            if kind=='성별':
+                valid=result[kind].astype(str).str.strip()
+                known=valid[~valid.isin(['','(not set)','unknown','(other)'])]
+                if not known.empty and known.str.fullmatch(r'\d{1,3}(?:대|세)?').mean()>.5:
+                    st.error('연령 값이 성별로 연결되어 결과를 숨겼습니다.');continue
+            result=privacy_aggregate(result,'이용 고객 수')
+            public=result.dropna(subset=['이용 고객 수'])
+            if not public.empty:bar(public,kind,'이용 고객 수',h=260,n=10)
+            table(result,f'ga4_상품_{selection}_{title}_{source}_{kind}_{start}_{end}',height=235)
+            quality(raw)
+    st.caption('공개 화면의 작은 고객 집단(10명 미만)은 비공개 처리합니다. GA4 추정 인구통계는 '
+               '정보가 없는 사용자가 많거나 임계값이 적용될 수 있습니다.')
 
 
 def product_detail(cfg,token,start,end,df):
@@ -1679,14 +2031,16 @@ def main():
     pages=[overview,customers,channels,pages_view, promotions, products,purchase_actions]
     handler=pages[MENUS.index(selected)]
     with st.spinner("GA4에서 필요한 데이터만 조회하는 중..."):
-        if handler==customers:
+        if handler in [customers,overview]:
             handler(cfg,token,start,end,fields,meta=meta)
-        elif handler in [pages_view,promotions,products]:
+        elif handler==pages_view:
             handler(cfg,token,start,end)
+        elif handler in [promotions,products]:
+            handler(cfg,token,start,end,fields,meta)
         else:
             handler(cfg,token,start,end,fields)
     diagnostic(cfg,token,meta,fields,start,end)
-    st.caption("Google Analytics Data API · 읽기 전용 · 지표별 집계 조건은 각 화면의 안내를 확인하세요. 데이터 처리 시점에 따라 GA4 탐색 결과와 차이가 날 수 있습니다.")
+    st.caption("공개 대시보드 · GA4 집계 데이터만 제공 · 작은 고객 집단 비공개 · 지표별 집계 조건을 확인하세요. 데이터 처리 시점에 따라 GA4 탐색 결과와 차이가 날 수 있습니다.")
 
 # alias avoids shadowing `pages` local while keeping readable handler map
 pages_view=pages
