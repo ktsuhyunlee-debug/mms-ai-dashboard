@@ -7,3 +7,4 @@ requests
 xlsxwriter
 requests-oauthlib
 itsdangerous
+google-auth>=2.29,<3
